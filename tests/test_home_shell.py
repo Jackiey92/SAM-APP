@@ -35,7 +35,17 @@ def shell_web(request, monkeypatch, tmp_path):
     spec = importlib.util.spec_from_file_location("acc_shell_web", ROOT / "webapp/app.py")
     web = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, web)
-    spec.loader.exec_module(web)
+    from app import providers
+    real_memory_provider = providers.memory_provider
+    # Import-time stand-in: importing the Flask app must not load the local
+    # vector model. Tests that exercise memory inject LocalMemoryProvider
+    # into app.extensions explicitly.
+    providers.memory_provider = providers.LazyMemoryProvider
+    try:
+        spec.loader.exec_module(web)
+    finally:
+        providers.memory_provider = real_memory_provider
+    web.memory_provider = real_memory_provider
     web.app.config.update(TESTING=True)
     yield web
     if web._PARSE_MANAGER:

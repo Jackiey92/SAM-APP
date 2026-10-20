@@ -30,7 +30,17 @@ def _webapp_module():
     webapp_dir = Path(__file__).resolve().parents[1] / "webapp"
     sys.path.insert(0, str(webapp_dir))
     try:
-        import webapp.app as webapp
+        from app import providers
+        real_memory_provider = providers.memory_provider
+        # Import-time stand-in: importing the Flask app must not load the local
+        # vector model. Tests that exercise memory inject LocalMemoryProvider
+        # into app.extensions explicitly.
+        providers.memory_provider = providers.LazyMemoryProvider
+        try:
+            import webapp.app as webapp
+        finally:
+            providers.memory_provider = real_memory_provider
+        webapp.memory_provider = real_memory_provider
     finally:
         sys.path.remove(str(webapp_dir))
     return webapp
