@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://startup-ai-manager.local/schemas/l2-manifest.schema.json",
+  "title": "SAM L2 document extraction manifest",
+  "type": "object",
+  "required": ["source_id", "filename", "format", "size_bytes", "uploaded_at", "file_hash", "pages", "images", "parse_summary"],
+  "additionalProperties": false,
+  "properties": {
+    "document": {"type": "object", "required": ["version", "markdown", "document_map", "assets", "hyperlinks", "self_check"], "additionalProperties": false, "properties": {"version": {"const": 1}, "markdown": {"type": "string"}, "document_map": {"type": "object"}, "assets": {"type": "array", "items": {"type": "object"}}, "hyperlinks": {"type": "array", "items": {"type": "object"}}, "self_check": {"type": "object"}}},
+    "engine_document": {"type": "object"},
+    "source_id": {"type": "string", "minLength": 1},
+    "filename": {"type": "string", "minLength": 1},
+    "format": {"type": "string", "enum": ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "image", "unknown"]},
+    "mime_type": {"type": ["string", "null"]},
+    "size_bytes": {"type": "integer", "minimum": 0},
+    "uploaded_at": {"type": "string", "format": "date-time"},
+    "file_hash": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+    "pages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["page_no", "text_items", "tables"],
+        "additionalProperties": false,
+        "properties": {
+          "page_no": {"type": ["integer", "null"], "minimum": 1},
+          "bbox": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+          "text_items": {"type": "array", "items": {"$ref": "#/$defs/textItem"}},
+          "tables": {"type": "array", "items": {"$ref": "#/$defs/table"}}
+        }
+      }
+    },
+    "images": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/image"}
+    },
+    "parse_summary": {
+      "type": "object",
+      "required": ["status", "engine", "text_item_count", "table_count", "table_row_count", "warnings", "raw_bytes_external", "full_text_external"],
+      "additionalProperties": false,
+      "properties": {
+        "quality_status": {"type": "string"},
+        "status": {"type": "string"},
+        "engine": {"type": "string"},
+        "tier": {"type": ["string", "null"]},
+        "text_item_count": {"type": "integer", "minimum": 0},
+        "table_count": {"type": "integer", "minimum": 0},
+        "table_row_count": {"type": "integer", "minimum": 0},
+        "elapsed_ms": {"type": ["integer", "null"], "minimum": 0},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "user_message": {"type": ["string", "null"]},
+        "raw_bytes_external": {"type": "boolean", "const": false},
+        "full_text_external": {"type": "boolean", "const": false}
+      }
+    }
+  },
+  "$defs": {
+    "sourceLoc": {
+      "type": "object",
+      "required": ["file_hash", "locator"],
+      "additionalProperties": false,
+      "properties": {
+        "file_hash": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+        "page_no": {"type": ["integer", "null"], "minimum": 1},
+        "sheet": {"type": ["string", "null"]},
+        "cell_range": {"type": ["string", "null"]},
+        "paragraph": {"type": ["integer", "null"], "minimum": 0},
+        "slide_no": {"type": ["integer", "null"], "minimum": 1},
+        "shape": {"type": ["integer", "null"], "minimum": 0},
+        "bbox": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+        "order": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+        "locator": {"type": "string", "minLength": 1}
+      }
+    },
+    "textItem": {
+      "type": "object",
+      "required": ["text", "source_loc"],
+      "additionalProperties": false,
+      "properties": {
+        "text": {"type": "string"},
+        "source_loc": {"$ref": "#/$defs/sourceLoc"}
+      }
+    },
+    "table": {
+      "type": "object",
+      "required": ["rows", "source_loc"],
+      "additionalProperties": false,
+      "properties": {
+        "headers": {"type": "array", "items": {"type": "string"}},
+        "row_source_locs": {"type": "array", "items": {"$ref": "#/$defs/sourceLoc"}},
+        "rows": {"type": "array", "items": {"type": "array", "items": {"type": ["string", "number", "boolean", "null"]}}},
+        "source_loc": {"$ref": "#/$defs/sourceLoc"}
+      }
+    },
+    "image": {
+      "type": "object",
+      "required": ["image_id", "filename", "mime", "page_no", "bbox", "image_hash", "local_path", "source_loc"],
+      "additionalProperties": false,
+      "properties": {
+        "image_id": {"type": "string", "minLength": 1},
+        "filename": {"type": "string", "minLength": 1},
+        "mime": {"type": "string", "minLength": 1},
+        "page_no": {"type": ["integer", "null"], "minimum": 1},
+        "bbox": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+        "image_hash": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+        "local_path": {"type": "string", "minLength": 1},
+        "caption": {"type": ["string", "null"]},
+        "source_loc": {"$ref": "#/$defs/sourceLoc"}
+      }
+    }
+  }
+}

@@ -1,0 +1,1 @@
+[{"code": "info", "name": "01-企业基本信息", "sort_order": 1, "hidden": false}, {"code": "bizov", "name": "02-业务概览", "sort_order": 2, "hidden": false}, {"code": "hr", "name": "03-人员管理", "sort_order": 3, "hidden": false}, {"code": "mkt", "name": "07-市场", "sort_order": 7, "hidden": false}, {"code": "legal", "name": "10-法务合规", "sort_order": 10, "hidden": false}]

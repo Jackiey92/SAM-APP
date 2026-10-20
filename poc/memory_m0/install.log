@@ -1,0 +1,5 @@
+Collecting sqlite-vec==0.1.9 (from -r poc/memory_m0/requirements-m0.txt (line 1))
+  Downloading sqlite_vec-0.1.9-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux1_x86_64.whl.metadata (198 bytes)
+Downloading sqlite_vec-0.1.9-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux1_x86_64.whl (163 kB)
+Installing collected packages: sqlite-vec
+Successfully installed sqlite-vec-0.1.9

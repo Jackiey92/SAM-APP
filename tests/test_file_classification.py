@@ -1,0 +1,327 @@
+from __future__ import annotations
+
+from pathlib import Path
+import sqlite3
+import sys
+
+import pytest
+
+from app.classifier import ClassificationService, classify_content
+from app.db.database import init_db
+from app.storage import ArchiveFileStore
+from app.classifier.semantic_folders import classify as classify_folder
+
+
+class _ClassificationEmployee:
+    def classify_document(self, *, text: str, **_):
+        rules = (
+            ("fin", ("利润", "收入", "资产", "现金流")),
+            ("sales", ("客户", "订单", "发货")),
+            ("hr", ("员工", "岗位", "工资", "薪酬")),
+            ("sales", ("渠道", "投放", "广告", "转化率")),
+        )
+        module, terms = max(rules, key=lambda item: sum(token in text for token in item[1]))
+        count = sum(token in text for token in terms)
+        return {"module": module if count >= 2 else None, "confidence": 0.8 if count >= 2 else 0.0}
+
+
+def test_classification_paths_fail_closed_without_an_employee():
+    result = classify_content(_manifest("营业收入 净利润" ))
+    assert result.module is None
+    assert result.needs_review is True
+    assert classify_folder(text="营业收入 净利润") == "unclassified"
+
+
+def test_unified_dictionary_has_ten_modules_and_orthogonal_doc_types(tmp_path: Path) -> None:
+    from app.memory.taxonomy import MODULES
+    db_path = tmp_path / "dictionary.db"
+    init_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT code,name,sort_order FROM modules ORDER BY sort_order").fetchall() == [
+            (m.key, m.directory, m.order) for m in MODULES]
+        assert len(conn.execute("SELECT code FROM doc_types").fetchall()) == 24
+        assert "parent_module" not in {r[1] for r in conn.execute("PRAGMA table_info(doc_types)")}
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_company_overview_is_an_employee_choice_not_a_backend_content_rule(tmp_path: Path) -> None:
+    db_path = tmp_path / "overview.db"
+    init_db(db_path)
+    store = ArchiveFileStore(tmp_path / "objects", db_path)
+    stored = store.put_bytes(b"overview", original_name="overview.md")
+
+    class _OverviewEmployee:
+        def classify_document(self, *, text: str, **_):
+            assert "集团" in text
+            return {
+                "module": "info",
+                "doc_type": "business_overview",
+                "confidence": 0.9,
+                "needs_review": False,
+            }
+
+    row = ClassificationService(db_path, employee=_OverviewEmployee()).classify_parsed(
+        file_hash=stored.file_hash,
+        company_id="acme",
+        manifest=_manifest("集团业务概况与下属公司简介"),
+    )
+    assert (row["module"], row["doc_type"], row["needs_review"]) == (
+        "info", "business_overview", 0,
+    )
+
+
+def test_unknown_legacy_module_never_leaves_a_dangling_parent(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-overview.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE source_files (
+            file_hash TEXT PRIMARY KEY, original_name TEXT NOT NULL,
+            mime_type TEXT, size_bytes INTEGER NOT NULL, storage_path TEXT NOT NULL,
+            origin_zone TEXT NOT NULL DEFAULT 'internal', status TEXT NOT NULL DEFAULT 'active',
+            uploaded_by TEXT, uploaded_at TEXT NOT NULL
+        );
+        CREATE TABLE modules (code TEXT PRIMARY KEY, name TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE doc_types (code TEXT PRIMARY KEY, name TEXT NOT NULL, parent_module TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE file_classifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, file_hash TEXT NOT NULL,
+            module TEXT NOT NULL, doc_type TEXT, confidence REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending', classified_by TEXT NOT NULL DEFAULT 'auto',
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO modules VALUES ('old_company','旧公司概况',1);
+        INSERT INTO doc_types VALUES ('old_company_intro','旧简介','old_company',1);
+        INSERT INTO source_files VALUES ('legacy-overview','old.md',NULL,1,'legacy-overview','internal','active',NULL,'now');
+        INSERT INTO file_classifications(file_hash,module,doc_type,confidence,status,classified_by,created_at)
+            VALUES ('legacy-overview','old_company','old_company_intro',0.1,'pending','auto','now');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT module, doc_type FROM file_classifications WHERE file_hash='legacy-overview'"
+    ).fetchone()
+    assert row == (None, "old_company_intro")
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    conn.close()
+
+
+class _ReviewEmployee:
+    def classify_document(self, *, text: str, **_):
+        return {
+            "module": None,
+            "doc_type": "unclassified",
+            "confidence": 0.0,
+            "needs_review": True,
+            "reason": "没有足够证据判断职能",
+        }
+
+
+def test_other_bucket_is_explicit_employee_review_signal_not_backend_fallback(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    init_db(db_path)
+    store = ArchiveFileStore(tmp_path / "objects", db_path)
+    stored = store.put_bytes(b"unclear", original_name="unknown.bin")
+    service = ClassificationService(db_path, employee=_ReviewEmployee())
+    row = service.classify_parsed(
+        file_hash=stored.file_hash, company_id="acme", manifest=_manifest("无足够上下文的资料"),
+    )
+    assert row["module"] is None
+    assert row["doc_type"] == "unclassified"
+    assert row["needs_review"] == 1
+
+
+def _manifest(*texts: str) -> dict:
+    return {
+        "pages": [{
+            "text_items": [{"text": text} for text in texts],
+            "tables": [],
+        }]
+    }
+
+
+@pytest.fixture
+def ledger(tmp_path: Path):
+    db_path = tmp_path / "app.db"
+    init_db(db_path)
+    store = ArchiveFileStore(tmp_path / "objects", db_path)
+    service = ClassificationService(db_path, employee=_ClassificationEmployee())
+    return store, service
+
+
+def test_content_wins_when_filename_claims_sales(ledger) -> None:
+    store, service = ledger
+    # The filename intentionally says customer list. Only manifest content is
+    # passed to the content classifier, proving it cannot win by filename.
+    stored = store.put_bytes(b"misnamed finance", original_name="客户名单.xlsx")
+    result = service.classify_parsed(
+        file_hash=stored.file_hash,
+        company_id="acme",
+        manifest=_manifest("利润表 营业收入 净利润 毛利率", "资产负债表 货币资金 应收账款"),
+    )
+    assert result["module"] == "fin"
+    assert result["basis"] == "content"
+    assert result["status"] == "auto"
+
+
+@pytest.mark.parametrize(
+    ("text", "module"),
+    [
+        ("营业收入 净利润 毛利率 现金流", "fin"),
+        ("客户名称 订单金额 发货状态 已发货", "sales"),
+        ("员工姓名 岗位 基本工资 薪酬", "hr"),
+        ("渠道 投放 广告 转化率", "sales"),
+    ],
+)
+def test_content_modules_are_deterministic(text: str, module: str) -> None:
+    assert classify_content(_manifest(text), employee=_ClassificationEmployee()).module == module
+
+
+def test_insufficient_content_stays_unclassified(ledger) -> None:
+    store, service = ledger
+    stored = store.put_bytes(b"notes", original_name="随手记.xlsx")
+    result = service.classify_parsed(
+        file_hash=stored.file_hash, company_id="acme",
+        manifest=_manifest("今天天气不错 周末去爬山 记得买菜"),
+    )
+    assert result["module"] is None
+    assert result["basis"] == "content"
+    current = service.list_current(company_id="acme")
+    assert current[0]["module"] is None
+    assert len(service.list_current(company_id="acme", module="unclassified")) == 1
+
+
+def test_module_filter_confirm_and_human_reclassification_keep_history(ledger) -> None:
+    store, service = ledger
+    stored = store.put_bytes(b"sales", original_name="销售订单.xlsx")
+    service.classify_parsed(
+        file_hash=stored.file_hash, company_id="acme",
+        manifest=_manifest("客户名称 订单金额 发货状态 已发货"),
+    )
+    assert len(service.list_current(company_id="acme", module="sales")) == 1
+    assert service.confirm(file_hash=stored.file_hash, company_id="acme")["status"] == "confirmed"
+    current = service.reclassify(
+        file_hash=stored.file_hash, company_id="acme", module="fin", doc_type=None,
+    )
+    assert current["classified_by"] == "human"
+    rows = service.list_current(company_id="acme", include_history=True)
+    assert rows[0]["module"] == "fin"
+    assert any(row["module"] == "sales" and row["status"] == "superseded" for row in rows[0]["history"])
+    assert service.list_current(company_id="acme", module="sales") == []
+
+
+def test_human_classification_is_not_overwritten_by_later_parser_retry(ledger) -> None:
+    store, service = ledger
+    stored = store.put_bytes(b"document", original_name="任意.xlsx")
+    service.reclassify(file_hash=stored.file_hash, company_id="acme", module="hr", doc_type=None)
+    after = service.classify_parsed(
+        file_hash=stored.file_hash, company_id="acme",
+        manifest=_manifest("营业收入 净利润 毛利率 现金流"),
+    )
+    assert after["module"] == "hr"
+    assert after["classified_by"] == "human"
+
+
+def test_canceled_parse_invalidates_only_its_new_content_row_and_retry_reclassifies(ledger) -> None:
+    store, service = ledger
+    stored = store.put_bytes(b"cancel-me", original_name="cancel.pdf")
+    first = service.classify_parsed(
+        file_hash=stored.file_hash, company_id="acme",
+        manifest=_manifest("营业收入 净利润 毛利率 现金流"),
+    )
+    assert first["_created_for_parse"] is True
+    assert service.cancel_auto_content(
+        classification_id=first["id"], file_hash=stored.file_hash, company_id="acme",
+    ) is True
+    assert service.list_current(company_id="acme") == []
+    assert service.list_current(company_id="acme", include_history=True) == []
+    # A retry appends a fresh effective row; the canceled audit row is not
+    # resurrected or treated as the current classification.
+    retried = service.classify_parsed(
+        file_hash=stored.file_hash, company_id="acme",
+        manifest=_manifest("营业收入 净利润 毛利率 现金流"),
+    )
+    assert retried["id"] != first["id"]
+    assert service.list_current(company_id="acme")[0]["basis"] == "content"
+
+
+def test_http_list_filter_confirm_and_human_contract(monkeypatch, ledger) -> None:
+    store, service = ledger
+    stored = store.put_bytes(b"sales", original_name="销售订单.xlsx")
+    service.classify_parsed(
+        file_hash=stored.file_hash, company_id="acme",
+        manifest=_manifest("客户名称 订单金额 发货状态 已发货"),
+    )
+    webapp_dir = Path(__file__).resolve().parents[1] / "webapp"
+    sys.path.insert(0, str(webapp_dir))
+    try:
+        import webapp.app as webapp
+    finally:
+        sys.path.remove(str(webapp_dir))
+
+    monkeypatch.setattr(webapp, "MAIN_DB", store._db_path)
+    client = webapp.app.test_client()
+    listed = client.get("/api/files/classifications?company_id=acme&module=sales")
+    assert listed.status_code == 200
+    assert listed.get_json()["files"][0]["basis"] == "content"
+    confirmed = client.post("/api/files/classifications/confirm", json={"file_hash": stored.file_hash, "company_id": "acme"})
+    assert confirmed.status_code == 200
+    revised = client.post("/api/files/classifications", json={
+        "file_hash": stored.file_hash, "company_id": "acme", "module": "fin", "doc_type": None,
+    })
+    assert revised.status_code == 200
+    history = client.get("/api/files/classifications?company_id=acme&include_history=1").get_json()["files"][0]["history"]
+    assert any(item["status"] == "superseded" for item in history)
+
+
+def test_legacy_non_nullable_module_ledger_is_migrated_without_losing_rows(tmp_path: Path) -> None:
+    """Existing M1 databases must accept an unclassified content result."""
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE source_files (
+            file_hash TEXT PRIMARY KEY, original_name TEXT NOT NULL,
+            mime_type TEXT, size_bytes INTEGER NOT NULL, storage_path TEXT NOT NULL,
+            origin_zone TEXT NOT NULL DEFAULT 'internal', status TEXT NOT NULL DEFAULT 'active',
+            uploaded_by TEXT, uploaded_at TEXT NOT NULL
+        );
+        CREATE TABLE modules (code TEXT PRIMARY KEY, name TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE doc_types (code TEXT PRIMARY KEY, name TEXT NOT NULL, parent_module TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE file_classifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, file_hash TEXT NOT NULL,
+            module TEXT NOT NULL, doc_type TEXT, confidence REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending', classified_by TEXT NOT NULL DEFAULT 'auto',
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO modules VALUES ('sales','销售',1);
+        INSERT INTO modules VALUES ('module_5','待定义5',5);
+        INSERT INTO doc_types VALUES ('customer','客户资料','sales',1);
+        INSERT INTO source_files VALUES ('h','old.xlsx',NULL,1,'h','internal','active',NULL,'now');
+        INSERT INTO source_files VALUES ('h2','old2.xlsx',NULL,1,'h2','internal','active',NULL,'now');
+        INSERT INTO file_classifications(file_hash,module,doc_type,confidence,status,classified_by,created_at)
+            VALUES ('h','sales','customer',0.6,'pending','auto','now');
+        INSERT INTO file_classifications(file_hash,module,confidence,status,classified_by,created_at)
+            VALUES ('h2','module_5',0.1,'pending','auto','now');
+        """
+    )
+    conn.commit()
+    conn.close()
+    init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    columns = {row["name"]: row for row in conn.execute("PRAGMA table_info(file_classifications)")}
+    row = conn.execute("SELECT * FROM file_classifications WHERE file_hash='h'").fetchone()
+    assert columns["module"]["notnull"] == 0
+    assert row["company_id"] == "default"
+    assert row["module"] is None
+    assert row["needs_review"] == 1
+    assert row["doc_type"] == "customer"
+    assert row["basis"] == "name"
+    assert row["status"] == "auto"
+    fallback = conn.execute("SELECT module, doc_type FROM file_classifications WHERE file_hash='h2'").fetchone()
+    assert tuple(fallback) == (None, None)
+    conn.close()

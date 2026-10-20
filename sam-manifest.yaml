@@ -1,0 +1,38 @@
+# SAM portable contract. Secret values are never stored here.
+runtime:
+  node: 24.16.x
+  openclaw: 2026.9.6
+  agent_id: sam-leader
+  gateway_mode: gateway
+  # Keep the resident OpenClaw gateway separate from the Flask HTTP service.
+  # Flask remains on PORT=18789; the adapter launches the gateway on this port.
+  gateway_port: 18790
+skills:
+  root: skills
+  map:
+    pdf: document-ingest
+    doc: document-ingest
+    docx: document-ingest
+    xls: document-ingest
+    xlsx: document-ingest
+    ppt: document-ingest
+    pptx: document-ingest
+    image: document-ingest
+  ingest_engine_env: SAM_INGEST_ENGINE
+paths:
+  data_root: data
+  two_a_root: data/2a
+  main_db: data/app.db
+  app_db: data/sales_app/app.db
+  memory_root: .sam-memory
+  tool_plugin_dir: harness-openclaw/plugins/sam-memory
+  tool_bridge_python: .venv/bin/python
+memory:
+  provider: localvector
+model:
+  api: openai-completions
+  base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  base_url_env: SAM_LEADER_MODEL_BASE_URL
+  model_env: SAM_LEADER_MODEL
+  api_key_env: SAM_LEADER_MODEL_API_KEY
+  default_model: qwen3.8-max

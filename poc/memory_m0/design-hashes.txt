@@ -1,0 +1,2 @@
+0afee9b44e427314ba4040519b09ae8e5083237adc8ede2d1b0fe64d15be1f9b  docs/architecture/08-memory-store-selfhosted-design.md
+0afee9b44e427314ba4040519b09ae8e5083237adc8ede2d1b0fe64d15be1f9b  /mnt/c/Users/jacki/Coze/Drive/startup_ai_manager项目开发/CRIS通信站/资料/08-memory-store-selfhosted-design-v1.1.md

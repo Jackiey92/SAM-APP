@@ -140,7 +140,7 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
 .ov-scroll{height:100%;overflow-y:auto;padding:22px 26px 34px;}
 .ov-scroll::-webkit-scrollbar{width:8px;} .ov-scroll::-webkit-scrollbar-thumb{background:#d7d9de;border-radius:8px;}
 
-.hero{display:grid;grid-template-columns:1.5fr 1fr;gap:18px;margin-bottom:18px;}
+.hero{display:grid;grid-template-columns:1fr;gap:18px;margin-bottom:18px;}
 .hero-left{border:1px solid var(--border);border-radius:14px;padding:22px 24px;color:#fff;position:relative;overflow:hidden;
   background:linear-gradient(125deg,#3f5bf0,#6a55f0 55%,#8b5cf6);box-shadow:0 14px 34px rgba(77,107,254,.32);}
 .hero-left::after{content:"";position:absolute;right:-60px;top:-60px;width:240px;height:240px;background:radial-gradient(circle,rgba(255,255,255,.22),transparent 70%);}
@@ -285,26 +285,37 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
 .import-progress-txt span{font-size:11.5px;color:var(--t3);display:block;margin-top:3px;}
 .import-progress-bar{height:6px;flex:1;min-width:90px;background:#e9ecf5;border-radius:9px;overflow:hidden;}
 .import-progress-bar i{display:block;width:0;height:100%;border-radius:9px;background:var(--grad);transition:width .25s ease;}
-.import-body{display:grid;grid-template-columns:238px 1fr;min-height:0;flex:1;}
-.import-steps{padding:18px 13px 20px 18px;border-right:1px solid var(--border-2);overflow-y:auto;background:#fcfcfe;}
-.import-step{width:100%;display:flex;align-items:flex-start;gap:10px;border:0;background:transparent;border-radius:10px;padding:10px 9px;text-align:left;font-family:inherit;cursor:pointer;color:var(--t2);}
-.import-step:hover{background:#f1f3ff;}
-.import-step.current{background:#eef1ff;color:var(--primary);}
-.import-step.done{color:var(--green);}
-.import-step-num{width:24px;height:24px;border:1px solid #d8dce8;border-radius:50%;display:grid;place-items:center;flex:none;font-size:11px;font-weight:700;background:#fff;color:var(--t3);}
-.import-step.current .import-step-num{border-color:var(--primary);background:var(--primary);color:#fff;}
-.import-step.done .import-step-num{border-color:#b8e8c5;background:#e8f7eb;color:var(--green);}
-.import-step.done .import-step-num::before{content:"✓";}.import-step.done .import-step-num{font-size:0;}
-.import-step-copy{min-width:0;}.import-step-copy b{font-size:12.5px;display:block;line-height:1.3;}.import-step-copy span{font-size:10.5px;display:block;margin-top:3px;color:var(--t3);line-height:1.35;}.import-step.current .import-step-copy span{color:#7181d9;}
+.import-body{display:grid;grid-template-columns:1fr;min-height:0;flex:1;}
 .import-main{padding:24px 28px 20px;overflow-y:auto;min-width:0;}
 .import-main::-webkit-scrollbar{width:7px;}.import-main::-webkit-scrollbar-thumb{background:#d7d9de;border-radius:8px;}
-.import-step-kicker{font-size:11px;color:var(--t3);font-weight:600;}.import-main h3{font-size:21px;margin-top:4px;letter-spacing:-.3px;}.import-main .step-note{font-size:12px;color:var(--t3);margin-top:5px;}
+.import-main h3{font-size:21px;margin-top:4px;letter-spacing:-.3px;}.import-main .step-note{font-size:12px;color:var(--t3);margin-top:5px;}
 .import-reasons{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin:19px 0 16px;}.import-reason{border:1px solid var(--border);border-radius:11px;padding:13px 14px;background:#fff;}.import-reason .label{font-size:11px;font-weight:700;color:var(--primary);display:flex;align-items:center;gap:6px;}.import-reason .label::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;}.import-reason p{font-size:12.5px;line-height:1.55;color:var(--t2);margin-top:6px;}
 .import-drop{border:1px dashed #b9c4ff;border-radius:13px;background:#f8f9ff;padding:20px;text-align:center;transition:.15s;}.import-drop.drag{border-color:var(--primary);background:#eef1ff;}.import-drop strong{font-size:13px;display:block;}.import-drop p{font-size:11.5px;color:var(--t3);margin-top:5px;}.import-pick{margin-top:12px;border:1px solid var(--primary);background:#fff;color:var(--primary);border-radius:8px;padding:8px 15px;font:600 12px var(--fs);cursor:pointer;}.import-pick:hover{background:#eef1ff;}
 .import-files{display:flex;flex-direction:column;gap:7px;margin-top:12px;}.import-file{display:flex;align-items:center;gap:9px;border:1px solid var(--border-2);border-radius:8px;padding:8px 10px;font-size:12px;}.import-file .name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}.import-file .status{margin-left:auto;color:var(--t3);font-size:11px;white-space:nowrap;}.import-file.ok .status{color:var(--green);}.import-file.err .status{color:var(--red);}
+.import-registration[hidden]{display:none;}.import-company-current{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}.import-company-current p{flex:1;min-width:0;overflow-wrap:anywhere;}.import-nav.import-company-edit{border:0;padding:0;height:auto;color:var(--primary);background:transparent;}.import-registration-fields{display:flex;gap:9px;margin-top:9px;}.import-registration input{min-width:0;flex:1;border:1px solid var(--border);border-radius:8px;padding:8px 10px;font:12px var(--fs);color:var(--t1);background:var(--bg);}.import-file{flex-wrap:wrap;}.import-file .status{white-space:normal;overflow-wrap:anywhere;}.import-file .name{flex:1;}.import-file-actions{display:flex;flex-wrap:wrap;gap:7px;width:100%;}.import-file-actions a{text-decoration:none;display:inline-flex;align-items:center;}.import-file-message{width:100%;color:var(--t3);overflow-wrap:anywhere;}
 .import-foot{display:flex;align-items:center;gap:9px;margin-top:19px;padding-top:15px;border-top:1px solid var(--border-2);}.import-foot .hint{font-size:11px;color:var(--t3);margin-right:auto;}.import-nav{height:34px;padding:0 14px;border-radius:8px;border:1px solid var(--border);background:#fff;color:var(--t2);font:600 12px var(--fs);cursor:pointer;}.import-nav:hover:not(:disabled){border-color:#c4cdff;color:var(--primary);}.import-nav.primary{border-color:var(--primary);background:var(--primary);color:#fff;}.import-nav:disabled{opacity:.45;cursor:not-allowed;}
 .import-resume{font-size:11px;color:var(--t3);margin-top:10px;}
 .import-chat-float{position:absolute;right:22px;bottom:22px;z-index:2;display:flex;align-items:center;gap:7px;border:1px solid #dbe2ff;background:#fff;color:var(--primary);border-radius:99px;padding:8px 12px;box-shadow:0 8px 24px rgba(77,107,254,.18);font:600 12px var(--fs);cursor:pointer;}.import-chat-float:hover{background:#eef1ff;}
+
+/* Knowledge uses the permanent shell's cards, grids, tables and mask. */
+.knowledge-section{margin-top:24px;min-width:0;}
+.knowledge-stack{display:grid;gap:16px;}
+.knowledge-empty{color:var(--t3);font-size:13px;line-height:1.7;}
+.knowledge-prose{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.7 var(--fs);color:var(--t2);margin:10px 0;}
+.knowledge-meta{font-size:12px;line-height:1.7;color:var(--t3);overflow-wrap:anywhere;}
+.knowledge-detail{margin-top:14px;}.knowledge-detail summary{cursor:pointer;color:var(--primary);font-size:13px;}
+.knowledge-source{display:inline-block;color:var(--primary);font-size:12px;line-height:1.7;margin-top:8px;text-decoration:none;}
+.knowledge-selected{outline:2px solid var(--primary);outline-offset:2px;}
+#knowledge .card-h{gap:10px;flex-wrap:wrap;}#knowledge .card-h h3{overflow-wrap:anywhere;min-width:0;}
+#knowledge .grid>*{min-width:0;}#knowledge .table-wrap{overflow-x:auto;}
+#knowledge td{overflow-wrap:anywhere;white-space:normal;}#knowledge table{min-width:640px;}
+#knowledgeSourceBody{overflow-y:auto;min-height:0;}
+
+/* 公司看板事实树状态：只读真实数据，失败/空态不回退静态样例 */
+#factsBoard .card-h{gap:10px;flex-wrap:wrap;}
+#factsBoard .drive-btn{text-decoration:none;}
+#factsBoard #factsBrief{max-height:280px;overflow-y:auto;}
+#factsBoard #factsTrunks{margin-top:12px;overflow-x:auto;}
 
 /* ============ 企业成长信息 ============ */
 .growth-card{margin-top:16px;}
@@ -365,8 +376,6 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
   .import-head h2{font-size:18px;}.import-head p{font-size:11px;}
   .import-progress{padding:11px 15px;gap:10px;}.import-ring{width:42px;height:42px;}.import-ring::after{inset:4px;}.import-progress-bar{min-width:56px;}
   .import-body{display:flex;flex-direction:column;}
-  .import-steps{display:flex;gap:5px;padding:10px 12px 9px;border-right:0;border-bottom:1px solid var(--border-2);overflow-x:auto;overflow-y:hidden;flex:none;}
-  .import-step{width:132px;min-width:132px;padding:7px 6px;gap:7px;}.import-step-copy b{font-size:11px;}.import-step-copy span{font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}.import-step-num{width:21px;height:21px;font-size:10px;}
   .import-main{padding:17px 14px calc(18px + env(safe-area-inset-bottom));}.import-main h3{font-size:19px;}.import-reasons{grid-template-columns:1fr;gap:8px;margin:14px 0 12px;}.import-reason{padding:11px 12px;}.import-reason p{font-size:12px;}.import-drop{padding:18px 12px;}.import-foot{margin-top:14px;}.import-foot .hint{font-size:10px;}.import-nav{padding:0 11px;}
   .import-chat-float{right:13px;bottom:calc(13px + env(safe-area-inset-bottom));}
 }
@@ -545,6 +554,7 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
 /* ===== 系统导航项 ===== */
 .sys-item{display:flex;align-items:center;gap:10px;width:100%;padding:8px 11px;border-radius:9px;border:none;background:none;font-family:inherit;font-size:13px;font-weight:500;color:var(--t2);cursor:pointer;text-align:left;margin-bottom:2px;}
 .sys-item:hover{background:#f2f3f5;color:var(--t1);}
+a.sys-item{text-decoration:none;}
 .sys-item.active{background:#f0ecff;color:var(--purple);font-weight:600;}
 .sys-item .ah-ic{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;flex:none;}
 .sys-item .g-dot{width:6px;height:6px;border-radius:50%;margin-left:auto;}
@@ -690,6 +700,29 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
   .cal-cell.blank{background:transparent;border:none;}
   /* 初期版本只展示四个主入口；其余模块保留实现，待产品阶段开放。 */
   .deferred-module,.deferred-screen{display:none!important;}
+
+  /* 资源管理器式浏览：沿用 SAM 的颜色、字体与卡片。 */
+  .explorer-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:18px 0;}
+  .explorer-path{flex:1;min-width:180px;background:#fff;border:1px solid var(--border);border-radius:9px;padding:10px 14px;color:var(--t2);font-size:13px;overflow-wrap:anywhere;}
+  .explorer-layout{display:grid;grid-template-columns:190px minmax(0,1fr);gap:18px;align-items:start;}
+  .explorer-tree{background:#fff;border:1px solid var(--border);border-radius:12px;padding:10px;display:grid;gap:5px;}
+  .explorer-node{border:0;border-radius:8px;background:transparent;text-align:left;padding:11px 10px;color:var(--t2);font:13px var(--fs);cursor:pointer;overflow-wrap:anywhere;}
+  .explorer-node.child{padding-left:26px;font-size:12px;}
+  .explorer-node[aria-current="true"]{background:#eef0ff;color:var(--primary);font-weight:600;}
+  .explorer-node:hover{background:#f5f6fa;}
+  .explorer-content{min-width:0;}
+  .explorer-content .sec-head{margin-top:0;}
+  .explorer-mobile{display:none;}
+  .explorer-layout [hidden]{display:none!important;}
+  .explorer-content .drive-files{padding:0;overflow:hidden;}
+  .file-act{border:0;background:transparent;font:12px var(--fs);white-space:nowrap;}
+  .explorer-content table td:first-child{overflow-wrap:anywhere;max-width:260px;min-width:140px;}
+  @media(max-width:760px){
+    .explorer-layout{grid-template-columns:minmax(0,1fr);}
+    .explorer-tree{display:none;}
+    .explorer-mobile{display:flex;align-items:center;gap:10px;margin-bottom:14px;font-size:13px;color:var(--t2);}
+    .explorer-mobile select{flex:1;min-width:0;padding:10px;border:1px solid var(--border);border-radius:8px;background:#fff;color:var(--t1);font:13px var(--fs);}
+  }
 </style>
 </head>
 <body>
@@ -704,7 +737,7 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
 
     <nav class="nav" id="navAccordion">
       <!-- 企业综合（第一） -->
-      <button class="ov-item active" data-go="bizov">
+      <button class="ov-item active" data-go="overview">
         <span class="ah-ic" style="background:var(--grad);color:#fff"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3l2.2 5.8L20 10.8l-5.8 2.2L12 19l-2.2-6L4 10.8l5.8-2z"/></svg></span>
         业务<span class="g-dot"></span>
       </button>
@@ -849,20 +882,21 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
         </button>
       </div>
 
-      <!-- 系统入口：资料导入始终保留，其他系统工具暂隐 -->
+      <!-- 系统入口：知识库与文件柜始终保留，其他系统工具暂隐 -->
       <div class="nav-label">系统入口</div>
-      <button class="sys-item import-entry" id="importNavBtn" type="button">
+      <button class="sys-item" type="button" data-go="knowledge">
+        <span class="ah-ic" style="background:#f0ecff;color:var(--purple)"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5C9 3 5 3 2 4v15c3-1 7-1 10 1 3-2 7-2 10-1V4c-3-1-7-1-10 1zM12 5v15"/></svg></span>
+        知识库
+      </button>
+      <button class="sys-item import-entry" id="importNavBtn" type="button" data-go="drive">
         <span class="ah-ic" style="background:#f0ecff;color:var(--purple)"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>
-        资料导入<span class="g-dot" style="background:var(--primary)"></span>
+        文件柜<span class="g-dot" style="background:var(--primary)"></span>
       </button>
       <button class="sys-item deferred-module" data-go="cal">
         <span class="ah-ic" style="background:#fff3e6;color:var(--orange)"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg></span>
         日程
       </button>
-      <button class="sys-item deferred-module" data-go="drive">
-        <span class="ah-ic" style="background:#e8f7eb;color:var(--green)"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg></span>
-        云盘
-      </button>
+
     </nav>
 
     <div class="side-user">
@@ -888,123 +922,33 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
     <div class="content">
 
     <!-- ================= 企业综合屏 ================= -->
-    <div class="screen deferred-screen" id="overview">
+    <div class="screen active" id="overview">
       <div class="ov-scroll">
         <!-- hero -->
         <div class="hero">
           <div class="hero-left">
-            <div class="h-name">示例科技有限公司</div>
-            <div class="h-tags">
-              <span class="h-tag">存续（在营）</span>
-              <span class="h-tag">有限责任公司</span>
-              <span class="h-tag">天使轮</span>
-              <span class="h-tag">新材料 · 柔性导电</span>
-            </div>
+            <div class="h-name" id="homeCompanyName">正在读取公司名称…</div>
             <div class="hero-ask" data-go="chat">
               <span class="ha-i"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4z"/></svg></span>
               <span class="ha-t">问 AI：经营、财务、股权、协议…</span>
               <span class="ha-go"><svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></span>
             </div>
           </div>
-
-          <div class="hero-right">
-            <div class="hr-lbl">企业健康度</div>
-            <div class="hring">
-              <svg aria-hidden="true" width="150" height="150" viewBox="0 0 160 160">
-                <defs><linearGradient id="hg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4d6bfe"/><stop offset="1" stop-color="#9b6bff"/></linearGradient></defs>
-                <circle cx="80" cy="80" r="66" fill="none" stroke="#f0f1f3" stroke-width="13"/>
-                <circle cx="80" cy="80" r="66" fill="none" stroke="url(#hg)" stroke-width="13" stroke-linecap="round" stroke-dasharray="240 414.7" transform="rotate(-90 80 80)"/>
-              </svg>
-              <div class="ctr"><b>58</b><span>/ 100</span></div>
-            </div>
-            <div class="hr-foot">综合工商 · 财务 · 股权 · 经营加权<br><b>3 项</b>需优先处理，建议先做经营体检</div>
-          </div>
         </div>
 
-        <!-- 核心指标 -->
-        <div class="kpi8" style="grid-template-columns:repeat(4,1fr);">
-          <div class="mkpi"><div class="ml">营业收入（1–9月）</div><div class="mv">214.00<small>万</small></div><div class="mc up">▲ 27.4%</div></div>
-          <div class="mkpi"><div class="ml">净利润</div><div class="mv">-38.60<small>万</small></div><div class="mc up">同比收窄 26.1%</div></div>
-          <div class="mkpi"><div class="ml">现金跑道</div><div class="mv">7.2<small>月</small></div><div class="mc down">月均净消耗 26.40 万</div></div>
-          <div class="mkpi"><div class="ml">在手订单</div><div class="mv">386.00<small>万</small></div><div class="mc up">▲ 12.2%</div></div>
-        </div>
-
-        <!-- 企业成长信息（定期运行的企业成长分析） -->
-        <div class="card growth-card">
-          <div class="growth-head">
-            <span class="gh-title"><span class="gh-ic"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10M18 20V4M6 20v-4"/></svg></span>企业成长信息</span>
-            <span class="gh-desc">定期自动运行的企业成长分析 · 结论可溯源</span>
-            <span class="sp"></span>
-            <span class="gh-freq"><i style="width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;"></i>已开启定期分析</span>
-            <button class="gh-run" type="button"><svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 11-2.6-6.4M21 3v6h-6"/></svg>立即运行</button>
+        <!-- 事实树看板：只读展示当前公司事实树真实状态；加载失败/未就绪时不回退静态样例 -->
+        <div class="card" id="factsBoard">
+          <div class="card-h">
+            <h3>事实树</h3>
+            <span class="sub" id="factsBoardSub">正在读取当前公司事实树状态…</span>
+            <span style="flex:1"></span>
+            <button class="drive-btn" id="factsRetryBtn" type="button" hidden>重试</button>
+            <a class="drive-btn" id="factsTreeLink" href="/facts">查看事实库</a>
+            <button class="drive-btn primary" id="factsUploadBtn" type="button">上传企业资料</button>
           </div>
-          <div class="growth-grid">
-
-            <!-- 员工激励待办 -->
-            <div class="gc" data-gkey="激励">
-              <div class="gc-top">
-                <span class="gc-ic" style="background:#f0ecff;color:var(--purple)"><svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4z"/></svg></span>
-                <div><div class="gc-tt">员工激励待办</div><div class="gc-freq">每月 1 日运行 · ESOP 台账</div></div>
-                <span class="gc-badge todo">3 项待办</span>
-              </div>
-              <div class="gc-line">期权池 <b>18.0%</b>，已授予 <b>11.5%</b>、未授予 <b>6.5%</b>；其中 6.5% 尚未明确授予对象。</div>
-              <div class="gc-list">
-                <div class="gc-todo"><span class="dot warn"></span><span>2 名核心研发的期权授予协议待签署</span></div>
-                <div class="gc-todo"><span class="dot info"></span><span>本月 1 名员工满 1 年 cliff，首批归属待确认</span></div>
-                <div class="gc-todo"><span class="dot info"></span><span>建议 Q4 前明确 6.5% 未授予池的分配方案</span></div>
-              </div>
-              <div class="gc-foot"><svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>最近运行：2026-09-01<span class="go">查看详情<svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></span></div>
-            </div>
-
-            <!-- 研发项目进展 -->
-            <div class="gc" data-gkey="研发">
-              <div class="gc-top">
-                <span class="gc-ic" style="background:#e8efff;color:var(--primary)"><svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6v4l4 8a3 3 0 01-2.7 4.5H7.7A3 3 0 015 15l4-8z"/><path d="M7.5 14h9"/></svg></span>
-                <div><div class="gc-tt">研发项目进展</div><div class="gc-freq">每两周运行 · 项目里程碑</div></div>
-                <span class="gc-badge ok">整体正常</span>
-              </div>
-              <div class="gc-line">在研项目 <b>4 个</b>，核心料号已进入客户验证阶段，整体研发进度 <b>达成率 82%</b>。</div>
-              <div class="gc-list">
-                <div class="gc-todo"><span class="dot info"></span><span>高耐温柔性导电料号：下游验证进行中，预计 Q4 出报告</span></div>
-                <div class="gc-todo"><span class="dot warn"></span><span>二代配方中试良率波动，需补充 2 批次工艺验证</span></div>
-                <div class="gc-todo"><span class="dot danger"></span><span>1 项师生共创专利权属待确认，影响项目结项</span></div>
-              </div>
-              <div class="gc-foot"><svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>最近运行：2026-09-15<span class="go">查看详情<svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></span></div>
-            </div>
-
-            <!-- 订单进展 -->
-            <div class="gc" data-gkey="订单进展">
-              <div class="gc-top">
-                <span class="gc-ic" style="background:#e6faf1;color:#0a9d6e"><svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg></span>
-                <div><div class="gc-tt">订单进展</div><div class="gc-freq">每周一运行 · 在手订单</div></div>
-                <span class="gc-badge todo">2 项关注</span>
-              </div>
-              <div class="gc-line">在手订单 <b>386.00 万</b>（▲12.2%），按计划交付占比 <b>88%</b>。</div>
-              <div class="gc-list">
-                <div class="gc-todo"><span class="dot info"></span><span>标杆客户验证订单已排产，交期 10 月下旬</span></div>
-                <div class="gc-todo"><span class="dot warn"></span><span>2 笔订单受上游原料到货影响，存在延期风险</span></div>
-                <div class="gc-todo"><span class="dot danger"></span><span>2 笔已发货订单回款逾期，合计 14.50 万</span></div>
-              </div>
-              <div class="gc-foot"><svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>最近运行：2026-09-21<span class="go">查看详情<svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></span></div>
-            </div>
-
-            <!-- 每月财务诊断 -->
-            <div class="gc" data-gkey="财务诊断">
-              <div class="gc-top">
-                <span class="gc-ic" style="background:#fff7e0;color:#c98a00"><svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg></span>
-                <div><div class="gc-tt">每月财务诊断</div><div class="gc-freq">每月 5 日运行 · 三表勾稽</div></div>
-                <span class="gc-badge todo">3 项提示</span>
-              </div>
-              <div class="gc-line">三表<b>勾稽平衡</b>；1–9 月营收 214.00 万、净利润 -38.60 万，现金跑道约 <b>7.2 个月</b>。</div>
-              <div class="gc-list">
-                <div class="gc-todo"><span class="dot warn"></span><span>现金跑道不足 8 个月，建议 4 个月内启动下一轮</span></div>
-                <div class="gc-todo"><span class="dot info"></span><span>经营性现金流净额 -52.40 万，主因应收增加</span></div>
-                <div class="gc-todo"><span class="dot info"></span><span>注册资本实缴率仅 20.0%，认缴到期日需关注</span></div>
-              </div>
-              <div class="gc-foot"><svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>最近运行：2026-09-05<span class="go">查看详情<svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></span></div>
-            </div>
-
-          </div>
+          <p class="knowledge-meta" id="factsState" role="status"></p>
+          <pre class="knowledge-prose" id="factsBrief" hidden></pre>
+          <div class="table-wrap" id="factsTrunks" hidden></div>
         </div>
 
         <!-- 消息关注 -->
@@ -1021,54 +965,38 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
           </div>
         </div>
 
-        <!-- 图表 -->
-        <div class="grid g2 mt16">
-          <div class="card">
-            <div class="card-h"><h3>月度营业收入</h3><span class="sub">单位：万元</span></div>
-            <svg aria-hidden="true" viewBox="0 0 640 250" style="width:100%;height:auto;display:block;margin-top:6px;">
-              <defs><linearGradient id="ar" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4d6bfe" stop-opacity="0.28"/><stop offset="1" stop-color="#4d6bfe" stop-opacity="0.02"/></linearGradient></defs>
-              <g stroke="#f0f1f3" stroke-width="1">
-                <line x1="46" y1="30" x2="614" y2="30"/>
-                <line x1="46" y1="80" x2="614" y2="80"/>
-                <line x1="46" y1="130" x2="614" y2="130"/>
-                <line x1="46" y1="180" x2="614" y2="180"/>
-              </g>
-              <g font-size="11" fill="#9a9da5" text-anchor="end">
-                <text x="38" y="34">40</text><text x="38" y="84">30</text><text x="38" y="134">20</text><text x="38" y="184">10</text>
-              </g>
-              <path d="M46 155 L117 160 L188 140 L259 145 L330 115 L401 120 L472 95 L543 75 L614 60 L614 180 L46 180 Z" fill="url(#ar)"/>
-              <path d="M46 155 L117 160 L188 140 L259 145 L330 115 L401 120 L472 95 L543 75 L614 60" fill="none" stroke="#4d6bfe" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-              <g fill="#4d6bfe">
-                <circle cx="46" cy="155" r="3.2"/><circle cx="117" cy="160" r="3.2"/><circle cx="188" cy="140" r="3.2"/><circle cx="259" cy="145" r="3.2"/><circle cx="330" cy="115" r="3.2"/><circle cx="401" cy="120" r="3.2"/><circle cx="472" cy="95" r="3.2"/><circle cx="543" cy="75" r="3.2"/><circle cx="614" cy="60" r="4"/>
-              </g>
-              <g font-size="11" fill="#9a9da5" text-anchor="middle">
-                <text x="46" y="205">1月</text><text x="117" y="205">2月</text><text x="188" y="205">3月</text><text x="259" y="205">4月</text><text x="330" y="205">5月</text><text x="401" y="205">6月</text><text x="472" y="205">7月</text><text x="543" y="205">8月</text><text x="614" y="205">9月</text>
-              </g>
-              <text x="614" y="50" font-size="12" fill="#4d6bfe" text-anchor="end" font-weight="700">34.00</text>
-            </svg>
-          </div>
-          <div class="card">
-            <div class="card-h"><h3>股权结构</h3><span class="sub">截至当前</span></div>
-            <div style="display:flex;align-items:center;gap:20px;padding:10px 6px;">
-              <svg aria-hidden="true" width="168" height="168" viewBox="0 0 160 160" style="flex:none;">
-                <circle cx="80" cy="80" r="60" fill="none" stroke="#4d6bfe" stroke-width="22" stroke-dasharray="233.7 377.0" transform="rotate(-90 80 80)"/>
-                <circle cx="80" cy="80" r="60" fill="none" stroke="#7c5cff" stroke-width="22" stroke-dasharray="67.9 377.0" stroke-dashoffset="-233.7" transform="rotate(-90 80 80)"/>
-                <circle cx="80" cy="80" r="60" fill="none" stroke="#0fc6c2" stroke-width="22" stroke-dasharray="56.5 377.0" stroke-dashoffset="-301.6" transform="rotate(-90 80 80)"/>
-                <circle cx="80" cy="80" r="60" fill="none" stroke="#d7d9de" stroke-width="22" stroke-dasharray="18.9 377.0" stroke-dashoffset="-358.1" transform="rotate(-90 80 80)"/>
-                <text x="80" y="76" text-anchor="middle" font-size="22" font-weight="700" fill="#1c2333">62%</text>
-                <text x="80" y="94" text-anchor="middle" font-size="10.5" fill="#9a9da5">创始团队</text>
-              </svg>
-              <div style="flex:1;display:flex;flex-direction:column;gap:13px;">
-                <div style="display:flex;align-items:center;gap:9px;font-size:13px;"><span style="width:9px;height:9px;border-radius:3px;background:#4d6bfe;"></span><span style="color:#3c4252;flex:1;">创始团队</span><b>62.0%</b></div>
-                <div style="display:flex;align-items:center;gap:9px;font-size:13px;"><span style="width:9px;height:9px;border-radius:3px;background:#7c5cff;"></span><span style="color:#3c4252;flex:1;">员工持股平台</span><b>18.0%</b></div>
-                <div style="display:flex;align-items:center;gap:9px;font-size:13px;"><span style="width:9px;height:9px;border-radius:3px;background:#0fc6c2;"></span><span style="color:#3c4252;flex:1;">天使投资人</span><b>15.0%</b></div>
-                <div style="display:flex;align-items:center;gap:9px;font-size:13px;"><span style="width:9px;height:9px;border-radius:3px;background:#d7d9de;"></span><span style="color:#3c4252;flex:1;">其他股东</span><b>5.0%</b></div>
-              </div>
-            </div>
+      </div>
+    </div>
+
+    <!-- ================= KNOWLEDGE ================= -->
+    <!-- 知识库：只读投影，永久主页壳内切页 -->
+    <div class="screen" id="knowledge">
+      <div class="board-scroll" id="knowledgeScroll">
+        <div class="sec-head"><h2>知识库</h2><span class="sub">只读查看已存知识和来源；不在此编辑、裁决或固化。</span><span class="sub" id="knowledgeDataSource" aria-live="polite"></span></div>
+        <div class="explorer-toolbar"><span class="explorer-path" id="knowledgePath">知识库 / 确认事实</span><button class="drive-btn" id="knowledgeRefresh" type="button">刷新</button></div>
+        <label class="explorer-mobile">浏览分类<select id="knowledgeSelect" aria-label="知识库分类"></select></label>
+        <div class="explorer-layout">
+          <nav class="explorer-tree" id="knowledgeTree" aria-label="知识库分类"></nav>
+          <div class="explorer-content">
+            <section id="confirmed-facts">
+              <div class="sec-head"><h2>确认事实</h2><span class="sub">已核验的信息，按来源文件的现有分类整理。</span></div>
+              <div class="knowledge-stack" id="knowledgeFacts"><div class="card knowledge-empty">暂无确认事实。</div></div>
+              <div class="card mt16" id="knowledgeEquity"></div>
+            </section>
+            <section id="working-memory" hidden>
+              <div class="sec-head"><h2>工作记忆</h2><span class="sub">当前目标、工作事件与待核验笔记；临时上下文不等同于确认事实。</span></div>
+              <div class="knowledge-stack" id="knowledgeRuntime"><div class="card knowledge-empty">暂无当前公司可读取的工作记忆。</div></div>
+            </section>
           </div>
         </div>
-
       </div>
+    </div>
+
+    <div class="import-mask" id="knowledgeSourceMask" aria-hidden="true">
+      <section class="import-wizard" role="dialog" aria-modal="true" aria-labelledby="knowledgeSourceTitle">
+        <header class="import-head"><div><div class="import-eyebrow">文件柜 · 来源查看</div><h2 id="knowledgeSourceTitle">来源原文</h2><p>已存原文与原始坐标；只读，不补造缺失值。</p></div><button class="import-close" id="knowledgeSourceClose" type="button" aria-label="关闭原文弹窗">×</button></header>
+        <div class="import-main" id="knowledgeSourceBody"></div>
+      </section>
     </div>
 
     <!-- ================= CHAT ================= -->
@@ -1173,7 +1101,7 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
     </div>
 
     <!-- ================= 业务概览 ================= -->
-    <div class="screen active" id="bizov">
+    <div class="screen" id="bizov">
       <div class="board-scroll">
         <div class="sec-head"><h2>业务概览</h2><span class="sub">业务画像 · 产品矩阵 · 技术与知识产权</span></div>
         <div class="insight"><span class="ai-badge">✦ AI</span><span class="itxt">核心产品 A 型进入小批量（TRL 7）；<b>1 项师生共创专利权属待确认</b>，建议融资交割前补齐。</span><span class="ibasis">查看依据</span></div>
@@ -1507,34 +1435,24 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
       </div>
     </div>
 
-    <!-- ================= 云盘 ================= -->
-    <div class="screen deferred-screen" id="drive">
+    <!-- ================= 文件柜 ================= -->
+    <div class="screen" id="drive">
       <div class="board-scroll">
-        <div class="sec-head"><h2>云盘</h2><span class="sub">企业资料 · 导入文件 · 协作空间</span></div>
-        <div class="drive-stats">
-          <div class="dstat"><div class="l">全部文件</div><div class="v">186<small> 个</small></div></div>
-          <div class="dstat"><div class="l">已用空间</div><div class="v">2.4<small> GB / 20 GB</small></div></div>
-          <div class="dstat"><div class="l">本月新增</div><div class="v">23<small> 个</small></div></div>
-          <div class="dstat"><div class="l">共享给我</div><div class="v">7<small> 个</small></div></div>
+        <div class="sec-head"><h2>文件柜</h2><span class="sub">企业原件与解析映射，按已存分类整理。</span><span class="sub" id="driveDataSource" aria-live="polite"></span></div>
+        <div class="explorer-toolbar">
+          <span class="explorer-path" id="drivePath">文件柜 / 全部文件</span>
+          <button class="drive-btn" id="driveRefresh" type="button">刷新</button>
+          <button class="drive-btn" id="driveUploadBtn" type="button"><span id="driveUploadLabel">上传</span></button>
+          <button class="drive-btn primary" id="driveWizardBtn" type="button">导入 AI 分析</button>
         </div>
-        <div class="drive-toolbar">
-          <div class="crumb-chain">
-            <span class="seg">全部文件</span>
-            <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="2.4" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg>
-            <span class="seg cur">企业资料</span>
+        <label class="explorer-mobile">浏览分类<select id="driveSelect" aria-label="文件分类"></select></label>
+        <div class="explorer-layout">
+          <nav class="explorer-tree" id="driveTree" aria-label="文件分类"></nav>
+          <div class="explorer-content">
+            <p class="knowledge-meta" id="driveStats" aria-live="polite"></p>
+            <div class="card drive-files"><div class="table-wrap"><table><thead><tr><th>名称</th><th>格式</th><th>分类</th><th>大小</th><th>状态</th><th>来源</th><th>上传时间</th><th>操作</th></tr></thead><tbody id="driveFiles"></tbody></table></div></div>
+            <div class="card knowledge-empty" id="driveEmpty" hidden>暂无原始证据。当前公司尚未存入来源文件。<p>上传企业资料后，原件与解析映射会保存在这里。</p><button class="drive-btn primary" id="driveEmptyUpload" type="button">上传企业资料</button></div>
           </div>
-          <span class="sp"></span>
-          <button class="drive-btn" id="driveUploadBtn"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v4M17 8l-5-5-5 5M12 3v12"/></svg><span id="driveUploadLabel">上传</span></button>
-          <button class="drive-btn">新建文件夹</button>
-          <button class="drive-btn primary" id="driveWizardBtn"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4z"/></svg>导入 AI 分析</button>
-        </div>
-        <div class="drive-files">
-          <div class="table-wrap"><table><thead><tr><th>名称</th><th>大小</th><th>更新时间</th><th>来源</th><th class="b">操作</th></tr></thead><tbody id="driveFiles"></tbody></table></div>
-        </div>
-        <div class="drive-conn">
-          <span class="drive-conn-chip"><span class="ok"></span>飞书云文档已连接</span>
-          <span class="drive-conn-chip"><span class="ok"></span>本地文件已同步</span>
-          <span class="drive-conn-chip" data-go="ext">＋ 接入更多存储 / 协作来源</span>
         </div>
       </div>
     </div>
@@ -1543,7 +1461,7 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
     <div class="import-mask" id="importMask" aria-hidden="true">
       <section class="import-wizard" role="dialog" aria-modal="true" aria-labelledby="importTitle">
         <div class="import-head">
-          <div><div class="import-eyebrow">STARTUP AI MANAGER · IMPORT GUIDE</div><h2 id="importTitle">上传企业资料</h2><p>AI 会根据已获得的资料实时给出下一步建议。</p></div>
+          <div><div class="import-eyebrow">STARTUP AI MANAGER · IMPORT GUIDE</div><h2 id="importTitle">文件柜</h2><p>AI 会根据已获得的资料实时给出下一步建议。</p></div>
           <button class="import-close" id="importClose" type="button" aria-label="关闭导入向导">×</button>
         </div>
         <div class="import-progress">
@@ -1553,6 +1471,15 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
         </div>
         <div class="import-body">
           <div class="import-main">
+            <div class="import-reason import-registration" id="importCompanyCurrent" hidden>
+              <div class="label">当前公司主体</div>
+              <div class="import-company-current"><p>当前主体：<b id="importCurrentCompanyName"></b></p><button class="import-nav import-company-edit" id="importCompanyEdit" type="button">修改</button></div>
+            </div>
+            <form class="import-reason import-registration" id="importRegistration" hidden>
+              <label class="label" id="importCompanyLabel" for="importCompanyName">首次使用：请登记本公司全称</label>
+              <div class="import-registration-fields"><input id="importCompanyName" type="text" placeholder="本公司全称" required autocomplete="organization"><button class="import-nav primary" id="importRegister" type="submit">确认登记</button></div>
+              <p id="importRegistrationMessage" role="status"></p>
+            </form>
             <div class="import-reasons">
               <div class="import-reason"><div class="label">AI 导入建议</div><p id="importGuideText" aria-live="polite">正在生成个性化建议…</p></div>
               <div class="import-reason"><div class="label">建议上传</div><p id="importNextAction">正在分析已有资料…</p></div>
@@ -1562,7 +1489,7 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
               <button class="import-pick" id="importPick" type="button">选择文件</button>
               <input type="file" id="importFileInput" multiple accept=".pdf,.xls,.xlsx,.xlsm" hidden>
             </div>
-            <div class="import-files" id="importFiles"></div>
+            <div class="import-files" id="importFiles" aria-live="polite"></div>
             <div class="import-resume" id="importResume">资料状态以后台已存入的文件为准。</div>
             <div class="import-foot"><span class="hint" id="importFootHint">上传后将自动刷新 AI 建议</span><button class="import-nav primary" id="importRefresh" type="button">刷新建议</button></div>
           </div>
@@ -1620,6 +1547,56 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
 </div>
 
 <script>
+/* ===== SAM foundation: opt-in data + capability contracts ===== */
+(function(){
+  var config=window.SAM_CONFIG||{mode:'full',company_id:'default'};
+  var demo=Object.create(null);
+  function allowWrite(){
+    if(config.mode!=='readonly')return true;
+    window.alert('这一步请在本地操作');
+    return false;
+  }
+  function request(url,options){
+    options=options||{};
+    if(typeof url!=='string'||url.indexOf('/api/')!==0){
+      return Promise.reject(new Error('SAM API requires a same-origin /api/ path'));
+    }
+    var method=(options.method||'GET').toUpperCase();
+    if(['GET','HEAD','OPTIONS'].indexOf(method)<0&&!allowWrite()){
+      var error=new Error('这一步请在本地操作');error.code='sam_readonly';
+      return Promise.reject(error);
+    }
+    return window.fetch(url,Object.assign({},options,{credentials:'same-origin'}));
+  }
+  function isEmpty(value){
+    return value==null||value===''||(Array.isArray(value)?value.length===0:
+      typeof value==='object'&&Object.keys(value).length===0);
+  }
+  async function load(section,options){
+    options=options||{};
+    if(!Object.prototype.hasOwnProperty.call(demo,section)){
+      throw new Error('Register SAM.demo['+section+'] before loading');
+    }
+    try{
+      var response=await request(options.url);
+      if(!response.ok)throw new Error('HTTP '+response.status);
+      var payload=await response.json();
+      var data=options.select?options.select(payload):payload;
+      if((options.isEmpty||isEmpty)(data))throw new Error('empty data');
+      return {data:data,source:'api',demo:false,label:'',error:null};
+    }catch(error){
+      return {data:demo[section],source:'demo',demo:true,label:'演示数据',error:error};
+    }
+  }
+  function mark(element,result){
+    // Caller supplies an existing label slot; no implicit DOM/layout changes.
+    element.textContent=result.label;
+    element.dataset.samSource=result.source;
+  }
+  window.SAM={config:config,demo:demo,api:{request:request},
+    data:{load:load,mark:mark},ui:{allowWrite:allowWrite}};
+})();
+/* ===== /SAM foundation ===== */
 /* ===== 移动端抽屉导航 ===== */
 (function(){
   var body=document.body, mt=document.getElementById('menuToggle'), ov=document.getElementById('navOverlay');
@@ -1644,17 +1621,21 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
   var TITLES={
     overview:"企业综合",chat:"Startup AI Manager",info:"企业基本信息",bizov:"业务概览",hr:"人员管理",
     prod:"生产",purch:"采购",sales:"销售",mkt:"市场",fin:"财务",fund:"融资",
-    ext:"扩展中心",cal:"日程",drive:"云盘"
+    ext:"扩展中心",cal:"日程",drive:"文件柜",knowledge:"知识库"
   };
   var topbar=document.getElementById('topbar'),crumb=document.getElementById('crumb');
 
+  var knowledgeNavigation=0;
   /* ---------- screen routing ---------- */
   function go(id){
+    ++knowledgeNavigation;
+    if(sourceMask&&sourceMask.classList.contains('open'))closeKnowledgeSource();
     document.querySelectorAll('.screen').forEach(function(s){s.classList.toggle('active',s.id===id);});
     document.querySelectorAll('.sub-item').forEach(function(n){n.classList.toggle('active',n.dataset.go===id);});
     document.querySelectorAll('.ov-item,.sys-item').forEach(function(n){n.classList.toggle('active',n.dataset.go===id);});
     crumb.textContent=TITLES[id]||'';
     topbar.style.display=(id==='chat')?'none':'flex';
+    if(id==='knowledge'||id==='drive')return loadKnowledge();
   }
   document.querySelectorAll('[data-go]').forEach(function(b){
     b.addEventListener('click',function(){go(b.dataset.go);});
@@ -1762,14 +1743,17 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
       var d=botShell();fillBot(d,ANSWERS[gkey].t);return;
     }
     var shell=botShell();
-    fetch('http://127.0.0.1:5000/api/chat',{
+    window.SAM.api.request('/api/chat',{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({message:q})
     }).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
       .then(function(res){fillBot(shell,res.message);})
       .catch(function(){fillBot(shell,'AI 暂时无法响应，请确认后端服务已启动。');});
   }
-  function ask(q,gkey){go('chat');addUser(q);addBot(q,gkey);}
+  function ask(q,gkey){
+    if(!window.SAM.ui.allowWrite())return false;
+    go('chat');addUser(q);addBot(q,gkey);return true;
+  }
 
   document.querySelectorAll('.sugg-card').forEach(function(c){
     c.addEventListener('click',function(){ask(c.dataset.q);});
@@ -1777,20 +1761,14 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
   document.querySelectorAll('.skill').forEach(function(c){
     c.addEventListener('click',function(){ask(c.dataset.q);});
   });
-  document.querySelectorAll('.gc[data-gkey]').forEach(function(c){
-    c.addEventListener('click',function(){
-      var qmap={"激励":"员工激励有哪些待办？","研发":"研发项目进展如何？","订单进展":"订单进展如何？","财务诊断":"本月财务诊断结果如何？"};
-      ask(qmap[c.dataset.gkey]||'企业成长分析',c.dataset.gkey);
-    });
-  });
-
   input.addEventListener('input',function(){
     input.style.height='auto';input.style.height=Math.min(input.scrollHeight,140)+'px';
     sendBtn.disabled=input.value.trim().length===0;
   });
   function submit(){
     var q=input.value.trim();if(!q)return;
-    ask(q);input.value='';input.style.height='auto';sendBtn.disabled=true;input.focus();
+    if(!ask(q))return;
+    input.value='';input.style.height='auto';sendBtn.disabled=true;input.focus();
   }
   sendBtn.addEventListener('click',submit);
   input.addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit();}});
@@ -1891,41 +1869,19 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
   document.getElementById('calNext').addEventListener('click',function(){calM++;if(calM>11){calM=0;calY++;}renderCal();});
   renderCal();
 
-  /* ========== 云盘 ========== */
-  var FILES=[
-    {n:'营业执照与公司章程.pdf',s:'2.1 MB',d:'09-18 14:20',src:'企查查导入',f:false},
-    {n:'2025年度审计报告.pdf',s:'8.6 MB',d:'09-15 09:32',src:'本地上传',f:false},
-    {n:'1–9月财务凭证及三表.xlsx',s:'3.4 MB',d:'09-21 17:05',src:'财务整理生成',f:false},
-    {n:'股权 Cap Table_当前.xlsx',s:'1.2 MB',d:'09-19 11:40',src:'股权梳理生成',f:false},
-    {n:'天使轮投资协议(扫描件).pdf',s:'5.7 MB',d:'09-12 16:18',src:'飞书同步',f:false},
-    {n:'首批次申报材料（草稿）',s:'文件夹',d:'09-20 10:22',src:'协作空间',f:true},
-    {n:'客户认证资料包',s:'文件夹',d:'09-16 13:55',src:'协作空间',f:true},
-    {n:'行业研报合集_2026Q3',s:'文件夹',d:'09-21 08:47',src:'消息关注',f:true}
-  ];
-  document.getElementById('driveFiles').innerHTML=FILES.map(function(x){
-    var ic=x.f?'📁':'📄';
-    return '<tr><td class="b"><span class="file-ic">'+ic+'</span>'+x.n+'</td><td>'+x.s+'</td><td>'+x.d+'</td><td><span class="file-src">'+x.src+'</span></td><td class="b"><span class="file-act">预览</span><span class="file-act" data-go="chat">AI 分析</span></td></tr>';
-  }).join('');
-
-  /* ========== 真实上传：接入 OpenClaw harness ========== */
+  /* ========== 文件柜共用真实上传入口 ========== */
   var HARNESS_API='/api/upload';
-
   function fmtSize(bytes){
     if(bytes<1024)return bytes+' B';
     if(bytes<1024*1024)return (bytes/1024).toFixed(1)+' KB';
     return (bytes/1024/1024).toFixed(1)+' MB';
   }
-  function nowMMDD(){
-    var d=new Date();
-    function p(n){return (n<10?'0':'')+n;}
-    return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());
-  }
-  function prependFile(x){
-    var ic=x.f?'📁':'📄';
-    var tr=document.createElement('tr');
-    tr.innerHTML='<td class="b"><span class="file-ic">'+ic+'</span>'+x.n+'</td><td>'+x.s+'</td><td>'+x.d+'</td><td><span class="file-src">'+x.src+'</span></td><td class="b"><span class="file-act">预览</span><span class="file-act" data-go="chat">AI 分析</span></td>';
-    var tb=document.getElementById('driveFiles');
-    tb.insertBefore(tr,tb.firstChild);
+  function fmtTime(value){
+    if(!value)return '';
+    var d=new Date(value);
+    if(isNaN(d.getTime()))return value;
+    function p(n){return String(n).padStart(2,'0');}
+    return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());
   }
 
   /* ---------- AI 动态资料引导：业务方法只在后端 ---------- */
@@ -1948,43 +1904,523 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
     document.getElementById('importFootHint').textContent='未使用浏览器内置步骤或模板替代 AI 引导';
   }
   function showGuidePending(){
-    document.getElementById('importGuideText').textContent='资料已解析，AI 正在根据真实内容生成引导…';
+    document.getElementById('importGuideText').textContent='文件已入队，解析完成后 AI 会根据真实内容更新引导…';
     document.getElementById('importNextAction').textContent='稍后点击刷新获取基于解析证据的建议。';
     document.getElementById('importFootHint').textContent='解析与 AI 引导已解耦，上传不会等待模型冷启动';
   }
   function refreshGuide(){
+    if(!window.SAM.ui.allowWrite())return Promise.resolve();
     document.getElementById('importGuideText').textContent='正在向 AI 获取资料状态…';
-    return fetch(GUIDE_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event:'open'})})
+    return window.SAM.api.request(GUIDE_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event:'open'})})
       .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
       .then(function(res){renderGuide(res.guide);})
       .catch(showGuideError);
   }
+  // No demo fallback for registration/jobs: unknown state must not enable upload.
+  var registration=document.getElementById('importRegistration'),
+      registrationMessage=document.getElementById('importRegistrationMessage'),
+      companyCurrent=document.getElementById('importCompanyCurrent'), currentCompanyName='',
+      registered=null, registrationLoad=null, registrationVersion=0, registering=false,
+      wizardVersion=0;
+  var homeCompanyName=document.getElementById('homeCompanyName');
+  // 首页标题只显示登记接口确认的公司名，经 textContent 更新；空态/失败态显式提示，不回退静态样例。
+  function setHomeCompanyTitle(text){homeCompanyName.textContent=text;}
+  function escapeImport(value){
+    return String(value==null?'':value).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});
+  }
+  async function importRequest(url,options){
+    var response=await window.SAM.api.request(url,options);
+    var body=await response.json();
+    if(!response.ok){var error=new Error(body.message||body.error||('HTTP '+response.status));error.status=response.status;error.code=body.error;throw error;}
+    return body;
+  }
+  function showRegistration(message){
+    companyCurrent.hidden=true;registration.hidden=false;
+    document.getElementById('importCompanyLabel').textContent=registered?'修改本公司全称':'首次使用：请登记本公司全称';
+    document.getElementById('importRegister').textContent=registered?'确认保存':'确认登记';
+    registrationMessage.textContent=message||(registered?'保存后将更新当前公司主体。':'登记后可直接上传，无需离开文件柜。');
+  }
+  function showCurrentCompany(name){
+    currentCompanyName=name;document.getElementById('importCurrentCompanyName').textContent=name;
+    // 只接受非空字符串作为首页标题；空名/非字符串记录按未登记提示
+    setHomeCompanyTitle(typeof name==='string'&&name?name:'公司名称未登记');
+    registration.hidden=true;companyCurrent.hidden=false;registrationMessage.textContent='';
+  }
+  function checkRegistration(){
+    if(registrationLoad)return registrationLoad;
+    var version=registrationVersion;
+    registrationLoad=importRequest('/api/entity-roster').then(function(body){
+      if(!Array.isArray(body.entities))throw new Error('登记状态返回无效');
+      if(version===registrationVersion){
+        // Mirror the existing upload identity guard, not model name inference;
+        // 名称还必须是非空且非纯空白字符串才算有效登记，无效记录跳过，后续有效记录仍可选中。
+        var entity=body.entities.find(function(row){return row.origin==='declared'&&row.entity_type==='self'&&row.status==='active'
+          &&typeof row.entity_name==='string'&&row.entity_name.trim()!=='';});
+        registered=!!entity;
+        if(registered)showCurrentCompany(entity.entity_name);
+        else{showRegistration();setHomeCompanyTitle('公司名称未登记');}
+      }
+      return registered;
+    }).catch(function(error){
+      if(version===registrationVersion){registered=null;showRegistration('无法读取登记状态：'+error.message);setHomeCompanyTitle('公司名称暂不可用');}
+      return false;
+    }).finally(function(){registrationLoad=null;});
+    return registrationLoad;
+  }
+  function activeJob(entry){return entry.job&&(entry.job.status==='queued'||entry.job.status==='parsing');}
+  function stopPolling(entry){
+    entry.pollVersion=(entry.pollVersion||0)+1;
+    if(entry.timer){clearTimeout(entry.timer);entry.timer=null;}
+  }
+  function scheduleJob(entry){
+    if(!activeJob(entry)||entry.timer||entry.polling||!importMask.classList.contains('open')||document.hidden)return;
+    entry.timer=setTimeout(function(){entry.timer=null;pollJob(entry);},1800);
+  }
+  async function pollJob(entry){
+    if(!activeJob(entry)||entry.polling)return;
+    entry.polling=true;var version=entry.pollVersion||0;
+    try{
+      var body=await importRequest('/api/parse-jobs/'+encodeURIComponent(entry.job.job_id));
+      if(!body.job)throw new Error('解析任务返回无效');
+      if(version!==entry.pollVersion)return;
+      var wasDone=entry.job.status==='done',previousStatus=entry.job.status;
+      entry.job=body.job;entry.error='';
+      if(!wasDone&&entry.job.status==='done'&&window.SAM.config.mode!=='readonly'&&importMask.classList.contains('open'))refreshGuide();
+      // 上传任务进入终态后刷新公司看板的事实树状态
+      if(previousStatus!==entry.job.status&&FACTS_JOB_TERMINAL.indexOf(previousStatus)<0&&FACTS_JOB_TERMINAL.indexOf(entry.job.status)>=0)loadFactsTree();
+    }catch(error){if(version===entry.pollVersion)entry.error='状态读取失败：'+error.message;}
+    finally{
+      entry.polling=false;renderImportFiles();
+      if(!entry.error)scheduleJob(entry);
+    }
+  }
   function renderImportFiles(){
-    importFiles.innerHTML=uploadedFiles.map(function(f){return '<div class="import-file '+(f.ok?'ok':'err')+'"><span>📄</span><span class="name">'+f.name+'</span><span class="status">'+(f.ok?'已上传':f.error)+'</span></div>';}).join('');
+    importFiles.innerHTML=uploadedFiles.map(function(entry,index){
+      var job=entry.job, status=job?job.status:entry.status, label='', actions='';
+      if(status==='queued')label='排队中';
+      else if(status==='parsing'){
+        var total=Number(job.progress_total),current=Number(job.progress_current)||0;
+        label='解析中 · '+(job.stage||'');
+        if(total>0)label+=' · '+Math.min(100,Math.max(0,Math.round(current/total*100)))+'% ('+current+'/'+total+')';
+      }else if(status==='done')label='完成';
+      else if(status==='failed')label=job&&job.l2_committed?'简报/导览失败':'失败';
+      else if(status==='canceled')label='已取消';
+      else if(status==='awaiting_registration')label='等待登记公司';
+      else label=status==='uploading'?'上传中…':(status||'');
+      function button(action,text){return '<button class="import-nav" type="button" data-import-action="'+action+'" data-import-index="'+index+'"'+(entry.busy?' disabled':'')+'>'+text+'</button>';}
+      if(job&&status==='done'){
+        actions=button('result','查看结果')+button('source','溯源');
+      }
+      if(job&&status==='queued')actions+=button('cancel','取消');
+      if(status==='failed'||status==='canceled')actions+=button('retry',job&&job.l2_committed?'重建简报/导览':'重试');
+      if(job&&entry.error&&activeJob(entry))actions+=button('poll','刷新状态');
+      return '<div class="import-file '+(status==='done'?'ok':status==='failed'?'err':'')+'"><span>📄</span><span class="name">'+escapeImport(entry.name)+'</span><span class="status">'+escapeImport(label)+'</span>'+
+        (job&&job.message?'<div class="import-file-message">'+escapeImport(job.message)+'</div>':'')+
+        (entry.error?'<div class="import-file-message">'+escapeImport(entry.error)+'</div>':'')+
+        (actions?'<div class="import-file-actions">'+actions+'</div>':'')+'</div>';
+    }).join('');
   }
-  function openImportWizard(){importMask.classList.add('open');importMask.setAttribute('aria-hidden','false');refreshGuide();}
-  function closeImportWizard(){importMask.classList.remove('open');importMask.setAttribute('aria-hidden','true');}
-  function uploadImportFile(file){
-    var fd=new FormData();fd.append('file',file);
-    var entry={name:file.name,ok:false,error:'上传中…'};uploadedFiles.push(entry);renderImportFiles();
-    return fetch(HARNESS_API,{method:'POST',body:fd}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}).then(function(res){
-      entry.ok=true;entry.error='';prependFile({n:res.original_name,s:fmtSize(res.size),d:nowMMDD(),src:'本地上传',f:false});
-      if(res.guide)renderGuide(res.guide);else if(res.guide_status==='queued')showGuidePending();else showGuideError();
-    }).catch(function(err){entry.error=err.message||'上传失败';}).finally(renderImportFiles);
+  async function loadImportJobs(version){
+    try{
+      var body=await importRequest('/api/parse-jobs');
+      if(!Array.isArray(body.jobs))throw new Error('解析任务列表返回无效');
+      if(version!==wizardVersion||!importMask.classList.contains('open'))return;
+      body.jobs.forEach(function(job){
+        var entry=uploadedFiles.find(function(f){return f.job&&f.job.job_id===job.job_id;});
+        if(!entry){entry={name:job.original_name,job:job,pollVersion:0};uploadedFiles.push(entry);}
+        // Do not overwrite a newer in-flight upload/action/poll response.
+        else return;
+        scheduleJob(entry);
+      });
+      document.getElementById('importResume').textContent='资料状态以后台已存入的文件为准。';
+      renderImportFiles();
+    }catch(error){if(version===wizardVersion)document.getElementById('importResume').textContent='任务读取失败：'+error.message;}
   }
-  function handleImportFiles(files){if(!files||!files.length)return;Promise.all(Array.prototype.slice.call(files).map(uploadImportFile));importInput.value='';}
+  function openImportWizard(){
+    importMask.classList.add('open');importMask.setAttribute('aria-hidden','false');
+    var version=++wizardVersion;
+    checkRegistration().then(function(ok){if(ok&&version===wizardVersion&&importMask.classList.contains('open')&&window.SAM.config.mode!=='readonly')refreshGuide();});
+    loadImportJobs(version);
+    uploadedFiles.forEach(function(entry){if(activeJob(entry)){entry.error='';scheduleJob(entry);}});
+    if(window.SAM.config.mode==='readonly')document.getElementById('importGuideText').textContent='这一步请在本地操作';
+  }
+  function closeImportWizard(){
+    ++wizardVersion;importMask.classList.remove('open');importMask.setAttribute('aria-hidden','true');uploadedFiles.forEach(stopPolling);
+  }
+  async function uploadImportFile(entry){
+    if(!window.SAM.ui.allowWrite()||entry.busy)return;
+    if(!registered){entry.status='awaiting_registration';showRegistration();renderImportFiles();return;}
+    entry.busy=true;entry.status='uploading';entry.error='';renderImportFiles();
+    try{
+      var fd=new FormData();fd.append('file',entry.file);
+      var res=await importRequest(HARNESS_API,{method:'POST',body:fd});
+      if(!res.job_id)throw new Error('上传响应缺少解析任务编号');
+      // An opening history read may see this job before the upload reply arrives.
+      uploadedFiles=uploadedFiles.filter(function(other){
+        if(other!==entry&&other.job&&other.job.job_id===res.job_id){stopPolling(other);return false;}
+        return true;
+      });
+      entry.job=res;entry.status='';entry.file=null;entry.pollVersion=0;
+      loadKnowledge();
+      showGuidePending();scheduleJob(entry);
+    }catch(error){
+      if(error.status===409&&error.code==='company_not_registered'){
+        ++registrationVersion;registered=false;entry.status='awaiting_registration';showRegistration(error.message);
+      }else{entry.status='failed';entry.error=error.message||'上传失败';}
+    }finally{entry.busy=false;renderImportFiles();}
+  }
+  async function handleImportFiles(files){
+    if(!files||!files.length||!window.SAM.ui.allowWrite())return;
+    var entries=Array.prototype.slice.call(files).map(function(file){return {name:file.name,file:file,status:'等待登记状态'};});
+    uploadedFiles=uploadedFiles.concat(entries);importInput.value='';renderImportFiles();
+    if(registered===null)await checkRegistration();
+    if(registered===null){entries.forEach(function(entry){entry.status='awaiting_registration';});renderImportFiles();return;}
+    await Promise.all(entries.map(uploadImportFile));
+  }
+  document.getElementById('importCompanyEdit').addEventListener('click',function(){
+    if(!window.SAM.ui.allowWrite()||registering)return;
+    document.getElementById('importCompanyName').value=currentCompanyName;
+    showRegistration();document.getElementById('importCompanyName').focus();
+  });
+  registration.addEventListener('submit',async function(event){
+    event.preventDefault();
+    if(!window.SAM.ui.allowWrite()||registering)return;
+    var name=document.getElementById('importCompanyName').value.trim();
+    if(!name){showRegistration('请填写本公司全称');return;}
+    registering=true;document.getElementById('importRegister').disabled=true;
+    try{
+      var body=await importRequest('/api/entity-roster',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({entity_name:name})});
+      ++registrationVersion;registered=true;showCurrentCompany(body.entity&&body.entity.entity_name||name);
+      await Promise.all(uploadedFiles.filter(function(entry){return entry.status==='awaiting_registration';}).map(uploadImportFile));
+      refreshGuide();
+    }catch(error){showRegistration(error.message);}
+    finally{registering=false;document.getElementById('importRegister').disabled=false;}
+  });
+  importFiles.addEventListener('click',async function(event){
+    var button=event.target.closest('[data-import-action]');
+    if(!button||!importFiles.contains(button))return;
+    var entry=uploadedFiles[Number(button.dataset.importIndex)],action=button.dataset.importAction;
+    if(!entry||entry.busy)return;
+    if(action==='result'){
+      closeImportWizard();var navigation=knowledgeNavigation,loaded=await loadKnowledge();
+      if(loaded&&navigation===knowledgeNavigation)openKnowledgeSource({file_hash:entry.job.file_hash});return;
+    }
+    if(action==='source'){
+      closeImportWizard();var navigation=knowledgeNavigation,loaded=await loadKnowledge();
+      if(loaded&&navigation===knowledgeNavigation&&!importMask.classList.contains('open'))openKnowledgeSource({file_hash:entry.job.file_hash},document.getElementById('importNavBtn'));return;
+    }
+    if(action==='poll'){entry.error='';await pollJob(entry);return;}
+    if(!window.SAM.ui.allowWrite())return;
+    if(!entry.job){await uploadImportFile(entry);return;}
+    entry.busy=true;stopPolling(entry);renderImportFiles();
+    try{
+      var body=await importRequest('/api/parse-jobs/'+encodeURIComponent(entry.job.job_id)+'/'+action,{method:'POST'});
+      if(!body.job)throw new Error('解析任务返回无效');
+      var previousStatus=entry.job.status;
+      entry.job=body.job;entry.error='';scheduleJob(entry);
+      // 取消等动作同样让任务进入终态，看板状态随之刷新
+      if(previousStatus!==entry.job.status&&FACTS_JOB_TERMINAL.indexOf(previousStatus)<0&&FACTS_JOB_TERMINAL.indexOf(entry.job.status)>=0)loadFactsTree();
+    }catch(error){entry.error=error.message;scheduleJob(entry);}
+    finally{entry.busy=false;renderImportFiles();}
+  });
+  document.addEventListener('visibilitychange',function(){
+    uploadedFiles.forEach(function(entry){if(document.hidden)stopPolling(entry);else scheduleJob(entry);});
+  });
   document.getElementById('importWizardBtn').addEventListener('click',openImportWizard);
-  document.getElementById('importNavBtn').addEventListener('click',openImportWizard);
+  document.getElementById('driveEmptyUpload').addEventListener('click',openImportWizard);
   document.getElementById('driveUploadBtn').addEventListener('click',openImportWizard);
   document.getElementById('driveWizardBtn').addEventListener('click',openImportWizard);
   document.getElementById('importClose').addEventListener('click',closeImportWizard);
   document.getElementById('importChatFloat').addEventListener('click',function(){closeImportWizard();go('chat');});
-  document.getElementById('importPick').addEventListener('click',function(){importInput.click();});
+  document.getElementById('importPick').addEventListener('click',function(){if(window.SAM.ui.allowWrite())importInput.click();});
   importInput.addEventListener('change',function(){handleImportFiles(importInput.files);});
   ['dragenter','dragover'].forEach(function(evt){importDrop.addEventListener(evt,function(e){e.preventDefault();importDrop.classList.add('drag');});});
   ['dragleave','drop'].forEach(function(evt){importDrop.addEventListener(evt,function(e){e.preventDefault();importDrop.classList.remove('drag');if(evt==='drop')handleImportFiles(e.dataTransfer.files);});});
   document.getElementById('importRefresh').addEventListener('click',refreshGuide);
   importMask.addEventListener('click',function(e){if(e.target===importMask)closeImportWizard();});
+
+  /* ---------- knowledge: opaque read projection, no classification/inference ---------- */
+  var knowledgeData={},knowledgeVersion=0,sourceReturnFocus=null;
+  var sourceMask=document.getElementById('knowledgeSourceMask');
+  var sourceClose=document.getElementById('knowledgeSourceClose');
+  window.SAM.demo.knowledge={}; // failed/empty reads show clean empty states, never fake facts
+  function kObject(value){return value&&typeof value==='object'&&!Array.isArray(value)?value:{};}
+  function kList(value){return Array.isArray(value)?value:[];}
+  function kMissing(value){return value===null||value===undefined||value==='';}
+  function kText(value,fallback){
+    if(kMissing(value))value=fallback===undefined?'未提供':fallback;
+    return escapeImport(typeof value==='object'?JSON.stringify(value,null,2):String(value));
+  }
+  function kEmpty(text){return '<div class="card knowledge-empty">'+text+'</div>';}
+  function kProse(value){return '<pre class="knowledge-prose">'+kText(value)+'</pre>';}
+  function kWarnings(value){return kList(value).map(function(w){return '<p class="knowledge-meta" role="status">'+kText(w)+'</p>';}).join('');}
+  function kRef(value){
+    var ref=kObject(value);
+    if(kMissing(ref.file_hash))return '<p class="knowledge-meta">暂无可用来源原文链接</p>';
+    var url='/knowledge/sources/'+encodeURIComponent(ref.file_hash),params=[];
+    if(!kMissing(ref.page))params.push('page='+encodeURIComponent(ref.page));
+    if(!kMissing(ref.locator))params.push('locator='+encodeURIComponent(ref.locator));
+    if(params.length)url+='?'+params.join('&');
+    return '<a class="knowledge-source" href="'+kText(url)+'" data-knowledge-source="'+kText(ref.file_hash)+'" data-page="'+kText(ref.page,'')+'" data-locator="'+kText(ref.locator,'')+'">查看来源原文 · 页码 '+kText(ref.page,'未提供（整文件）')+(kMissing(ref.locator)?'':' · '+kText(ref.locator))+'</a>';
+  }
+  function kL2(file,ref){
+    var l2=kObject(file.l2),pages=kList(l2.pages);
+    var body=kWarnings(file.warnings)+'<p class="knowledge-meta">file_hash：'+kText(file.file_hash)+'</p>';
+    if(!kMissing(l2.manifest_uri))body+='<p class="knowledge-meta">L2 manifest：'+kText(l2.manifest_uri)+'</p>';
+    if(ref&&(!kMissing(ref.page)||!kMissing(ref.locator)))body+='<p class="knowledge-meta">请求查看的坐标：页码 '+kText(ref.page)+' · '+kText(ref.locator,'定位字段未提供')+'。以下保留已存原文坐标，不补造缺失值。</p>';
+    if(pages.length){
+      body+=pages.map(function(page){
+        page=kObject(page);
+        var selected=ref&&!kMissing(ref.page)&&String(ref.page)===String(page.page);
+        return '<details class="card knowledge-detail'+(selected?' knowledge-selected':'')+'" '+(!ref||kMissing(ref.page)||selected?'open':'')+'><summary>原文页码：'+kText(page.page)+'</summary>'+(!kMissing(page.mapping)?kProse(page.mapping):'<p class="knowledge-empty">尚无可读取的 L2 原文。</p>')+'</details>';
+      }).join('');
+    }else body+=!kMissing(l2.mapping)?kProse(l2.mapping):kEmpty('尚无可读取的 L2 原文，文件可能仍在解析或解析未成功。');
+    return body;
+  }
+  var driveSelection='all',knowledgeSelection='facts';
+  function categoryLabel(item){return kMissing(item.label)?(kMissing(item.category)?'未存分类':String(item.category)):String(item.label);}
+  function fileCategory(file){return kMissing(file.category)?null:String(file.category);}
+  function moduleDictionary(data){
+    return kList(data.modules||kObject(window.SAM_CONFIG).modules).map(kObject);
+  }
+  function moduleHidden(data,key){
+    return moduleDictionary(data).some(function(module){return module.code===key&&module.hidden;});
+  }
+  function driveCategories(data){
+    var categories=moduleDictionary(data).filter(function(module){return !module.hidden;}).map(function(module){
+      return {category:module.code,label:module.name};
+    });
+    if(kList(kObject(data.evidence).files).some(function(value){return fileCategory(kObject(value))===null;})){
+      categories.push({category:null,label:'待归类'});
+    }
+    return categories;
+  }
+  function renderTree(id,nodes,selection){
+    document.getElementById(id+'Tree').innerHTML=nodes.map(function(node){return '<button class="explorer-node'+(node.child?' child':'')+'" type="button" data-explorer-node="'+kText(node.key)+'" aria-current="'+(selection===node.key?'true':'false')+'">'+kText(node.label)+'</button>';}).join('');
+    var select=document.getElementById(id+'Select');
+    select.innerHTML=nodes.map(function(node){return '<option value="'+kText(node.key)+'">'+(node.child?'　':'')+kText(node.label)+'</option>';}).join('');select.value=selection;
+  }
+  function renderExplorerTree(data){
+    var facts=kObject(data.facts),nodes=[{key:'facts',label:'确认事实'}];
+    kList(facts.groups).forEach(function(group,index){if(!moduleHidden(data,kObject(group).category))nodes.push({key:'group:'+index,label:categoryLabel(kObject(group)),child:true});});
+    var equity=kObject(facts.cap_table);
+    if(kList(equity.events).length||Object.keys(kObject(equity.snapshot)).length||kList(equity.warnings).length)nodes.push({key:'equity',label:'股权事件链',child:true});
+    nodes.push({key:'working',label:'工作记忆'});
+    if(!nodes.some(function(node){return node.key===knowledgeSelection;}))knowledgeSelection='facts';
+    renderTree('knowledge',nodes,knowledgeSelection);
+    var selected=nodes.find(function(node){return node.key===knowledgeSelection;});
+    document.getElementById('knowledgePath').textContent='知识库 / '+(selected.child?'确认事实 / ':'')+selected.label;
+    document.getElementById('confirmed-facts').hidden=knowledgeSelection==='working';
+    document.getElementById('working-memory').hidden=knowledgeSelection!=='working';
+    document.getElementById('knowledgeFacts').hidden=knowledgeSelection==='equity';
+    document.getElementById('knowledgeEquity').hidden=knowledgeSelection.indexOf('group:')===0;
+  }
+  function renderDrive(data){
+    var files=kList(kObject(data.evidence).files).map(kObject),categories=driveCategories(data);
+    var nodes=[{key:'all',label:'全部文件'}];
+    categories.forEach(function(category,index){nodes.push({key:'category:'+index,label:categoryLabel(category),child:true});});
+    if(!nodes.some(function(node){return node.key===driveSelection;}))driveSelection='all';
+    renderTree('drive',nodes,driveSelection);
+    var shown=driveSelection==='all'?files:files.filter(function(file){return fileCategory(file)===categories[Number(driveSelection.slice(9))].category;});
+    document.getElementById('drivePath').textContent='文件柜 / '+nodes.find(function(node){return node.key===driveSelection;}).label;
+    var sizes=shown.map(function(file){return file.size_bytes;});
+    document.getElementById('driveStats').textContent='当前分类 '+shown.length+' 个文件'+(shown.length&&sizes.every(function(size){return typeof size==='number'&&Number.isFinite(size)&&size>=0;})?' · 合计 '+fmtSize(sizes.reduce(function(sum,size){return sum+size;},0)):'');
+    document.getElementById('driveEmpty').hidden=shown.length>0;
+    document.getElementById('driveFiles').innerHTML=shown.map(function(file){
+      var format=file.format||file.mime_type, name=String(file.original_name||'');
+      if(!format&&name.lastIndexOf('.')>=0)format=name.slice(name.lastIndexOf('.')+1).toUpperCase();
+      var size=typeof file.size_bytes==='number'&&Number.isFinite(file.size_bytes)&&file.size_bytes>=0?fmtSize(file.size_bytes):'未提供';
+      var action=kMissing(file.file_hash)?'暂无可用来源':
+        '<button class="file-act" type="button" data-knowledge-source="'+kText(file.file_hash)+'">查看映射</button><button class="file-act" type="button" data-knowledge-source="'+kText(file.file_hash)+'" data-source-view="original">查看原件</button>';
+      return '<tr id="source-'+kText(encodeURIComponent(file.file_hash||''))+'"><td class="b">'+kText(file.original_name)+'</td><td>'+kText(format)+'</td><td>'+kText(categoryLabel(file))+'</td><td>'+size+'</td><td>'+kText(file.status)+(!kMissing(kObject(file.l2).mapping)?'':'<p class="knowledge-meta">尚无解析映射</p>')+kWarnings(file.warnings)+'</td><td>'+kText(file.origin_zone)+'</td><td>'+kText(fmtTime(file.uploaded_at))+'</td><td>'+action+'</td></tr>';
+    }).join('');
+  }
+  function kOriginal(file){
+    var body='<div class="card"><div class="card-h"><h3>企业原件</h3></div><p class="knowledge-meta">名称：'+kText(file.original_name)+'</p><p class="knowledge-meta">格式：'+kText(file.format||file.mime_type)+' · 大小：'+kText(file.size_bytes)+' 字节</p><p class="knowledge-meta">来源：'+kText(file.origin_zone)+' · 上传时间：'+kText(fmtTime(file.uploaded_at))+'</p><p class="knowledge-meta">文件指纹：'+kText(file.file_hash)+'</p>';
+    if(window.SAM.config.mode!=='readonly'&&!kMissing(file.file_hash))body+='<a class="knowledge-source" href="/api/knowledge/sources/'+kText(encodeURIComponent(file.file_hash))+'/original" download>下载原件</a>';
+    else body+='<p class="knowledge-meta">当前云端仅保存只读资料快照，原件请回本地查看。</p>';
+    return body+'</div>';
+  }
+  ['drive','knowledge'].forEach(function(id){
+    function selectNode(key){if(id==='drive')driveSelection=key;else knowledgeSelection=key;renderKnowledge(knowledgeData);}
+    document.getElementById(id+'Tree').addEventListener('click',function(event){
+      var node=event.target.closest('[data-explorer-node]');
+      if(node&&document.getElementById(id+'Tree').contains(node))selectNode(node.dataset.explorerNode);
+    });
+    document.getElementById(id+'Select').addEventListener('change',function(event){selectNode(event.target.value);});
+    document.getElementById(id+'Refresh').addEventListener('click',loadKnowledge);
+  });
+  function renderKnowledge(data){
+    data=kObject(data);var facts=kObject(data.facts),working=kObject(data.working_memory);
+    renderDrive(data);renderExplorerTree(data);
+    var groups=kList(facts.groups);
+    if(knowledgeSelection.indexOf('group:')===0)groups=groups.filter(function(_,index){return knowledgeSelection==='group:'+index;});
+    document.getElementById('knowledgeFacts').innerHTML=groups.map(function(group){
+      group=kObject(group);
+      return '<article class="card"><div class="card-h"><h3>'+kText(kMissing(group.label)?group.category:group.label,'未存分类')+'</h3></div><div class="table-wrap"><table><thead><tr><th>实体</th><th>属性</th><th>数值 / 内容</th><th>期间</th><th>来源</th></tr></thead><tbody>'+kList(group.facts).map(function(fact){fact=kObject(fact);return '<tr><td>'+kText(fact.entity)+'</td><td>'+kText(fact.attribute)+'</td><td>'+kText(fact.value)+(kMissing(fact.unit)?'':' '+kText(fact.unit))+'</td><td>'+kText(fact.period)+'</td><td>'+kRef(fact.source_ref)+(kMissing(kObject(fact.source_ref).locator)?'<p class="knowledge-meta">原文定位字段未提供</p>':'')+'</td></tr>';}).join('')+'</tbody></table></div></article>';
+    }).join('')||kEmpty('暂无确认事实。未确认候选不会显示为确认事实。');
+    var equity=kObject(facts.cap_table),balance=kObject(equity.snapshot);
+    var equityHtml='<div class="card-h"><h3>股权事件链回放</h3></div>'+kWarnings(equity.warnings);
+    if(Object.keys(balance).length){
+      equityHtml+='<p class="knowledge-meta">已发行总股数：'+kText(balance.total_issued)+' · 完全稀释总股数：'+kText(balance.total_fully_diluted)+' · 期权池：'+kText(balance.option_pool)+'</p><div class="table-wrap"><table><thead><tr><th>持有人</th><th>已发行</th><th>完全稀释</th><th>已发行持股比例</th><th>完全稀释持股比例</th></tr></thead><tbody>'+Object.entries(kObject(balance.holders)).map(function(pair){var h=kObject(pair[1]);return '<tr><td>'+kText(pair[0])+'</td>'+['issued','fully_diluted','ownership_issued_pct','ownership_fully_diluted_pct'].map(function(key){return '<td>'+kText(h[key])+(key.endsWith('_pct')&&!kMissing(h[key])?'%':'')+'</td>';}).join('')+'</tr>';}).join('')+'</tbody></table></div><p class="knowledge-meta">由现有回放函数计算，不写入或更新股权快照。</p>';
+      if(balance.event_ids)equityHtml+='<p class="knowledge-meta">有效事件 event_ids：'+kText(balance.event_ids)+'</p>';
+    }else if(!kList(equity.warnings).length)equityHtml+='<p class="knowledge-empty">暂无已存股权事件链，不展示占位持股数值。</p>';
+    if(kList(equity.events).length)equityHtml+='<details class="knowledge-detail"><summary>查看事件与来源（含历史修正；有效事件以回放 event_ids 为准）</summary>'+equity.events.map(function(event){event=kObject(event);return '<div class="mt16"><b>'+kText(event.effective_at)+' · '+kText(event.event_type)+'</b><p class="knowledge-meta">'+kText(event.holder_id)+' · '+kText(event.instrument)+' · '+kText(event.shares_delta)+' · '+kText(event.ownership_basis)+' · '+kText(event.event_id)+'</p>'+kList(event.provenance).map(function(ref){ref=kObject(ref);return kRef(ref.source_ref)+kProse(ref.anchor);}).join('')+'</div>';}).join('')+'</details>';
+    document.getElementById('knowledgeEquity').innerHTML=equityHtml;
+    document.getElementById('knowledgeRuntime').innerHTML=kWarnings(working.warnings)+(kList(working.items).length?'<div class="card"><div class="table-wrap"><table><thead><tr><th>目标</th><th>状态</th><th>到期时间</th><th>工作记录</th></tr></thead><tbody>':'')+(kList(working.items).map(function(item){
+      item=kObject(item);var runtime=kObject(item.runtime),events=kList(item.events).map(kObject);
+      var closed=events.filter(function(e){return e.type==='open_loop_remove';});
+      return '<tr><td>'+kText(runtime.goal)+'</td><td>'+kText(runtime.state)+'</td><td>'+kText(runtime.expires_at)+'</td><td><details class="knowledge-detail"><summary>查看目标与工作记录</summary><p class="knowledge-meta">会话：'+kText(runtime.session_id)+' · 任务：'+kText(runtime.task_id)+'</p><p class="knowledge-meta">临时性 · 到期时间：'+kText(runtime.expires_at)+'</p><div class="grid g2 mt16"><div><h4>未完成事项</h4>'+ (kList(runtime.open_loops).map(function(loop){loop=kObject(loop);return '<p class="knowledge-prose">'+kText(loop.id)+' · '+kText(loop.text)+'</p>';}).join('')||'<p class="knowledge-meta">暂无未完成事项。</p>')+'</div><div><h4>闭环记录</h4>'+ (closed.map(function(event){var payload=kObject(event.payload);return '<p class="knowledge-prose">'+kText(event.at)+' · '+kText(payload.id)+events.filter(function(e){return e.type==='open_loop_add'&&kObject(e.payload).id===payload.id;}).map(function(e){return ' · '+kText(kObject(e.payload).text);}).join('')+'</p>';}).join('')||'<p class="knowledge-meta">暂无已存闭环事件。</p>')+'</div></div><div class="mt16"><h4>待固化候选 / 临时笔记</h4><p class="knowledge-meta">以下为工作笔记，尚未成为确认事实，仅供后续核验。</p>'+ (kList(runtime.working_notes).map(function(note){note=kObject(note);return kProse(note.text)+'<p class="knowledge-meta">置信度：'+kText(note.confidence)+' · '+kText(note.status)+(note.inferred?' · 推断':'')+' · 到期 '+kText(runtime.expires_at)+'</p>';}).join('')||'<p class="knowledge-meta">暂无待固化候选或临时笔记。</p>')+'</div><details class="knowledge-detail"><summary>事件时间线</summary>'+ (events.map(function(event){return '<div class="mt16"><b>'+kText(event.at)+' · '+kText(event.type)+'</b>'+kProse(event.payload)+'</div>';}).join('')||'<p class="knowledge-meta">暂无已存事件。</p>')+'</details></details></td></tr>';
+    }).join('')||(!kList(working.warnings).length?kEmpty('暂无当前公司可读取的工作记忆。'):''))+(kList(working.items).length?'</tbody></table></div></div>':'');
+  }
+  async function loadKnowledge(){
+    var version=++knowledgeVersion;
+    var result=await window.SAM.data.load('knowledge',{url:'/api/knowledge',isEmpty:function(value){return value==null;}});
+    if(version!==knowledgeVersion)return false;
+    knowledgeData=kObject(result.data);renderKnowledge(knowledgeData);
+    ['knowledgeDataSource','driveDataSource'].forEach(function(id){var label=document.getElementById(id);label.textContent=result.error?'读取失败，请刷新重试':!Object.keys(knowledgeData).length?'暂无可用数据':'';});
+    return true;
+  }
+  function focusKnowledgeFile(hash){
+    document.querySelectorAll('#drive .knowledge-selected').forEach(function(card){card.classList.remove('knowledge-selected');});
+    var card=document.getElementById('source-'+encodeURIComponent(hash));
+    if(card&&document.getElementById('drive').classList.contains('active')){card.classList.add('knowledge-selected');card.scrollIntoView({block:'start',behavior:'smooth'});}
+  }
+  function openKnowledgeSource(ref,returnFocus){
+    var file=kList(kObject(knowledgeData.evidence).files).find(function(item){return kObject(item).file_hash===ref.file_hash;});
+    sourceReturnFocus=returnFocus||document.activeElement;
+    document.getElementById('knowledgeSourceTitle').textContent=file&&!kMissing(file.original_name)?String(file.original_name):'L2 原文';
+    document.getElementById('knowledgeSourceBody').innerHTML=file?(ref.original?kOriginal(file):kL2(file,ref)):kEmpty('尚无可读取的 L2 原文，文件可能仍在解析或解析未成功。');
+    sourceMask.classList.add('open');sourceMask.setAttribute('aria-hidden','false');sourceClose.focus();
+    document.getElementById('knowledgeSourceBody').scrollTop=0;
+    var selected=sourceMask.querySelector('.knowledge-selected');
+    if(selected)selected.scrollIntoView({block:'nearest'});
+  }
+  function closeKnowledgeSource(){
+    sourceMask.classList.remove('open');sourceMask.setAttribute('aria-hidden','true');
+    if(sourceReturnFocus&&sourceReturnFocus.isConnected)sourceReturnFocus.focus();
+  }
+  ['knowledge','drive'].forEach(function(id){document.getElementById(id).addEventListener('click',function(event){
+    var link=event.target.closest('[data-knowledge-source]');
+    if(!link||!document.getElementById(id).contains(link))return;
+    event.preventDefault();openKnowledgeSource({file_hash:link.dataset.knowledgeSource,page:link.dataset.page,locator:link.dataset.locator,original:link.dataset.sourceView==='original'},link);
+  });});
+  sourceClose.addEventListener('click',closeKnowledgeSource);
+  sourceMask.addEventListener('click',function(event){if(event.target===sourceMask)closeKnowledgeSource();});
+  sourceMask.addEventListener('keydown',function(event){
+    if(event.key==='Escape'){event.preventDefault();closeKnowledgeSource();}
+    if(event.key==='Tab'){
+      var focusable=sourceMask.querySelectorAll('button,summary,a[href]'),first=focusable[0],last=focusable[focusable.length-1];
+      if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}
+      else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}
+    }
+  });
+  // Old links and refreshes resolve client-side; the backend only serves the shell.
+  async function routeKnowledgeLocation(){
+    var location=window.location;if(!location)return;
+    var prefix='/knowledge/sources/',isSource=location.pathname.startsWith(prefix);
+    if(location.pathname!=='/knowledge'&&!isSource&&!location.hash.startsWith('#source-')&&location.hash!=='#drive'&&location.hash!=='#knowledge')return;
+    var pending=go(isSource||location.hash.startsWith('#source-')?'drive':location.hash==='#drive'?'drive':'knowledge'),navigation=knowledgeNavigation,loaded=await pending;
+    if(!loaded||navigation!==knowledgeNavigation)return;
+    var hash='';try{hash=decodeURIComponent(isSource?location.pathname.slice(prefix.length):location.hash.startsWith('#source-')?location.hash.slice(8):'');}catch(_){return;}
+    if(hash)focusKnowledgeFile(hash);
+    if(isSource||hash){var params=new URLSearchParams(location.search);openKnowledgeSource({file_hash:hash,page:params.get('page'),locator:params.get('locator')});}
+  }
+  renderKnowledge({});
+  window.addEventListener('hashchange',routeKnowledgeLocation);
+  window.addEventListener('popstate',routeKnowledgeLocation);
+
+  /* ========== 公司看板：事实树真实状态（只读，公司范围由宿主注入） ========== */
+  // 不使用 SAM.data.load 的演示回退：读取失败/未就绪时展示真实状态，绝不回退静态样例。
+  var FACTS_JOB_TERMINAL=['done','failed','canceled'];
+  var factsBoardSub=document.getElementById('factsBoardSub'),
+      factsStateEl=document.getElementById('factsState'),
+      factsBriefEl=document.getElementById('factsBrief'),
+      factsTrunksEl=document.getElementById('factsTrunks'),
+      factsRetryBtn=document.getElementById('factsRetryBtn'),
+      factsTreeVersion=0;
+  function factsBoardReset(){
+    factsBriefEl.hidden=true;factsBriefEl.textContent='';
+    factsTrunksEl.hidden=true;factsTrunksEl.innerHTML='';
+    factsRetryBtn.hidden=true;
+  }
+  function factsBoardError(message,canRetry){
+    factsBoardReset();
+    factsBoardSub.textContent='事实树状态暂不可用';
+    factsStateEl.textContent=message;
+    factsRetryBtn.hidden=!canRetry;
+  }
+  function factsPackLabel(binding){
+    binding=kObject(binding);
+    if(kMissing(binding.template_pack))return '';
+    return '模板 '+String(binding.template_pack)+(kMissing(binding.pack_version)?'':' · '+String(binding.pack_version));
+  }
+  function factsTrunkTable(trunks){
+    return '<table><thead><tr><th>树枝</th><th>编码</th><th>摘要状态</th><th>事实叶生成</th></tr></thead><tbody>'+trunks.map(function(item){
+      item=kObject(item);
+      var generated=typeof item.generated_leaves==='number'?String(item.generated_leaves):'未提供';
+      var total=typeof item.leaves==='number'?String(item.leaves):'未提供';
+      var state=item.state==='ready'?'摘要已生成':item.state==='not_generated'?'摘要待生成':kText(item.state);
+      return '<tr><td>'+kText(item.directory)+'</td><td>'+kText(item.code)+'</td><td>'+state+'</td><td>'+generated+' / '+total+' 叶</td></tr>';
+    }).join('')+'</tbody></table>';
+  }
+  function renderFactsTree(tree){
+    factsBoardReset();
+    if(tree.state==='unbound'){
+      factsBoardSub.textContent='尚未绑定事实树模板';
+      factsStateEl.textContent='当前公司尚未绑定事实树模板，暂无事实树可读取。可先从「上传企业资料」沉淀资料；绑定与事实沉淀完成后，这里会展示真实状态。';
+      return;
+    }
+    var pack=factsPackLabel(tree.binding);
+    if(tree.state==='empty'){
+      factsBoardSub.textContent=(pack?pack+' · ':'')+'暂无事实叶';
+      factsStateEl.textContent='当前公司的事实树还没有已生成的事实叶。点击「上传企业资料」沉淀第一批确认事实后，这里会展示真实摘要与树枝状态。';
+      return;
+    }
+    if(tree.state==='not_generated'){
+      factsBoardSub.textContent=(pack?pack+' · ':'')+'树级摘要待生成';
+      factsStateEl.textContent='已有事实叶沉淀，树级摘要尚未生成；以下为各树枝的真实生成状态。';
+    }else{
+      factsBoardSub.textContent=(pack?pack+' · ':'')+'事实树摘要已生成';
+      if(typeof tree.brief==='string'&&tree.brief){
+        // 摘要按纯文本展示：模型/事实内容不作为 HTML 执行
+        factsBriefEl.hidden=false;factsBriefEl.textContent=tree.brief;
+        factsStateEl.textContent='以下为当前公司事实树最新摘要（纯文本展示），完整枝叶见「查看事实库」。';
+      }else factsStateEl.textContent='树级摘要内容缺失，未展示替代内容；请前往事实库核对。';
+    }
+    var trunks=kList(tree.trunks);
+    if(trunks.length){factsTrunksEl.hidden=false;factsTrunksEl.innerHTML=factsTrunkTable(trunks);}
+  }
+  async function loadFactsTree(){
+    var version=++factsTreeVersion;
+    factsBoardReset();
+    factsBoardSub.textContent='正在读取当前公司事实树状态…';
+    factsStateEl.textContent='';
+    var response;
+    try{response=await window.SAM.api.request('/api/facts/tree');}
+    catch(error){
+      if(version===factsTreeVersion)factsBoardError('事实树状态读取失败：'+(error&&error.message?error.message:'网络错误')+'。未回退到演示数据。',true);
+      return;
+    }
+    var body=null;
+    try{body=await response.json();}catch(_){body=null;}
+    if(version!==factsTreeVersion)return;
+    if(!response.ok){
+      var code=kObject(body).error,message=kObject(body).message;
+      if(code==='facts_tree_disabled')factsBoardError('当前环境未开启事实树功能，事实树暂不可用；未展示任何替代数据。',false);
+      else if(code==='company_scope_missing')factsBoardError('宿主未注入公司范围，事实树暂不可读取。',true);
+      else factsBoardError('事实树状态读取失败（HTTP '+response.status+'）：'+(typeof message==='string'?message:'未提供详情')+'。未回退到演示数据。',true);
+      return;
+    }
+    var valid=body&&typeof body==='object'&&['ready','not_generated','empty','unbound'].indexOf(body.state)>=0
+      &&(body.state==='unbound'||Array.isArray(body.trunks));
+    if(!valid){factsBoardError('事实树状态返回无效，未展示任何替代数据。',true);return;}
+    renderFactsTree(body);
+  }
+  document.getElementById('factsUploadBtn').addEventListener('click',openImportWizard);
+  factsRetryBtn.addEventListener('click',loadFactsTree);
+  loadFactsTree(); // 首次进入公司主页读取一次；之后仅在上传任务终态或手动重试时刷新
+  checkRegistration(); // 首次进入即读取宿主登记公司名并同步首页标题；之后随登记状态读取/保存更新
 
   /* ========== 消息关注 ========== */
   var NEWS=[
@@ -2115,6 +2551,7 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
     });
     renderFilters();renderNews();closeNewsSet();
   });
+  routeKnowledgeLocation();
 })();
 </script>
 </body>

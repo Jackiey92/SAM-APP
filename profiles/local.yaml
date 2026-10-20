@@ -1,0 +1,19 @@
+profile: local
+memory:
+  provider: localvector
+model:
+  default_model: qwen3.8-max
+paths:
+  project_root: .
+  harness_root: harness-openclaw
+  venv_bin: .venv/bin
+  openclaw_entry: .oc-runtime/node_modules/openclaw/openclaw.mjs
+  state_dir: harness-openclaw/state
+  config_path: harness-openclaw/state/openclaw.json
+  data_root: data
+  two_a_root: data/2a
+  main_db: data/app.db
+  app_db: data/sales_app/app.db
+  memory_root: .sam-memory
+  tool_plugin_dir: harness-openclaw/plugins/sam-memory
+  tool_bridge_python: .venv/bin/python

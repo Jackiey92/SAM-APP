@@ -1,0 +1,537 @@
+# 通用事实模板包 generic —— 98 叶。由 09 设计稿 v1.2 §3 权威叶子表生成，勿手改。
+# 字段：code 稳定编码 / title 叶子名 / shape n=叙述型 s=数据型 / scope 内容边界（装什么）。
+pack: generic
+version: 1
+is_industry_pack: false
+trunks:
+  - code: info
+    directory: "01-企业基本信息"
+    order: 1
+    built_in_hidden_default: false  # 仅历史默认；v1.2 起显隐以叶子有无内容为准
+  - code: bizov
+    directory: "02-业务概览"
+    order: 2
+    built_in_hidden_default: false  # 仅历史默认；v1.2 起显隐以叶子有无内容为准
+  - code: hr
+    directory: "03-人员管理"
+    order: 3
+    built_in_hidden_default: false  # 仅历史默认；v1.2 起显隐以叶子有无内容为准
+  - code: prod
+    directory: "04-生产"
+    order: 4
+    built_in_hidden_default: true  # 仅历史默认；v1.2 起显隐以叶子有无内容为准
+  - code: purch
+    directory: "05-采购"
+    order: 5
+    built_in_hidden_default: true  # 仅历史默认；v1.2 起显隐以叶子有无内容为准
+  - code: sales
+    directory: "06-销售"
+    order: 6
+    built_in_hidden_default: true  # 仅历史默认；v1.2 起显隐以叶子有无内容为准
+  - code: mkt
+    directory: "07-市场"
+    order: 7
+    built_in_hidden_default: false  # 仅历史默认；v1.2 起显隐以叶子有无内容为准
+  - code: fin
+    directory: "08-财务"
+    order: 8
+    built_in_hidden_default: true  # 仅历史默认；v1.2 起显隐以叶子有无内容为准
+  - code: fund
+    directory: "09-融资"
+    order: 9
+    built_in_hidden_default: true  # 仅历史默认；v1.2 起显隐以叶子有无内容为准
+  - code: legal
+    directory: "10-法务合规"
+    order: 10
+    built_in_hidden_default: false  # 仅历史默认；v1.2 起显隐以叶子有无内容为准
+leaves:
+  - code: L-info-01
+    trunk: info
+    title: "工商登记与主体资格"
+    shape: s
+    scope: "统一社会信用代码、成立日期、注册资本/实缴、注册地、经营范围、法定代表人"
+  - code: L-info-02
+    trunk: info
+    title: "创始人背景"
+    shape: n
+    scope: "教育、工作履历、连续创业经历"
+  - code: L-info-03
+    trunk: info
+    title: "公司发展历程"
+    shape: n
+    scope: "设立、迁址改名、融资、重大产品/客户/产能里程碑时间线"
+  - code: L-info-04
+    trunk: info
+    title: "股东出资与持股"
+    shape: s
+    scope: "各股东持股、认缴/实缴、溢价出资"
+  - code: L-info-05
+    trunk: info
+    title: "实际控制人及对外投资"
+    shape: n
+    scope: "实控人认定、体系外对外投资与关联企业"
+  - code: L-info-06
+    trunk: info
+    title: "出资代持安排"
+    shape: n
+    scope: "名义与实际出资人是否一致、代持"
+  - code: L-info-07
+    trunk: info
+    title: "股东关联与一致行动"
+    shape: n
+    scope: "股东间关联、一致行动安排"
+  - code: L-info-08
+    trunk: info
+    title: "表决权安排"
+    shape: s
+    scope: "实控人支配表决权与其他股东表决权"
+  - code: L-info-09
+    trunk: info
+    title: "股份权属与受限"
+    shape: n
+    scope: "质押、冻结、重大权属纠纷"
+  - code: L-info-10
+    trunk: info
+    title: "股东入股背景"
+    shape: n
+    scope: "主要股东入股原因与背景"
+  - code: L-info-11
+    trunk: info
+    title: "子公司与业务划分"
+    shape: n
+    scope: "控股子公司清单、业务划分、经营财务"
+  - code: L-info-12
+    trunk: info
+    title: "组织架构与职责分工"
+    shape: n
+    scope: "组织架构、部门与高管职责分工"
+  - code: L-bizov-01
+    trunk: bizov
+    title: "商业模式"
+    shape: n
+    scope: "怎么赚钱、交付与服务模式（公司口径）"
+  - code: L-bizov-02
+    trunk: bizov
+    title: "产品与服务清单"
+    shape: n
+    scope: "现有/在研产品服务、定位与形态"
+  - code: L-bizov-03
+    trunk: bizov
+    title: "产品特性与竞争力自述"
+    shape: n
+    scope: "性能/功能/价格/技术特点（公司口径）"
+  - code: L-bizov-04
+    trunk: bizov
+    title: "产品路线图与进展"
+    shape: n
+    scope: "规划蓝图、各阶段进展"
+  - code: L-bizov-05
+    trunk: bizov
+    title: "需求趋势判断"
+    shape: n
+    scope: "公司对技术/客户偏好变化与未来需求判断"
+  - code: L-bizov-06
+    trunk: bizov
+    title: "技术来源"
+    shape: n
+    scope: "自研/委托/授权/合作开发"
+  - code: L-bizov-07
+    trunk: bizov
+    title: "核心技术与关键难点"
+    shape: n
+    scope: "技术核心环节、难点、在生产中的体现"
+  - code: L-bizov-08
+    trunk: bizov
+    title: "关键性能指标"
+    shape: s
+    scope: "产品关键性能/技术参数"
+  - code: L-bizov-09
+    trunk: bizov
+    title: "技术储备与在研项目"
+    shape: n
+    scope: "技术储备、在研布局及进展"
+  - code: L-bizov-10
+    trunk: bizov
+    title: "技术壁垒要素"
+    shape: n
+    scope: "经验/资源/方案/资金/时间护城河（公司口径）"
+  - code: L-bizov-11
+    trunk: bizov
+    title: "研发投入"
+    shape: s
+    scope: "研发费用、占营收比（多年；研发人员数在 hr-04）"
+  - code: L-bizov-12
+    trunk: bizov
+    title: "研发迭代节奏"
+    shape: n
+    scope: "研发周期、迭代节奏、代际规律"
+  - code: L-bizov-13
+    trunk: bizov
+    title: "技术路线与产业格局"
+    shape: n
+    scope: "所选路线、产业阵营、演进替代"
+  - code: L-bizov-14
+    trunk: bizov
+    title: "核心部件与自研自产比例"
+    shape: s
+    scope: "核心部件构成、自研自产比例"
+  - code: L-bizov-15
+    trunk: bizov
+    title: "知识产权清单"
+    shape: s
+    scope: "专利/软著/商标/域名/布图设计清单数量"
+  - code: L-hr-01
+    trunk: hr
+    title: "核心团队成员档案"
+    shape: s
+    scope: "姓名/职务/年龄/学历/履历/持股/加入时间"
+  - code: L-hr-02
+    trunk: hr
+    title: "团队合作渊源"
+    shape: n
+    scope: "核心成员合作时长、共同过往任职"
+  - code: L-hr-03
+    trunk: hr
+    title: "高管变动"
+    shape: n
+    scope: "高管入职/离职流动"
+  - code: L-hr-04
+    trunk: hr
+    title: "员工结构"
+    shape: s
+    scope: "总数、年龄/学历/部门/职能分布、研发人员数与占比"
+  - code: L-hr-05
+    trunk: hr
+    title: "股权激励安排"
+    shape: n
+    scope: "激励计划、持股平台、授予制度"
+  - code: L-hr-06
+    trunk: hr
+    title: "人员扩张计划"
+    shape: n
+    scope: "未来招聘与扩张安排"
+  - code: L-hr-07
+    trunk: hr
+    title: "核心技术人员资历与建树"
+    shape: n
+    scope: "技术骨干资历、成果、行业地位（是人，归此）"
+  - code: L-hr-08
+    trunk: hr
+    title: "研发团队构成与稳定性"
+    shape: n
+    scope: "研发团队规模、关键人员变动（是人，归此）"
+  - code: L-hr-09
+    trunk: hr
+    title: "核心技术人员持股"
+    shape: s
+    scope: "技术骨干持股（是人，归此）"
+  - code: L-prod-01
+    trunk: prod
+    title: "生产模式"
+    shape: n
+    scope: ""
+  - code: L-prod-02
+    trunk: prod
+    title: "生产工艺流程"
+    shape: n
+    scope: ""
+  - code: L-prod-03
+    trunk: prod
+    title: "良率水平与爬坡"
+    shape: s
+    scope: ""
+  - code: L-prod-04
+    trunk: prod
+    title: "产能与利用率"
+    shape: s
+    scope: ""
+  - code: L-prod-05
+    trunk: prod
+    title: "关键生产设备"
+    shape: n
+    scope: ""
+  - code: L-prod-06
+    trunk: prod
+    title: "厂房与土地"
+    shape: n
+    scope: ""
+  - code: L-prod-07
+    trunk: prod
+    title: "成本构成"
+    shape: s
+    scope: ""
+  - code: L-prod-08
+    trunk: prod
+    title: "自动化与信息系统"
+    shape: n
+    scope: ""
+  - code: L-prod-09
+    trunk: prod
+    title: "资本支出计划"
+    shape: n
+    scope: ""
+  - code: L-purch-01
+    trunk: purch
+    title: "采购品类与原材料供应"
+    shape: n
+    scope: ""
+  - code: L-purch-02
+    trunk: purch
+    title: "供应商构成"
+    shape: s
+    scope: "有谁记谁，不按\"前五大\"切"
+  - code: L-purch-03
+    trunk: purch
+    title: "采购账期与预付"
+    shape: s
+    scope: ""
+  - code: L-purch-04
+    trunk: purch
+    title: "采购类关联交易"
+    shape: n
+    scope: ""
+  - code: L-sales-01
+    trunk: sales
+    title: "收入确认方式"
+    shape: n
+    scope: ""
+  - code: L-sales-02
+    trunk: sales
+    title: "分产品收入构成"
+    shape: s
+    scope: ""
+  - code: L-sales-03
+    trunk: sales
+    title: "定价机制"
+    shape: n
+    scope: ""
+  - code: L-sales-04
+    trunk: sales
+    title: "销售渠道与模式"
+    shape: n
+    scope: ""
+  - code: L-sales-05
+    trunk: sales
+    title: "经销商安排"
+    shape: n
+    scope: ""
+  - code: L-sales-06
+    trunk: sales
+    title: "直销账期与信用政策"
+    shape: s
+    scope: ""
+  - code: L-sales-07
+    trunk: sales
+    title: "产品毛利率"
+    shape: s
+    scope: ""
+  - code: L-sales-08
+    trunk: sales
+    title: "客户构成"
+    shape: s
+    scope: "卖给谁记谁"
+  - code: L-sales-09
+    trunk: sales
+    title: "标杆客户"
+    shape: n
+    scope: ""
+  - code: L-sales-10
+    trunk: sales
+    title: "客户合作模式与验证周期"
+    shape: n
+    scope: ""
+  - code: L-sales-11
+    trunk: sales
+    title: "客户采购与扩产计划"
+    shape: n
+    scope: ""
+  - code: L-sales-12
+    trunk: sales
+    title: "客户评价与反馈"
+    shape: n
+    scope: ""
+  - code: L-sales-13
+    trunk: sales
+    title: "客户供货份额"
+    shape: n
+    scope: ""
+  - code: L-sales-14
+    trunk: sales
+    title: "新客户拓展"
+    shape: n
+    scope: ""
+  - code: L-sales-15
+    trunk: sales
+    title: "在手订单与收入预测"
+    shape: s
+    scope: ""
+  - code: L-sales-16
+    trunk: sales
+    title: "重大销售合同"
+    shape: n
+    scope: ""
+  - code: L-sales-17
+    trunk: sales
+    title: "售后政策与退换货"
+    shape: n
+    scope: ""
+  - code: L-sales-18
+    trunk: sales
+    title: "销售类关联交易"
+    shape: n
+    scope: ""
+  - code: L-mkt-01
+    trunk: mkt
+    title: "所处细分行业"
+    shape: n
+    scope: ""
+  - code: L-mkt-02
+    trunk: mkt
+    title: "行业特征"
+    shape: n
+    scope: ""
+  - code: L-mkt-03
+    trunk: mkt
+    title: "行业产能周期"
+    shape: n
+    scope: ""
+  - code: L-mkt-04
+    trunk: mkt
+    title: "行业增长与驱动因素"
+    shape: s
+    scope: ""
+  - code: L-mkt-05
+    trunk: mkt
+    title: "行业准入要求"
+    shape: n
+    scope: ""
+  - code: L-mkt-06
+    trunk: mkt
+    title: "行业监管环境"
+    shape: n
+    scope: ""
+  - code: L-mkt-07
+    trunk: mkt
+    title: "产业链结构"
+    shape: n
+    scope: ""
+  - code: L-mkt-08
+    trunk: mkt
+    title: "市场发展阶段"
+    shape: n
+    scope: ""
+  - code: L-mkt-09
+    trunk: mkt
+    title: "市场规模与测算"
+    shape: s
+    scope: ""
+  - code: L-mkt-10
+    trunk: mkt
+    title: "下游市场与需求"
+    shape: n
+    scope: ""
+  - code: L-mkt-11
+    trunk: mkt
+    title: "可延伸市场"
+    shape: n
+    scope: ""
+  - code: L-mkt-12
+    trunk: mkt
+    title: "行业进入壁垒"
+    shape: n
+    scope: ""
+  - code: L-mkt-13
+    trunk: mkt
+    title: "竞争对手清单"
+    shape: s
+    scope: ""
+  - code: L-mkt-14
+    trunk: mkt
+    title: "竞品对比·公司口径"
+    shape: s
+    scope: ""
+  - code: L-mkt-15
+    trunk: mkt
+    title: "竞争对手档案"
+    shape: s
+    scope: ""
+  - code: L-mkt-16
+    trunk: mkt
+    title: "行业龙头标杆"
+    shape: n
+    scope: ""
+  - code: L-mkt-17
+    trunk: mkt
+    title: "竞争格局"
+    shape: n
+    scope: ""
+  - code: L-mkt-18
+    trunk: mkt
+    title: "替代品种类与规模"
+    shape: n
+    scope: ""
+  - code: L-mkt-19
+    trunk: mkt
+    title: "替代威胁判断"
+    shape: n
+    scope: ""
+  - code: L-fin-01
+    trunk: fin
+    title: "历史经营财务"
+    shape: s
+    scope: "近三年营收/利润/资产负债/现金流；研发费用在 bizov-11，只引用不重复"
+  - code: L-fin-02
+    trunk: fin
+    title: "财务预测"
+    shape: s
+    scope: ""
+  - code: L-fund-01
+    trunk: fund
+    title: "股权融资历史"
+    shape: s
+    scope: ""
+  - code: L-fund-02
+    trunk: fund
+    title: "融资对赌与完成情况"
+    shape: n
+    scope: ""
+  - code: L-fund-03
+    trunk: fund
+    title: "债权融资"
+    shape: n
+    scope: ""
+  - code: L-fund-04
+    trunk: fund
+    title: "本轮融资方案"
+    shape: s
+    scope: ""
+  - code: L-fund-05
+    trunk: fund
+    title: "上市规划与中介机构"
+    shape: n
+    scope: ""
+  - code: L-legal-01
+    trunk: legal
+    title: "业务资质与牌照"
+    shape: n
+    scope: "资质本身及效力状态"
+  - code: L-legal-02
+    trunk: legal
+    title: "诉讼与仲裁"
+    shape: n
+    scope: ""
+  - code: L-legal-03
+    trunk: legal
+    title: "环保与安全生产"
+    shape: n
+    scope: ""
+  - code: L-legal-04
+    trunk: legal
+    title: "税务与财政补贴"
+    shape: n
+    scope: "纳税合规/优惠/补贴依赖"
+  - code: L-legal-05
+    trunk: legal
+    title: "重大风险事项"
+    shape: n
+    scope: ""

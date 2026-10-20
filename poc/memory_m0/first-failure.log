@@ -1,0 +1,20 @@
+{"A": {"rows": 10000, "first3": [[1, 0.0], [2, 0.004962805192917585], [3, 0.01941930688917637]], "dimension_error": "Dimension mismatch for inserted vector for the \"embedding\" column. Expected 512 dimensions but received 3.", "checks_passed": 7, "top20_ms_median": 9.7382000003563, "top20_ms_min": 8.56969999949797, "top20_ms_max": 10.82950000272831, "db_bytes": 21270528}}
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/71 [00:00<?, ?it/s]Loading weights: 100%|██████████| 71/71 [00:00<00:00, 2393.99it/s]
+Traceback (most recent call last):
+  File "/home/jakki/projects/startup-ai-manager/poc/memory_m0/run.py", line 70, in <module>
+    if __name__=='__main__': main()
+                             ~~~~^^
+  File "/home/jakki/projects/startup-ai-manager/poc/memory_m0/run.py", line 50, in main
+    start=time.perf_counter(); p=LocalBgeProvider(os.environ.get('M0_MODEL','BAAI/bge-small-zh-v1.5')); load=time.perf_counter()-start
+                                 ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jakki/projects/startup-ai-manager/poc/memory_m0/providers.py", line 20, in __init__
+    self.model_version = model + '@' + str(self.model.config._commit_hash)
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jakki/projects/startup-ai-manager/.venv/lib/python3.14/site-packages/transformers/configuration_utils.py", line 525, in __getattribute__
+    return super().__getattribute__(key)
+           ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^
+  File "/home/jakki/projects/startup-ai-manager/.venv/lib/python3.14/site-packages/transformers/integrations/heterogeneity/configuration_utils.py", line 312, in __getattribute__
+    return super().__getattribute__(key)
+           ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^
+AttributeError: 'BertConfig' object has no attribute '_commit_hash'

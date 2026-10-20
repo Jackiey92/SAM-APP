@@ -1,0 +1,21 @@
+{% extends 'base.html' %}
+{% block crumb %}事实库{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>事实库</h1>
+    <p>事实树只读视图：按枝与叶浏览，所有内容可追溯到原始资料。</p>
+  </div>
+</div>
+{% if read_only|default(false) %}<p class="facts-tree-readonly">只读模式：本页不提供任何修改入口。</p>{% endif %}
+<div id="facts-tree" class="facts-tree">
+  <div id="facts-tree-status" class="facts-tree-status" role="status" aria-live="polite">正在读取事实树…</div>
+  <div class="facts-tree-layout">
+    <nav class="facts-tree-nav-panel" aria-label="事实树导航"><div id="facts-tree-nav" class="facts-tree-nav-list"></div></nav>
+    <div id="facts-tree-detail" class="facts-tree-detail"></div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/facts-tree.js') }}"></script>
+{% endblock %}

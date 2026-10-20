@@ -1,0 +1,883 @@
+#!/usr/bin/env python3
+"""Stable L2 bridge for local MinerU/Docling document ingestion.
+
+The bridge owns the engine-specific conversion and always emits the same L2
+manifest.  Engines run locally; this process never sends source bytes or full
+text to a remote service.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+from html.parser import HTMLParser
+import importlib.util
+import io
+import json
+import mimetypes
+import os
+import shutil
+from contextlib import contextmanager
+import zipfile
+import subprocess
+import sys
+import tempfile
+import time
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+FORMATS = {
+    ".pdf": "pdf", ".doc": "doc", ".docx": "docx", ".xls": "xls",
+    ".xlsx": "xlsx", ".ppt": "ppt", ".pptx": "pptx",
+    ".png": "image", ".jpg": "image", ".jpeg": "image", ".tif": "image",
+    ".tiff": "image",
+}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _format(path: Path, task: dict[str, Any]) -> str:
+    return str(task.get("format") or FORMATS.get(path.suffix.lower(), "unknown"))
+
+
+_FORMAT_SUFFIXES = {
+    "pdf": ".pdf",
+    "docx": ".docx",
+    "xlsx": ".xlsx",
+    "pptx": ".pptx",
+    "doc": ".doc",
+    "xls": ".xls",
+    "ppt": ".ppt",
+    "image": ".png",
+}
+
+
+@contextmanager
+def _engine_source(source: Path, fmt: str, filename: str):
+    """Yield a path whose suffix agrees with the declared document format.
+
+    ArchiveFileStore is content-addressed and deliberately stores objects
+    without an extension.  Several third-party parsers use the suffix before
+    inspecting the bytes, so only the engine-facing temporary copy gets a
+    suffix; the original object remains untouched.
+    """
+    suffix = Path(filename).suffix.lower() or _FORMAT_SUFFIXES.get(fmt, "")
+    if suffix and source.suffix.lower() == suffix:
+        yield source
+        return
+    if not suffix:
+        yield source
+        return
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="sam-ingest-", suffix=suffix, delete=False) as stream:
+            stream.write(source.read_bytes())
+            temporary = Path(stream.name)
+        yield temporary
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _engine_available(name: str) -> bool:
+    if name == "mineru":
+        return importlib.util.find_spec("mineru") is not None or _which("mineru")
+    if name == "docling":
+        return importlib.util.find_spec("docling") is not None or _which("docling")
+    return False
+
+
+def _which(command: str) -> bool:
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = Path(directory) / command
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return True
+    return False
+
+
+def _select_engines(fmt: str) -> tuple[list[str], list[str]]:
+    """Return available engines in a format-aware fallback order."""
+    requested = os.environ.get("SAM_INGEST_ENGINE", "auto").lower()
+    if requested not in {"auto", "mineru", "docling"}:
+        raise ValueError("SAM_INGEST_ENGINE must be auto, mineru, or docling")
+    if requested != "auto":
+        return ([requested], []) if _engine_available(requested) else ([], [f"{requested} is not installed"])
+    # Office conversion is deterministic and does not need a running MinerU
+    # server.  PDF/image layout benefits from MinerU first, with Docling as a
+    # local fallback when its optional stack is available.
+    if fmt in {"docx", "xlsx", "pptx", "doc", "xls", "ppt"}:
+        order = ("docling", "mineru")
+    else:
+        order = ("mineru", "docling")
+    candidates = [name for name in order if _engine_available(name)]
+    if candidates:
+        return candidates, []
+    return [], ["neither MinerU nor Docling is installed"]
+
+
+def _select_engine(fmt: str = "unknown") -> tuple[str, list[str]]:
+    """Backward-compatible single-engine view for callers outside the bridge."""
+    candidates, warnings = _select_engines(fmt)
+    return (candidates[0], []) if candidates else ("none", warnings)
+
+
+class _TableParser(HTMLParser):
+    """Small stdlib HTML table reader for MinerU's local table output."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[list[str]] = []
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "tr":
+            self._row = []
+        elif tag == "td" and self._row is not None:
+            self._cell = []
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "td" and self._row is not None and self._cell is not None:
+            self._row.append("".join(self._cell).strip())
+            self._cell = None
+        elif tag == "tr" and self._row is not None:
+            self.rows.append(self._row)
+            self._row = None
+
+
+def _text_parts(content: Any) -> list[str]:
+    if isinstance(content, str):
+        return [content.strip()] if content.strip() else []
+    if not isinstance(content, list):
+        return []
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, dict):
+            parts.extend(_text_parts(item.get("content", "")))
+    return parts
+
+
+class MinerUServerUnavailable(RuntimeError):
+    """The local MinerU daemon could not be made ready for a parse request."""
+
+    user_message = "本地 MinerU 解析服务启动失败或被网络代理拦截；请检查本地解析服务状态。"
+
+
+def _local_engine_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Build an environment for local parser processes only.
+
+    The web process may need its proxy to reach the configured model endpoint.
+    Parser control traffic and parser-side model/file access are local, so the
+    bridge must never inherit that proxy for ``mineru`` or other local tools.
+    This function is deliberately scoped to the bridge child and never mutates
+    the caller's ``os.environ``.
+    """
+    env = dict(base if base is not None else os.environ)
+    proxy_names = {
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+        "http_proxy", "https_proxy", "all_proxy",
+    }
+    for name in tuple(env):
+        if name in proxy_names or name.lower().endswith("_proxy") and name.lower() not in {"no_proxy"}:
+            env.pop(name, None)
+    bypass = ["localhost", "127.0.0.1", "::1"]
+    existing = env.get("NO_PROXY") or env.get("no_proxy") or ""
+    for value in existing.split(","):
+        value = value.strip()
+        if value and value not in bypass:
+            bypass.append(value)
+    encoded = ",".join(bypass)
+    env["NO_PROXY"] = encoded
+    env["no_proxy"] = encoded
+    return env
+
+
+@contextmanager
+def _local_engine_process_environment():
+    """Temporarily apply the local-parser environment inside this bridge.
+
+    The bridge is already a child process of Flask, so changing its own
+    environment cannot affect the model/OpenClaw parent.  This also covers
+    Docling's in-process Python imports and any lazy local model helpers that
+    inspect proxy variables after import.
+    """
+    original = os.environ.copy()
+    os.environ.clear()
+    os.environ.update(_local_engine_env(original))
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(original)
+
+
+class LegacyOfficeConversionError(RuntimeError):
+    """A local LibreOffice conversion of a legacy Office binary failed."""
+
+    def __init__(self, message: str, *, missing_converter: bool = False) -> None:
+        super().__init__(message)
+        self.user_message = (
+            "本机需安装 LibreOffice 才能解析旧版 Word/PPT。"
+            if missing_converter
+            else "旧版 Word/PPT 文件转换失败；请检查文件是否损坏、加密或受保护。"
+        )
+
+
+def _soffice_binary() -> str | None:
+    """Return an injected or PATH-discovered local LibreOffice executable."""
+    configured = os.environ.get("SAM_SOFFICE_BIN")
+    if configured:
+        candidate = Path(configured).expanduser()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+        return None
+    return shutil.which("soffice") or shutil.which("libreoffice")
+
+
+@contextmanager
+def _legacy_office_source(source: Path, fmt: str, filename: str):
+    """Locally convert legacy ``.doc``/``.ppt`` into OOXML for parsing.
+
+    LibreOffice receives only a temporary local copy and writes to a private
+    temporary directory.  The immutable content-addressed source is never
+    modified and no document bytes are sent to an external service.
+    """
+    if fmt not in {"doc", "ppt"}:
+        yield source, fmt, filename, []
+        return
+    soffice = _soffice_binary()
+    if not soffice:
+        raise LegacyOfficeConversionError("no local LibreOffice executable", missing_converter=True)
+    target_fmt = f"{fmt}x"
+    suffix = f".{fmt}"
+    with tempfile.TemporaryDirectory(prefix="sam-office-convert-") as temporary:
+        root = Path(temporary)
+        incoming = root / f"source{suffix}"
+        incoming.write_bytes(source.read_bytes())
+        output_dir = root / "output"
+        output_dir.mkdir()
+        profile_dir = root / "profile"
+        profile_dir.mkdir()
+        command = [
+            soffice, "--headless", "--nologo", "--nodefault", "--nolockcheck",
+            f"-env:UserInstallation={profile_dir.as_uri()}",
+            "--convert-to", target_fmt, "--outdir", str(output_dir), str(incoming),
+        ]
+        try:
+            proc = subprocess.run(
+                command, text=True, capture_output=True, timeout=float(
+                    os.environ.get("SAM_SOFFICE_TIMEOUT", "120")
+                ), env=_local_engine_env(),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise LegacyOfficeConversionError(
+                f"LibreOffice conversion failed ({type(exc).__name__})"
+            ) from exc
+        converted = sorted(path for path in output_dir.glob(f"*.{target_fmt}") if path.is_file() and path.stat().st_size > 0)
+        if proc.returncode != 0 or len(converted) != 1:
+            detail = (proc.stderr or proc.stdout or "no output").strip()[-500:]
+            raise LegacyOfficeConversionError(
+                f"LibreOffice conversion did not produce one {target_fmt} file: {detail}"
+            )
+        yield converted[0], target_fmt, f"{Path(filename).stem}.{target_fmt}", [
+            f"locally converted legacy .{fmt} with LibreOffice"
+        ]
+
+
+def _mineru_binary() -> str:
+    return str(Path(sys.executable).with_name("mineru"))
+
+
+def _mineru_status(mineru_bin: str, env: dict[str, str]) -> tuple[bool, str]:
+    """Probe the daemon through MinerU's supported status command."""
+    try:
+        proc = subprocess.run(
+            [mineru_bin, "server", "status"], text=True, capture_output=True,
+            env=env, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"status probe failed ({type(exc).__name__})"
+    detail = "\n".join(part for part in (proc.stdout, proc.stderr) if part).strip()[-500:]
+    # MinerU 4.0.7 prints "Server is not running." with exit code 0, so the
+    # exit status alone is not a readiness signal.
+    stopped = "server is not running" in detail.lower()
+    return proc.returncode == 0 and not stopped, detail
+
+
+def _ensure_mineru_server(*, mineru_bin: str | None = None,
+                          ready_timeout: float | None = None) -> None:
+    """Ensure the local MinerU daemon is ready before submitting a parse.
+
+    ``mineru server start`` is a local background-daemon command.  It is run
+    in a new session so the bridge's own process lifetime cannot terminate the
+    started service; readiness is still verified through ``server status``.
+    """
+    command = mineru_bin or _mineru_binary()
+    env = _local_engine_env()
+    ready_timeout = ready_timeout if ready_timeout is not None else float(
+        os.environ.get("SAM_MINERU_SERVER_READY_TIMEOUT", "90")
+    )
+    poll_seconds = float(os.environ.get("SAM_MINERU_SERVER_POLL_SECONDS", "1"))
+    if ready_timeout <= 0 or poll_seconds <= 0:
+        raise ValueError("MinerU server timeout and poll interval must be positive")
+
+    ready, detail = _mineru_status(command, env)
+    if ready:
+        return
+    try:
+        starter = subprocess.Popen(
+            [command, "server", "start"], text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=env, start_new_session=True,
+        )
+        try:
+            stdout, stderr = starter.communicate(timeout=min(30, ready_timeout))
+        except subprocess.TimeoutExpired:
+            starter.kill()
+            stdout, stderr = starter.communicate()
+            raise MinerUServerUnavailable(
+                f"MinerU server start timed out: {(stderr or stdout or detail)[-500:]}"
+            )
+    except OSError as exc:
+        raise MinerUServerUnavailable(f"MinerU server start failed ({type(exc).__name__})") from exc
+    if starter.returncode != 0:
+        raise MinerUServerUnavailable(
+            f"MinerU server start exited {starter.returncode}: {(stderr or stdout or detail)[-500:]}"
+        )
+
+    deadline = time.monotonic() + ready_timeout
+    last_detail = detail
+    while time.monotonic() < deadline:
+        ready, last_detail = _mineru_status(command, env)
+        if ready:
+            return
+        time.sleep(poll_seconds)
+    raise MinerUServerUnavailable(
+        f"MinerU server did not become ready within {ready_timeout:g}s: {last_detail}"
+    )
+
+
+def _mineru_cache_json(file_hash: str, tier: str | None) -> Path | None:
+    home = Path(os.environ.get("MINERU_HOME", "~/.mineru")).expanduser()
+    root = home / "doclib" / "parsed" / file_hash[:2] / file_hash
+    roots = [root / tier] if tier else list(root.iterdir()) if root.exists() else []
+    candidates = sorted((p for r in roots if r.exists() for p in r.glob("*.json")), key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
+
+
+def _run_mineru(source: Path, file_hash: str, fmt: str, filename: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Run only the local MinerU server and convert its local JSON cache."""
+    tier = os.environ.get("SAM_MINERU_TIER", "basic")
+    started = time.monotonic()
+    mineru_bin = _mineru_binary()
+    _ensure_mineru_server(mineru_bin=mineru_bin)
+    with _engine_source(source, fmt, filename) as engine_source:
+        with tempfile.TemporaryDirectory(prefix="sam-mineru-") as temp:
+            command = [mineru_bin, "parse", str(engine_source), "--json", "--force", "--wait", "300", "--output", str(Path(temp) / "parse.json")]
+            env = _local_engine_env()
+            env["MINERU_REMOTE"] = "0"
+            # The daemon's control socket can become available before its
+            # managed basic-tier parser has loaded models. Retry only known
+            # startup races; genuine document errors remain single-attempt.
+            parse_ready_timeout = float(os.environ.get("SAM_MINERU_PARSE_READY_TIMEOUT", "90"))
+            deadline = time.monotonic() + parse_ready_timeout
+            while True:
+                proc = subprocess.run(command, text=True, capture_output=True, env=env, timeout=360)
+                if proc.returncode == 0:
+                    break
+                detail = (proc.stderr or proc.stdout or "unknown local error").strip()[-1000:]
+                transient = any(token in detail.lower() for token in (
+                    "server_not_running", "server is not running", "quality_tier_unavailable", "engine_unavailable",
+                ))
+                if not transient or time.monotonic() >= deadline:
+                    break
+                time.sleep(min(float(os.environ.get("SAM_MINERU_SERVER_POLL_SECONDS", "1")), 2.0))
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "unknown local error").strip()[-1000:]
+        if "server_not_running" in detail or "server is not running" in detail.lower() or "quality_tier_unavailable" in detail.lower():
+            raise MinerUServerUnavailable(f"MinerU server became unavailable during parse: {detail}")
+        raise RuntimeError(f"local MinerU parse failed: {detail}")
+    response: dict[str, Any] = {}
+    try:
+        response = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        pass
+    actual_tier = str(response.get("parse", {}).get("tier") or tier)
+    parsed = _mineru_cache_json(file_hash, actual_tier)
+    if parsed is None:
+        parsed = _mineru_cache_json(file_hash, None)
+    if parsed is None:
+        raise RuntimeError("MinerU completed but no local structured cache JSON was found")
+    payload = json.loads(parsed.read_text(encoding="utf-8"))
+    pages: list[dict[str, Any]] = []
+    text_count = table_count = row_count = 0
+    for page in payload.get("pages", []):
+        page_no = int(page.get("page_idx", 0)) + 1
+        text_items: list[dict[str, Any]] = []
+        tables: list[dict[str, Any]] = []
+        for block in page.get("blocks", []):
+            block_locator = f"mineru:page/{page_no}/block/{block.get('index', 0)}"
+            bbox = block.get("bbox")
+            block_type = block.get("type")
+            if block_type == "table":
+                html = "".join(_text_parts(block.get("content", [])))
+                table_parser = _TableParser()
+                table_parser.feed(html)
+                rows = table_parser.rows
+                headers = rows[0] if rows else []
+                values = rows[1:] if len(rows) > 1 else []
+                tables.append({"headers": headers, "rows": values, "source_loc": {"file_hash": file_hash, "page_no": page_no, "bbox": bbox, "locator": block_locator}})
+                table_count += 1
+                row_count += len(values)
+                continue
+            for text in _text_parts(block.get("content", [])):
+                text_items.append({"text": text, "source_loc": {"file_hash": file_hash, "page_no": page_no, "bbox": bbox, "locator": block_locator}})
+                text_count += 1
+        pages.append({"page_no": page_no, "bbox": None, "text_items": text_items, "tables": tables})
+    summary = {"status": "parsed", "engine": "mineru", "tier": actual_tier, "text_item_count": text_count, "table_count": table_count, "table_row_count": row_count, "warnings": [], "raw_bytes_external": False, "full_text_external": False, "elapsed_ms": round((time.monotonic() - started) * 1000)}
+    return pages, summary
+
+
+def _docling_bbox(provenance: Any) -> list[float] | None:
+    bbox = getattr(provenance, "bbox", None)
+    if bbox is None:
+        return None
+    values = [getattr(bbox, name, None) for name in ("l", "t", "r", "b")]
+    if any(value is None for value in values):
+        return None
+    return [float(value) for value in values]
+
+
+def _docling_provenance(item: Any, file_hash: str, fallback: str) -> dict[str, Any]:
+    provenance = next(iter(getattr(item, "prov", []) or []), None)
+    page_no = getattr(provenance, "page_no", None) if provenance else None
+    return {
+        "file_hash": file_hash,
+        "page_no": int(page_no) if page_no is not None else None,
+        "slide_no": int(page_no) if page_no is not None else None,
+        "bbox": _docling_bbox(provenance),
+        # Keep the engine namespace even when Docling also provides its
+        # document-internal self_ref.  This makes a returned L2 anchor
+        # unambiguous about the parser that produced it.
+        "locator": f"{fallback}@{getattr(item, 'self_ref', None)}" if getattr(item, "self_ref", None) else fallback,
+    }
+
+
+def _docx_structure(source: Path, file_hash: str) -> list[dict[str, Any]]:
+    """Lossless Word body boundaries: paragraphs outside cells, complete rows.
+
+    Word XML provides exact structural table/cell coordinates even when the
+    converter flattens cell paragraphs. No entity or document meaning is used.
+    """
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    with zipfile.ZipFile(source) as archive:
+        body = ET.fromstring(archive.read("word/document.xml")).find("w:body", ns)
+    if body is None:
+        raise ValueError("Word document has no body")
+    texts, tables = [], []
+    def paragraph_text(node):
+        parts = []
+        for element in node.iter():
+            if element.tag == "{" + ns["w"] + "}t":
+                parts.append(element.text or "")
+            elif element.tag == "{" + ns["w"] + "}tab":
+                parts.append("\t")
+            elif element.tag in {"{" + ns["w"] + "}br", "{" + ns["w"] + "}cr"}:
+                parts.append("\n")
+        return "".join(parts)
+
+    def walk(container, path=()):
+        for index, node in enumerate(container):
+            order = (*path, index)
+            locator = "docx:body/" + "/".join(str(i) for i in order)
+            if node.tag == "{" + ns["w"] + "}p":
+                value = paragraph_text(node)
+                if value.strip():
+                    texts.append({"text": value, "source_loc": {"file_hash": file_hash,
+                                  "order": list(order), "locator": locator + "/paragraph"}})
+            elif node.tag == "{" + ns["w"] + "}tbl":
+                rows, headers, row_locs = [], [], []
+                for row_index, row in enumerate(node.findall("w:tr", ns)):
+                    cells = ["\n".join(paragraph_text(p) for p in cell.findall(".//w:p", ns))
+                             for cell in row.findall("w:tc", ns)]
+                    # Preserve all physical rows, including explicit headers.
+                    header = row.find("w:trPr/w:tblHeader", ns)
+                    if header is not None and header.get("{" + ns["w"] + "}val", "1") not in {"0", "false", "off"}:
+                        if not headers:
+                            headers = cells
+                    rows.append(cells)
+                    row_locs.append({"file_hash": file_hash, "order": [*order, row_index],
+                                     "locator": locator + f"/table/row/{row_index}"})
+                tables.append({"headers": headers, "rows": rows, "row_source_locs": row_locs,
+                               "source_loc": {"file_hash": file_hash, "order": list(order), "locator": locator + "/table"}})
+            else:
+                # Content controls/custom XML wrappers are structural, not a
+                # reason to silently lose the paragraphs/tables they contain.
+                walk(node, order)
+    walk(body)
+    return [{"page_no": None, "bbox": None, "text_items": texts, "tables": tables}]
+
+
+
+def _run_docling(source: Path, file_hash: str, fmt: str, filename: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Convert a local file with Docling's Python API.
+
+    PDF conversion uses the local CPU Torch/Transformers layout stack declared
+    in requirements. Any unavailable local model stack is reported through the
+    manifest failure summary rather than being mistaken for parsed content.
+    """
+    started = time.monotonic()
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+
+    # MinerU remains the high-fidelity PDF path.  Docling is its local CPU
+    # fallback, so prefer embedded PDF text and avoid optional OCR/table model
+    # work that needs a separately managed OCR service. The normal Docling
+    # layout model remains local and is supplied by the pinned CPU stack.
+    converter: DocumentConverter
+    if fmt == "pdf":
+        options = PdfPipelineOptions(
+            force_backend_text=True,
+            do_ocr=False,
+            do_table_structure=False,
+        )
+        converter = DocumentConverter(format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=options),
+        })
+    else:
+        converter = DocumentConverter()
+
+    with _engine_source(source, fmt, filename) as engine_source:
+        document = converter.convert(str(engine_source)).document
+    page_map: dict[int, dict[str, Any]] = {}
+
+    def page(page_no: int) -> dict[str, Any]:
+        return page_map.setdefault(page_no, {"page_no": page_no, "bbox": None, "text_items": [], "tables": []})
+
+    if fmt == "docx":
+        pages = _docx_structure(source, file_hash)
+        return pages, {"status": "parsed", "engine": "docling", "tier": "local",
+                       "text_item_count": len(pages[0]["text_items"]),
+                       "table_count": len(pages[0]["tables"]),
+                       "table_row_count": sum(len(table["rows"]) for table in pages[0]["tables"]),
+                       "warnings": ["Word page numbers unavailable; exact OOXML body/table/row locators retained"],
+                       "raw_bytes_external": False, "full_text_external": False,
+                       "engine_document": getattr(document, "export_to_dict", lambda: {})(),
+                       "elapsed_ms": round((time.monotonic() - started) * 1000)}
+
+    text_count = 0
+    for index, item in enumerate(getattr(document, "texts", []) or []):
+        loc = _docling_provenance(item, file_hash, f"docling:text/{index}")
+        text = str(getattr(item, "text", "") or "").strip()
+        if not text:
+            continue
+        text_count += 1
+        page_no = loc.get("page_no") or 1
+        page(page_no)["text_items"].append({"text": text, "source_loc": loc})
+
+    table_count = row_count = 0
+    for index, item in enumerate(getattr(document, "tables", []) or []):
+        dataframe = item.export_to_dataframe()
+        values = dataframe.fillna("").astype(str).values.tolist()
+        headers = [str(value) for value in dataframe.columns.tolist()]
+        loc = _docling_provenance(item, file_hash, f"docling:table/{index}")
+        page_no = loc.get("page_no") or 1
+        page(page_no)["tables"].append({"headers": headers, "rows": values, "source_loc": loc})
+        table_count += 1
+        row_count += len(values)
+
+    summary = {
+        "status": "parsed",
+        "engine": "docling",
+        "tier": None,
+        "text_item_count": text_count,
+        "table_count": table_count,
+        "table_row_count": row_count,
+        "warnings": ["Docling provenance is unavailable for some Office text items"] if fmt == "docx" else [],
+        "raw_bytes_external": False,
+        "full_text_external": False,
+        "engine_document": getattr(document, "export_to_dict", lambda: {})(),
+        "elapsed_ms": round((time.monotonic() - started) * 1000),
+    }
+    return [page_map[key] for key in sorted(page_map)], summary
+
+
+def _engine_failure_message(engine: str, exc: Exception) -> str:
+    """Turn a local engine failure into an actionable, non-secret message."""
+    if engine == "mineru" and isinstance(exc, MinerUServerUnavailable):
+        return MinerUServerUnavailable.user_message
+    if engine == "docling" and isinstance(exc, ModuleNotFoundError):
+        missing = str(exc).lower()
+        if "torch" in missing or "docling" in missing:
+            return "本地 Docling/Torch 解析依赖未就绪，请检查隔离解析环境。"
+        return "本地 Docling 解析依赖未就绪，请检查隔离解析环境。"
+    if engine == "mineru":
+        return "本地 MinerU 解析服务通信或启动失败，可能受网络代理影响。"
+    if engine == "docling":
+        return "本地 Docling 解析失败，请检查文档格式或解析依赖。"
+    return "本地文档解析失败，请检查解析引擎状态。"
+
+
+def _combined_failure_message(engines: list[str], failures: list[tuple[str, Exception]]) -> str:
+    """Explain each attempted local engine without exposing raw internals."""
+    labels: list[str] = []
+    for engine, exc in failures:
+        message = _engine_failure_message(engine, exc)
+        if message not in labels:
+            labels.append(message)
+    if len(labels) == 1:
+        return labels[0]
+    if labels:
+        return "本地解析引擎均失败：" + "；".join(labels)
+    if not engines:
+        return "本地解析引擎不可用，请检查隔离解析环境。"
+    return "本地文档解析失败，请检查解析引擎状态。"
+
+
+def _image_root() -> Path:
+    return Path(os.environ.get("SAM_L2_IMAGE_ROOT", ".sam-isolated/data/l2-images"))
+
+
+def _store_image(data: bytes, filename: str, file_hash: str, page_no: int | None, bbox: list[float] | None, locator: str, **loc_fields: Any) -> dict[str, Any]:
+    image_hash = hashlib.sha256(data).hexdigest()
+    suffix = Path(filename).suffix.lower() or ".bin"
+    target_dir = _image_root() / file_hash
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{image_hash[:16]}{suffix}"
+    if not target.exists():
+        target.write_bytes(data)
+    try:
+        local_path = target.relative_to(Path.cwd()).as_posix()
+    except ValueError:
+        local_path = target.as_posix()
+    source_loc = {"file_hash": file_hash, "page_no": page_no, "bbox": bbox, "locator": locator}
+    source_loc.update({key: value for key, value in loc_fields.items() if value is not None})
+    return {
+        "image_id": f"{file_hash[:16]}:{image_hash[:16]}",
+        "filename": filename,
+        "mime": mimetypes.guess_type(filename)[0] or "application/octet-stream",
+        "page_no": page_no,
+        "bbox": bbox,
+        "image_hash": image_hash,
+        "local_path": local_path,
+        "caption": None,
+        "source_loc": source_loc,
+    }
+
+
+def _extract_embedded_images(source: Path, file_hash: str, fmt: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """Extract embedded image bytes locally, independently of text parsing."""
+    images: list[dict[str, Any]] = []
+    if fmt == "pdf":
+        try:
+            import pymupdf
+
+            document = pymupdf.open(source)
+            for page_index, page in enumerate(document):
+                for image_index, item in enumerate(page.get_images(full=True)):
+                    xref = int(item[0])
+                    payload = document.extract_image(xref)
+                    if not payload or not payload.get("image"):
+                        continue
+                    rects = page.get_image_rects(xref)
+                    rect = rects[0] if rects else None
+                    bbox = [float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)] if rect else None
+                    ext = str(payload.get("ext") or "bin")
+                    images.append(_store_image(payload["image"], f"page-{page_index + 1}-image-{image_index}.{ext}", file_hash, page_index + 1, bbox, f"pdf:page/{page_index + 1}/image/{image_index}"))
+            document.close()
+        except Exception as exc:
+            return [], [f"embedded image extraction skipped ({type(exc).__name__})"]
+        return images, []
+    if fmt not in {"docx", "xlsx", "pptx"}:
+        return images, []
+    try:
+        # OOXML containers and their helpers must receive bytes/file-like
+        # input here.  Passing a hash-only object path makes openpyxl and
+        # python-pptx reject it before looking at the ZIP contents.
+        raw = source.read_bytes()
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            media = [name for name in archive.namelist() if "/media/" in name.lower()]
+            mapped: set[str] = set()
+            if fmt == "docx" and "word/document.xml" in archive.namelist():
+                rel_root = ET.fromstring(archive.read("word/_rels/document.xml.rels"))
+                rels = {item.attrib["Id"]: item.attrib["Target"] for item in rel_root}
+                document_root = ET.fromstring(archive.read("word/document.xml"))
+                embed_name = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
+                paragraph_tag = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"
+                blip_tag = "{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
+                for paragraph_no, paragraph in enumerate(document_root.iter(paragraph_tag)):
+                    for blip in paragraph.iter(blip_tag):
+                        target = rels.get(blip.attrib.get(embed_name), "")
+                        name = str(Path("word") / target).replace("\\", "/")
+                        if name not in archive.namelist():
+                            name = "word/" + target.lstrip("/")
+                        if name not in media:
+                            continue
+                        mapped.add(name)
+                        images.append(_store_image(archive.read(name), Path(name).name, file_hash, None, None, f"docx:paragraph/{paragraph_no}", paragraph=paragraph_no))
+            elif fmt == "pptx":
+                from pptx import Presentation
+                from pptx.enum.shapes import MSO_SHAPE_TYPE
+                presentation = Presentation(io.BytesIO(raw))
+                for slide_no, slide in enumerate(presentation.slides, start=1):
+                    for shape in slide.shapes:
+                        if shape.shape_type != MSO_SHAPE_TYPE.PICTURE:
+                            continue
+                        blob = shape.image.blob
+                        ext = str(shape.image.ext or "bin")
+                        bbox = [float(shape.left), float(shape.top), float(shape.left + shape.width), float(shape.top + shape.height)]
+                        images.append(_store_image(blob, f"slide-{slide_no}-shape-{shape.shape_id}.{ext}", file_hash, None, bbox, f"pptx:slide/{slide_no}/shape/{shape.shape_id}", slide_no=slide_no, shape=shape.shape_id))
+                mapped.update(media)
+            elif fmt == "xlsx":
+                from openpyxl import load_workbook
+                workbook = load_workbook(io.BytesIO(raw), read_only=False, data_only=False)
+                for worksheet in workbook.worksheets:
+                    for image_index, image in enumerate(getattr(worksheet, "_images", [])):
+                        anchor = getattr(image, "anchor", None)
+                        origin = getattr(anchor, "_from", None)
+                        target = getattr(anchor, "to", None)
+                        if origin is None:
+                            continue
+                        row, col = int(origin.row), int(origin.col)
+                        end_row = int(getattr(target, "row", row)) if target else row
+                        end_col = int(getattr(target, "col", col)) if target else col
+                        ext = str(getattr(image, "format", None) or "bin")
+                        bbox = [float(col), float(row), float(end_col), float(end_row)] if target else None
+                        cell = f"{worksheet.title}!R{row + 1}C{col + 1}"
+                        images.append(_store_image(image._data(), f"{worksheet.title}-image-{image_index}.{ext}", file_hash, None, bbox, f"xlsx:{cell}", sheet=worksheet.title, cell_range=cell))
+                mapped.update(media)
+            # Keep any image whose relationship/anchor could not be resolved;
+            # the explicit null locator fields are safer than dropping bytes.
+            for name in media:
+                if name not in mapped:
+                    images.append(_store_image(archive.read(name), Path(name).name, file_hash, None, None, f"ooxml:{name}"))
+    except Exception as exc:
+        return [], [f"embedded image extraction skipped ({type(exc).__name__})"]
+    return images, []
+
+
+def _manifest(task: dict[str, Any], source: Path) -> dict[str, Any]:
+    file_hash = str(task.get("file_hash") or _sha256(source))
+    filename = str(task.get("filename") or task.get("original_name") or source.name)
+    fmt = _format(source, task)
+    pages: list[dict[str, Any]] = []
+    images, image_warnings = _extract_embedded_images(source, file_hash, fmt)
+    failure_warnings: list[str] = []
+    summary: dict[str, Any]
+
+    try:
+        with _legacy_office_source(source, fmt, filename) as (
+            parse_source, parse_fmt, parse_filename, conversion_warnings,
+        ):
+            engines, selection_warnings = _select_engines(parse_fmt)
+            failures: list[tuple[str, Exception]] = []
+            for engine in engines:
+                try:
+                    if engine == "mineru":
+                        pages, summary = _run_mineru(parse_source, file_hash, parse_fmt, parse_filename)
+                    else:
+                        pages, summary = _run_docling(parse_source, file_hash, parse_fmt, parse_filename)
+                    summary.setdefault("warnings", []).extend(conversion_warnings + failure_warnings)
+                    break
+                except Exception as exc:
+                    failures.append((engine, exc))
+                    failure_warnings.append(f"{engine} failed ({type(exc).__name__}): {str(exc)[:300]}")
+            else:
+                status = "engine_unavailable" if not engines else "parse_failed"
+                summary = {
+                    "status": status,
+                    "engine": engines[0] if engines else "none",
+                    "text_item_count": 0,
+                    "table_count": 0,
+                    "table_row_count": 0,
+                    "warnings": selection_warnings + conversion_warnings + failure_warnings,
+                    "user_message": _combined_failure_message(engines, failures),
+                    "raw_bytes_external": False,
+                    "full_text_external": False,
+                }
+    except LegacyOfficeConversionError as exc:
+        summary = {
+            "status": "engine_unavailable" if "安装 LibreOffice" in exc.user_message else "parse_failed",
+            "engine": "libreoffice",
+            "text_item_count": 0,
+            "table_count": 0,
+            "table_row_count": 0,
+            "warnings": [f"legacy Office conversion failed ({type(exc).__name__}): {str(exc)[:300]}"],
+            "user_message": exc.user_message,
+            "raw_bytes_external": False,
+            "full_text_external": False,
+        }
+    if image_warnings:
+        summary.setdefault("warnings", []).extend(image_warnings)
+    result = {
+        "source_id": str(task.get("source_id") or file_hash),
+        "filename": filename,
+        "format": fmt,
+        "mime_type": task.get("mime_type") or mimetypes.guess_type(filename)[0],
+        "size_bytes": source.stat().st_size,
+        "uploaded_at": str(task.get("uploaded_at") or _now()),
+        "file_hash": file_hash,
+        "pages": pages,
+        "images": images,
+        "parse_summary": summary,
+    }
+
+    engine_document = summary.pop("engine_document", None)
+    if engine_document is not None:
+        result["engine_document"] = engine_document
+    if fmt == "docx" and summary.get("status") == "parsed":
+        try:
+            spec = importlib.util.spec_from_file_location("sam_docx_fidelity", Path(__file__).with_name("docx_fidelity.py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            objects = Path(os.environ.get("SAM_OBJECTS_DIR") or Path(os.environ.get("SAM_2A_ROOT", "data/2a")) / "bin")
+            result["document"] = module.project_docx(source, file_hash, objects)
+            check = result["document"]["self_check"]
+            summary["quality_status"] = check["status"]
+            summary.setdefault("warnings", []).extend(check["warnings"])
+        except Exception as exc:
+            summary["status"] = "parse_failed"
+            summary["quality_status"] = "failed"
+            summary["user_message"] = "文档格式转换保真检查失败，需重新处理。"
+            summary.setdefault("warnings", []).append(f"fidelity failed ({type(exc).__name__}): {str(exc)[:300]}")
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("task", type=Path, help="task JSON containing source_path or file_path")
+    parser.add_argument("--output", type=Path, help="write manifest JSON here instead of stdout")
+    args = parser.parse_args()
+    task = json.loads(args.task.read_text(encoding="utf-8"))
+    source = Path(task.get("source_path") or task.get("file_path", ""))
+    if not source.is_file():
+        raise SystemExit(f"source file does not exist: {source}")
+    with _local_engine_process_environment():
+        result = _manifest(task, source)
+    encoded = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(encoded, encoding="utf-8")
+    else:
+        sys.stdout.write(encoded)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

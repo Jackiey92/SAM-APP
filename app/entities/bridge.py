@@ -1,0 +1,434 @@
+"""2.1.a employee entity attribution over 2A mapping blocks.
+
+This is intentionally a source-preserving employee boundary, not entity
+resolution: it never edits values or writes 2B. Every block keeps its source
+coordinate and an ambiguous result remains explicitly reviewable.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
+import logging
+import os
+import re
+import secrets
+import sqlite3
+import time
+from typing import Any
+from uuid import uuid4
+
+from ..db.database import connect
+from ..storage.mapping_store import _coord
+from ..employees import SemanticDecisionUnavailable, SemanticEmployee
+from ..employees.budget import AttributionBudget, EmployeeBudgetExceeded
+from ..employees.worker import WorkerUnavailable
+from ..runtime_errors import EmployeeTransportError
+from .model_client import EntityAttributionModelClient
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@dataclass(frozen=True)
+class BridgeBlock:
+    block_index: int
+    block_type: str
+    content: str
+    source_page: int | None
+    source_span: str | None
+    classification: str
+    relation: str | None = None
+    subject: str | None = None
+
+
+_BULLET_PREFIX = re.compile(r"^\s*[•●▪◦‣⁃]\s*")
+
+
+def _bbox_x0(source_loc: Any) -> float | None:
+    bbox = source_loc.get("bbox") if isinstance(source_loc, dict) else None
+    value: Any = None
+    if isinstance(bbox, dict):
+        value = bbox.get("x0", bbox.get("left"))
+    elif isinstance(bbox, (list, tuple)) and bbox:
+        value = bbox[0]
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _item_structure(item: dict[str, Any]) -> dict[str, Any]:
+    """Identify list structure from real MinerU text/source fields.
+
+    Current MinerU payloads only promise ``text`` and ``source_loc``.  The
+    optional parser fields remain accepted for older fixtures, but production
+    detection is the visible bullet prefix or the normalized bbox indentation
+    (body/title x0 around .091, indented bullets around .126).
+    """
+    text = str(item.get("text") or "")
+    source_loc = item.get("source_loc")
+    x0 = _bbox_x0(source_loc)
+    visual_bullet = bool(_BULLET_PREFIX.match(text)) or (x0 is not None and x0 >= 0.115)
+    kind = str(item.get("kind") or item.get("block_type") or item.get("type") or item.get("role") or "").casefold()
+    list_kinds = {"bullet", "list_item", "list-item", "list item"}
+    list_level = item.get("list_level")
+    if list_level is None and kind in list_kinds:
+        list_level = item.get("level")
+    is_bullet = visual_bullet or bool(item.get("is_bullet") or item.get("bullet") or list_level is not None)
+    is_bullet = is_bullet or kind in list_kinds
+    is_heading = bool(item.get("is_heading")) or kind in {"heading", "title", "section", "header"}
+    return {"is_bullet": is_bullet, "list_level": list_level, "is_heading": is_heading}
+
+
+def _loc_order(location):
+    order = location.get("order") if isinstance(location, dict) else None
+    return order if isinstance(order, list) and all(type(i) is int and i >= 0 for i in order) else None
+
+
+def _text_blocks(manifest: dict[str, Any]) -> list[tuple[str, str, Any, str | None, dict[str, Any]]]:
+    blocks: list[tuple[str, str, Any, str | None, dict[str, Any]]] = []
+    for page in manifest.get("pages", []) if isinstance(manifest, dict) else []:
+        if not isinstance(page, dict):
+            continue
+        page_no = page.get("page_no", page.get("page"))
+        for item in page.get("text_items", []) or []:
+            if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+                continue
+            blocks.append(("text", item["text"], page_no,
+                           _coord(item.get("source_loc"), fallback_page=page_no),
+                           {**_item_structure(item), "order": _loc_order(item.get("source_loc"))}))
+        for table in page.get("tables", []) or []:
+            if not isinstance(table, dict):
+                continue
+            headers = table.get("headers") or []
+            table_loc = table.get("source_loc")
+            table_rows = table.get("rows", []) or []
+            first_row = table_rows[0] if table_rows else []
+            context_values = first_row if isinstance(first_row, list) else []
+            if isinstance(first_row, dict):
+                context_values = [value for key, value in first_row.items() if key != "source_loc"]
+            table_context = " / ".join(str(value) for value in context_values if value is not None)
+            if len(table_context) > 2000:
+                table_context = ""
+            for row_index, row in enumerate(table.get("rows", []) or [], start=1):
+                if isinstance(row, dict):
+                    values = [value for key, value in row.items() if key != "source_loc"]
+                elif isinstance(row, list):
+                    values = row
+                else:
+                    continue
+                content = " / ".join(str(value) for value in values if value is not None)
+                if headers:
+                    content = " / ".join(str(value) for value in headers) + " => " + content
+                row_locs = table.get("row_source_locs") or []
+                location = (row_locs[row_index - 1] if row_index <= len(row_locs)
+                            else row.get("source_loc") if isinstance(row, dict) else table_loc)
+                span = _coord(location, fallback_page=page_no)
+                blocks.append(("table_row", content, page_no, span, {"is_bullet": False, "is_heading": False, "table_context": table_context,
+                                                   "order": _loc_order(location)}))
+    if blocks and all(isinstance(block[4].get("order"), list) for block in blocks):
+        blocks.sort(key=lambda block: block[4]["order"])
+    return blocks
+
+
+def _validate_model_result(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict) or set(result) != {"label", "subject", "reason"}:
+        raise ValueError("invalid model classification shape")
+    if result["label"] not in {"self", "related", "foreign", "ambiguous"}:
+        raise ValueError("invalid model classification label")
+    if result["subject"] is not None and not isinstance(result["subject"], str):
+        raise ValueError("invalid model classification subject")
+    if not isinstance(result["reason"], str) or not result["reason"].strip():
+        raise ValueError("invalid model classification reason")
+    return result
+
+
+class EntityBridgeService:
+    def __init__(self, db_path, *, model_client=None, employee: SemanticEmployee | None = None,
+                 batch_size: int | None = None, batch_chars: int | None = None, budget=None):
+        self.db_path = db_path
+        self.model_client = model_client
+        self.employee = employee
+        self.batch_size = int(batch_size if batch_size is not None else os.environ.get("SAM_ATTRIBUTION_BATCH_SIZE", "32"))
+        self.batch_chars = int(batch_chars if batch_chars is not None else os.environ.get("SAM_ATTRIBUTION_BATCH_CHARS", "24000"))
+        if self.batch_size < 1 or self.batch_chars < 1:
+            raise ValueError("attribution batch bounds must be positive")
+        self.budget = budget
+
+    def _manifest(self, file_hash: str) -> dict[str, Any]:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT payload FROM parse_staging WHERE file_hash=? AND status='parsed' ORDER BY id DESC LIMIT 1",
+                (file_hash,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"parsed manifest not found: {file_hash}")
+        return json.loads(row["payload"])
+
+    def _roster(self, company_id: str) -> list[dict[str, Any]]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """SELECT * FROM entity_roster WHERE company_id=? AND status='active'
+                   AND superseded_by IS NULL ORDER BY id DESC""", (company_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["aliases"] = json.loads(item.get("aliases") or "[]")
+            result.append(item)
+        return result
+
+    def _wait_for_source_file(self, file_hash: str) -> None:
+        """Require the immutable source parent before creating attribution rows.
+
+        Upload commits ``source_files`` before a parse job is queued, but a
+        worker can race a just-committed upload when several jobs start at
+        once.  Waiting here keeps that transient ordering issue out of the FK
+        write and still fails clearly when the source really is absent.
+        """
+        delays = (0.0, 0.05, 0.1, 0.2, 0.4, 0.8)
+        for delay in delays:
+            if delay:
+                time.sleep(delay)
+            with connect(self.db_path) as conn:
+                if conn.execute(
+                    "SELECT 1 FROM source_files WHERE file_hash=?", (file_hash,)
+                ).fetchone() is not None:
+                    return
+        raise KeyError(f"source file not committed: {file_hash}")
+
+    @staticmethod
+    def _model_scope(roster: list[dict[str, Any]]) -> tuple[str | None, list[str]]:
+        """Expose only the host name/aliases, never the complete roster."""
+        declared = [row for row in roster if row.get("origin") == "declared" and row.get("entity_type") == "self"]
+        host = declared[0] if declared else next((row for row in roster if row.get("entity_type") == "self"), None)
+        if host is None:
+            return None, []
+        return host.get("entity_name"), list(host.get("aliases") or [])
+
+    def run(self, *, company_id: str, file_hash: str, use_model: bool = False,
+            thread_id: str | None = None) -> dict[str, Any]:
+        if not company_id:
+            raise ValueError("company_id must be injected by the host")
+        if self.employee is None and not use_model:
+            raise ValueError("entity employee is required")
+        manifest = self._manifest(file_hash)
+        self._wait_for_source_file(file_hash)
+        roster = self._roster(company_id)
+        model = self.model_client
+        if use_model and model is None:
+            model = EntityAttributionModelClient()
+        company_name, aliases = self._model_scope(roster)
+        raw_blocks = _text_blocks(manifest)
+        created = _now()
+        # Independent artifact identity. ``run_id`` remains in the row shape
+        # only as a backwards-compatible grouping token; it is not a FK.
+        run_id = secrets.randbits(63) or 1
+        artifact_id = f"{company_id}:{file_hash}:{uuid4().hex}"
+
+        # Semantic work must not hold a database write transaction open. Build
+        # the immutable child payloads first, then persist this employee/file
+        # artifact in one short transaction below.
+        expanded_blocks = []
+        for block_type, content, page, span, structure in raw_blocks:
+            expanded_blocks.append((block_type, content, page, span, structure))
+        budget = self.budget or AttributionBudget()
+        batched_results = {}
+        batch_count = 0
+        batch_sizes = []
+        failure = None
+        batch_employee = self.employee is not None and hasattr(self.employee, "attribute_blocks")
+        if batch_employee:
+            cursor = 0
+            while cursor < len(expanded_blocks):
+                batch = []
+                chars = 0
+                while cursor + len(batch) < len(expanded_blocks) and len(batch) < self.batch_size:
+                    index = cursor + len(batch)
+                    content = expanded_blocks[index][1]
+                    context = expanded_blocks[index][4].get("table_context", "")
+                    if chars + len(content) + len(context) > self.batch_chars:
+                        break
+                    batch.append({"block_id": index, "text": content, "context": context})
+                    chars += len(content) + len(context)
+                try:
+                    if not batch:
+                        raise EmployeeBudgetExceeded(f"attribution block={cursor} exceeds batch character bound={self.batch_chars}")
+                    batch_count += 1
+                    batch_sizes.append(len(batch))
+                    result = self.employee.attribute_blocks(
+                        blocks=batch, company_name=company_name, aliases=aliases,
+                        company_id=company_id, thread_id=None, budget=budget)
+                    batched_results.update(result)
+                    budget.remaining()
+                except WorkerUnavailable:
+                    # Missing/invalid IDs cannot be guessed or assigned by position.
+                    batched_results.update({block["block_id"]: {
+                        "label": "ambiguous", "reason": "employee batch attribution unavailable",
+                        "needs_review": True} for block in batch})
+                except EmployeeTransportError as exc:
+                    failure = exc
+                    break
+                cursor += len(batch)
+        classified_blocks = []
+        for index, (block_type, content, page, span, structure) in enumerate(expanded_blocks):
+            consolidated = None
+            review = False
+            reason = None
+            relation = None
+            source = "employee" if self.employee is not None else "deterministic"
+            if batch_employee and index not in batched_results:
+                break
+            if self.employee is not None:
+                try:
+                    result = batched_results[index] if batch_employee else self.employee.attribute_block(
+                        text=content, company_name=company_name, aliases=aliases,
+                        company_id=company_id, thread_id=thread_id,
+                    )
+                    classification = result["label"]
+                    relation = result.get("relation")
+                    subject = result.get("subject")
+                    reason = result.get("reason")
+                    consolidated = result.get("consolidated")
+                    review = result.get("needs_review", False)
+                except (SemanticDecisionUnavailable, OSError, TypeError, ValueError):
+                    classification, relation, subject = "ambiguous", None, None
+                    reason = "employee semantic attribution unavailable"
+            else:
+                source = "model"
+                try:
+                    result = _validate_model_result(model.classify(
+                        text=content, company_name=company_name, aliases=aliases
+                    ))
+                    classification = result["label"]
+                    relation = None
+                    subject = result["subject"]
+                    reason = result["reason"]
+                except Exception:
+                    # Do not expose provider errors or allow a malformed
+                    # answer to weaken review safety.
+                    classification, relation, subject = "ambiguous", None, None
+                    reason = "model classification unavailable or invalid"
+            needs_review = int(classification == "ambiguous" or review)
+            classified_blocks.append(
+                (index, block_type, content, page, span, classification,
+                 relation, subject, reason, source, needs_review, consolidated)
+            )
+
+        with connect(self.db_path) as conn:
+            # Each employee/file artifact is independent.  The only FK in
+            # this write is the immutable source_files evidence reference;
+            # no shared entity_bridge_runs parent is required.
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                "SELECT 1 FROM source_files WHERE file_hash=?", (file_hash,)
+            ).fetchone() is None:
+                raise KeyError(f"source file not committed: {file_hash}")
+            try:
+                conn.execute(
+                    """INSERT INTO entity_bridge_artifacts
+                       (artifact_id,run_id,company_id,file_hash,status,block_count,created_at)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (artifact_id, run_id, company_id, file_hash, "running", 0, created),
+                )
+            except sqlite3.IntegrityError:
+                LOGGER.exception(
+                    "entity_bridge_artifacts INSERT failed company_id=%s file_hash=%s artifact_id=%s",
+                    company_id, file_hash, artifact_id,
+                )
+                raise
+            for (index, block_type, content, page, span, classification,
+                 relation, subject, reason, source, needs_review, consolidated) in classified_blocks:
+                try:
+                    conn.execute(
+                        """INSERT INTO entity_bridge_blocks
+                           (run_id,artifact_id,company_id,file_hash,block_index,block_type,content,source_page,source_span,
+                           classification,relation,subject,reason,source,needs_review,consolidated,status,created_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending',?)""",
+                        (run_id, artifact_id, company_id, file_hash, index, block_type, content, page, span,
+                         classification, relation, subject, reason, source, needs_review, consolidated, created),
+                    )
+                except sqlite3.IntegrityError:
+                    LOGGER.exception(
+                        "entity_bridge_blocks INSERT failed company_id=%s file_hash=%s artifact_id=%s block_index=%s",
+                        company_id, file_hash, artifact_id, index,
+                    )
+                    raise
+            conn.execute(
+                """UPDATE entity_bridge_artifacts
+                   SET status='completed', block_count=?, completed_at=?
+                   WHERE artifact_id=?""",
+                (len(classified_blocks), _now(), artifact_id),
+            )
+            if failure is not None:
+                conn.execute("UPDATE entity_bridge_artifacts SET status='failed' WHERE artifact_id=?", (artifact_id,))
+            conn.commit()
+        metrics = {"company_id": company_id, "thread_id": thread_id, "run_id": run_id,
+                   "model_calls": budget.model_calls, "block_count": len(expanded_blocks),
+                   "completed_blocks": len(classified_blocks), "batch_count": batch_count,
+                   "batch_size": self.batch_size, "batch_sizes": batch_sizes,
+                   "elapsed_seconds": round(time.monotonic() - budget.started, 3),
+                   "artifact_id": artifact_id}
+        LOGGER.info("entity attribution metrics=%s", json.dumps(metrics))
+        # Persist counters in this file staging, including failed partial runs.
+        from ..harness.staging import StagingStore
+        with connect(self.db_path) as conn:
+            staging_row = conn.execute("SELECT id FROM parse_staging WHERE file_hash=? ORDER BY id DESC LIMIT 1", (file_hash,)).fetchone()
+        if staging_row is not None:
+            StagingStore(self.db_path).update_payload(staging_row["id"], {"attribution_metrics": metrics})
+        if failure is not None:
+            failure.args = (f"artifact_id={artifact_id} completed_blocks={len(classified_blocks)}/{len(expanded_blocks)} model_calls={budget.model_calls} batches={batch_count}: {failure}",)
+            raise failure
+        return {
+            **metrics,
+            "id": run_id,
+            "run_id": run_id,
+            "artifact_id": artifact_id,
+            "company_id": company_id,
+            "file_hash": file_hash,
+            "status": "completed",
+            "block_count": len(classified_blocks),
+            "created_at": created,
+        }
+
+    def list(self, *, company_id: str, run_id: int | None = None) -> list[dict[str, Any]]:
+        if not company_id:
+            raise ValueError("company_id must be injected by the host")
+        sql = "SELECT * FROM entity_bridge_blocks WHERE company_id=?"
+        params: list[Any] = [company_id]
+        if run_id is not None:
+            sql += " AND run_id=?"
+            params.append(run_id)
+        sql += " ORDER BY id ASC"
+        with connect(self.db_path) as conn:
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    def ambiguous(self, *, company_id: str, run_id: int | None = None) -> list[dict[str, Any]]:
+        rows = self.list(company_id=company_id, run_id=run_id)
+        return [row for row in rows if row["needs_review"] and row["status"] == "pending"]
+
+    def decide(self, *, company_id: str, block_id: int, classification: str, confirm: bool = False) -> dict[str, Any]:
+        if not company_id:
+            raise ValueError("company_id must be injected by the host")
+        if not confirm:
+            raise PermissionError("write operation requires --confirm")
+        if classification not in {"self", "related", "foreign"}:
+            raise ValueError("decision must be self, related, or foreign")
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM entity_bridge_blocks WHERE id=? AND company_id=? AND status='pending'",
+                (block_id, company_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(block_id)
+            conn.execute(
+                "UPDATE entity_bridge_blocks SET decision=?,classification=?,needs_review=0,source='human',status='decided' WHERE id=?",
+                (classification, classification, block_id),
+            )
+            conn.commit()
+            return dict(conn.execute("SELECT * FROM entity_bridge_blocks WHERE id=?", (block_id,)).fetchone())

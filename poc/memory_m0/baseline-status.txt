@@ -1,0 +1,68 @@
+ M app/context_assembler.py
+ M app/db/database.py
+ M app/db/schema.py
+ M app/employees/semantic.py
+ M app/employees/worker.py
+ M app/entities/bridge.py
+ M app/guidance/import_guide.py
+ M app/harness/runtime/openclaw_adapter.py
+ M app/memory/company_facts/__init__.py
+ M app/memory/company_facts/l0_guide.py
+ M app/memory/company_facts/l1_brief.py
+ M app/memory/company_facts/l2_complete_facts.py
+ M app/memory/company_facts/l2_consolidation.py
+ M app/memory/company_facts/l2_fact_extractor.py
+ M app/memory/company_facts/l2_fact_verifier.py
+ M app/memory/company_facts/paths.py
+ M app/memory_map.py
+ M app/parse_jobs.py
+ M app/ports.py
+ M app/runtime_config.py
+ M app/tool_bridge.py
+ M docs/architecture/06-2b-l1-l0-design.md
+ M docs/architecture/07-accountability.md
+ M docs/local-openviking.md
+ M harness-openclaw/skill-registry/catalog.json
+ M harness-openclaw/state/gateway.owner.json
+ M scripts/run.sh
+ M skills/document-classifier/SKILL.md
+ M skills/finance-fact-extraction/SKILL.md
+ M tests/entity_employee.py
+ M tests/test_consolidation.py
+ M tests/test_conversation_injection.py
+ M tests/test_dashboard.py
+ M tests/test_entity_bridge.py
+ M tests/test_fact_extractor_hard_facts.py
+ M tests/test_facts_l1.py
+ M tests/test_finance_worker.py
+ M tests/test_frontend_pages.py
+ M tests/test_import_guide.py
+ M tests/test_memory_map.py
+ M tests/test_memory_map_eventual_consistency.py
+ M tests/test_memory_map_result_envelope.py
+ M tests/test_memory_map_runtime.py
+ M tests/test_openviking_provider.py
+ M tests/test_phase1_catalog.py
+ M tests/test_r6_entity_roster.py
+ M tests/test_tool_bridge.py
+ M webapp/app.py
+?? .oc-runtime/
+?? app/employee_policy.py
+?? app/memory/company_facts/l2_projection.py
+?? app/runtime_errors.py
+?? docs/architecture/08-memory-store-selfhosted-design.md
+?? docs/handoffs/
+?? poc/
+?? scripts/check_2b_e2e.py
+?? scripts/ensure-local-ov.py
+?? skills/fact-brief/
+?? skills/fact-guide/
+?? tests/fact_candidates.py
+?? tests/fixtures/company/
+?? tests/test_2b_e2e_cleanup.py
+?? tests/test_2b_tool_navigation.py
+?? tests/test_2b_unresolved_handoff.py
+?? tests/test_company_e2e_fixture.py
+?? tests/test_company_fact_projections.py
+?? tests/test_employee_resilience.py
+?? tests/test_local_startup_orchestration.py

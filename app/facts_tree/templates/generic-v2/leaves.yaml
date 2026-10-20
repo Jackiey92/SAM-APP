@@ -1,0 +1,278 @@
+# 通用事实模板包 generic-v2 —— 9 枝 60 叶（未发布草稿）。
+# 编码/名称/范围依据 P1 审批稿 docs/handoffs/2026-10-16-factstree-p1分类与旧叶映射草案.md §2
+# 及 docs/范范审批/2026-10-16_FactsTree-P1分类与旧叶映射_审批通过.md；scope 由获批表
+# “收录范围”与“排除/交叉边界”两列原文合成，未新增内容。叶子不规定 n/s 形状
+# （docs/范范审批/2026-10-17_P3新版叶子内容形状-裁定通过.md），员工按事实选择段落或表格。
+# 本包不进入 available_packs()，不可绑定公司；generic-v1 编码与解释永久保留。
+pack: generic-v2
+version: 1
+is_industry_pack: false
+trunks:
+  - code: governance
+    directory: "01-公司主体与治理"
+    order: 1
+  - code: team
+    directory: "02-团队与组织"
+    order: 2
+  - code: market
+    directory: "03-市场与客户需求"
+    order: 3
+  - code: product
+    directory: "04-产品与技术"
+    order: 4
+  - code: business
+    directory: "05-商业模式与获客机制"
+    order: 5
+  - code: customers
+    directory: "06-客户与商业进展"
+    order: 6
+  - code: operations
+    directory: "07-交付运营与供应"
+    order: 7
+  - code: finance
+    directory: "08-财务与现金"
+    order: 8
+  - code: funding
+    directory: "09-融资与资本计划"
+    order: 9
+leaves:
+  - code: L-governance-01
+    trunk: governance
+    title: "主体登记与关联主体"
+    scope: "登记、主体资格、子公司/关联主体的身份及关联关系；排除/交叉：控制权/表决权统一L-governance-03；业务许可随对应事项"
+  - code: L-governance-02
+    trunk: governance
+    title: "股权、出资与股东关系"
+    scope: "股东、比例、认缴实缴、代持、股东关联和一致行动；排除/交叉：员工激励计划归团队；融资轮次交易过程归融资"
+  - code: L-governance-03
+    trunk: governance
+    title: "控制权与治理安排"
+    scope: "实控、表决权、董事/股东会治理机制与当前有效权利；排除/交叉：融资协议中的交割条件归融资；经营管理职责归团队"
+  - code: L-governance-04
+    trunk: governance
+    title: "股权权属限制与争议"
+    scope: "质押、冻结、股权权属争议及其法律程序；排除/交叉：法务专题只引用；不另存案件副本"
+  - code: L-governance-05
+    trunk: governance
+    title: "公司治理变更事件"
+    scope: "设立、改名、迁址、主体重组及治理变更；排除/交叉：产品、客户、融资等事件留在主题叶，时间线由L1/L0引用"
+  - code: L-team-01
+    trunk: team
+    title: "创始人与核心成员档案"
+    scope: "创始人/高管/核心成员身份、履历、教育和个人成果；排除/交叉：持股比例归治理；研发团队集体构成归L-team-04"
+  - code: L-team-02
+    trunk: team
+    title: "组织结构与职责"
+    scope: "部门、岗位、职责、汇报关系；排除/交叉：董事会制度归治理"
+  - code: L-team-03
+    trunk: team
+    title: "人员规模与结构"
+    scope: "全员及研发等分组的数量、比例、期间和统计口径；排除/交叉：关键岗位配置归L-team-04；金额归财务"
+  - code: L-team-04
+    trunk: team
+    title: "核心团队与关键岗位"
+    scope: "关键岗位配置、岗位备份和人员依赖的来源陈述；排除/交叉：人数/比例引用L-team-03，个人履历引用L-team-01，变动引用L-team-05；稳定性分析另存诊断"
+  - code: L-team-05
+    trunk: team
+    title: "人员变动与团队协作"
+    scope: "入离职、高管变动、合作经历和协作事实；排除/交叉：未来招聘归L-team-06"
+  - code: L-team-06
+    trunk: team
+    title: "激励与人才计划"
+    scope: "股权/非股权激励制度、招聘和人员扩张计划；排除/交叉：已授予股权的法律结构同时引用治理事实，不复制持股事实"
+  - code: L-team-07
+    trunk: team
+    title: "劳动关系与用工义务"
+    scope: "劳动合同、用工义务、争议和处理进展；排除/交叉：薪酬核算/支付归财务；人数与招聘归原团队叶"
+  - code: L-market-01
+    trunk: market
+    title: "行业与市场范围"
+    scope: "细分行业定义、区域、产业链和统计范围；排除/交叉：市场变化/发展阶段归L-market-05；目标客群归L-market-02"
+  - code: L-market-02
+    trunk: market
+    title: "目标客群与应用场景"
+    scope: "目标客户群、使用者/购买者、场景和需求边界；排除/交叉：已发生的具体客户关系归客户进展"
+  - code: L-market-03
+    trunk: market
+    title: "需求证据与客户洞察"
+    scope: "所有客户/潜客的需求、使用场景、未满足问题及访谈/反馈原文；排除/交叉：是否已成交不改变需求归属；满意度和续约事件归L-customers-05"
+  - code: L-market-04
+    trunk: market
+    title: "市场规模与测算"
+    scope: "TAM/SAM/SOM、行业规模、测算假设/来源/期间；排除/交叉：员工估算须标分析，不冒充公司事实"
+  - code: L-market-05
+    trunk: market
+    title: "市场驱动与周期"
+    scope: "行业增长驱动、周期、供需变化和市场阶段；排除/交叉：公司收入/订单表现归客户或财务"
+  - code: L-market-06
+    trunk: market
+    title: "竞争者与替代方案"
+    scope: "竞争者清单、竞品能力/公司对比口径、替代品和替代威胁；排除/交叉：公司自身技术差异归产品；外部评价需留来源范围"
+  - code: L-market-07
+    trunk: market
+    title: "行业门槛与外部环境"
+    scope: "行业准入要求、行业监管及外部环境信息，保留适用范围；排除/交叉：本公司许可状态按主体/产品/运营业务事项归属；符合性结论另存诊断"
+  - code: L-product-01
+    trunk: product
+    title: "产品与服务组合"
+    scope: "产品/服务清单、版本、定位、交付形态；排除/交叉：收费规则归商业模式"
+  - code: L-product-02
+    trunk: product
+    title: "产品能力与性能指标"
+    scope: "功能、性能参数、测试状态、产品认证/合规限制及相关争议；排除/交叉：竞争者比较归市场；未核验能力标公司声明、未来目标标计划，不能互相替代"
+  - code: L-product-03
+    trunk: product
+    title: "产品路线与生命周期"
+    scope: "产品版本的目标、发布、采用生命周期和退役节点；排除/交叉：研究项目/技术实验归L-product-06；同一发布事实不复制到研发"
+  - code: L-product-04
+    trunk: product
+    title: "技术架构与关键难点"
+    scope: "核心技术、技术难点、系统架构和技术依赖；排除/交叉：生产流程归运营"
+  - code: L-product-05
+    trunk: product
+    title: "技术来源与合作"
+    scope: "自研/委托/授权/合作开发的来源、技术合同权利义务与合同争议；排除/交叉：资产权属清单及侵权主张归L-product-07；授权合同事实由IP页引用"
+  - code: L-product-06
+    trunk: product
+    title: "研发项目与技术迭代"
+    scope: "在研项目、技术储备、实验及技术迭代进展；排除/交叉：产品发布节点引用L-product-03；研发投入金额归财务"
+  - code: L-product-07
+    trunk: product
+    title: "知识产权与技术资产"
+    scope: "专利/软著等资产身份、权属、申请授权状态、侵权及权属争议；排除/交叉：具体技术许可合同引用L-product-05；法务专题引用本叶"
+  - code: L-product-08
+    trunk: product
+    title: "核心部件与自研边界"
+    scope: "关键组件、采购/自制边界及比例，注明口径和期间；排除/交叉：采购金额归财务；稳定供应关系归运营"
+  - code: L-business-01
+    trunk: business
+    title: "价值交付与商业模式"
+    scope: "公司明确陈述的交易角色与价值交换机制；排除/交叉：定价/渠道细节引用专叶；员工综合商业模式分析进入诊断"
+  - code: L-business-02
+    trunk: business
+    title: "收费与定价政策"
+    scope: "标价、计价单位、套餐、折扣/定价规则；排除/交叉：合同成交价归客户合同；收入归财务"
+  - code: L-business-03
+    trunk: business
+    title: "获客与销售机制"
+    scope: "直销流程、获客流程、通用销售/信用政策；排除/交叉：渠道伙伴规则统一L-business-04；具体交易归客户事项"
+  - code: L-business-04
+    trunk: business
+    title: "渠道与合作机制"
+    scope: "适用于一类伙伴的渠道政策、角色、分成/代理规则；排除/交叉：具体经销合同及争议归L-customers-06，普通客户合同归L-customers-04"
+  - code: L-business-05
+    trunk: business
+    title: "客户验证与服务政策"
+    scope: "试用/验证方法、售后政策、退换/服务规则；排除/交叉：某客户的实际验证进度归客户进展"
+  - code: L-customers-01
+    trunk: customers
+    title: "客户与账户清单"
+    scope: "客户身份、状态、账户分类、数量与期间口径；排除/交叉：收入/订单金额不在此重复；客户集中度专题引用原指标"
+  - code: L-customers-02
+    trunk: customers
+    title: "线索、拓展与商机"
+    scope: "新客户拓展、商机阶段、来源与下一步；排除/交叉：计划收入预测归财务"
+  - code: L-customers-03
+    trunk: customers
+    title: "试用、验证与采用进展"
+    scope: "售前试用、POC、客户验证周期及结果；排除/交叉：商业合同成立后的交付验收归L-customers-04；产品通用性能归产品"
+  - code: L-customers-04
+    trunk: customers
+    title: "合同、订单与履约"
+    scope: "具体客户合同/订单金额、期限、付款条件、义务、违约/争议及单合同交付验收事件；排除/交叉：到账/会计确认属独立财务事件；通用交付流程/总体质量归运营"
+  - code: L-customers-05
+    trunk: customers
+    title: "客户反馈与合作状态"
+    scope: "满意度、评价、续约、流失及合作状态变化的来源陈述；排除/交叉：功能/场景需求无论是否成交均归L-market-03；同句不同事项拆分关联"
+  - code: L-customers-06
+    trunk: customers
+    title: "渠道与商业成果"
+    scope: "具体渠道伙伴关系、经销合同义务及争议、渠道业务状态/明确成果指标；排除/交叉：已归客户的同一订单仅引用；通用政策归L-business-04，已实现收入归财务"
+  - code: L-customers-07
+    trunk: customers
+    title: "客户集中与商业依赖"
+    scope: "客户数量/订单口径的集中指标及有出处的业务依赖陈述；排除/交叉：收入占比归L-finance-01，账户总数归L-customers-01；综合集中度专题只引用，员工风险分析另存"
+  - code: L-operations-01
+    trunk: operations
+    title: "交付与服务流程"
+    scope: "制造/软件部署/咨询服务等实际交付流程；排除/交叉：产品能力归产品"
+  - code: L-operations-02
+    trunk: operations
+    title: "产能、容量与利用"
+    scope: "产线产能、服务团队容量、系统承载和利用率；排除/交叉：财务金额归财务"
+  - code: L-operations-03
+    trunk: operations
+    title: "质量控制、安全与运营合规"
+    scope: "生产/服务总体良率、质量控制、总体SLA、安全环保、运营许可及相关处罚/整改；排除/交叉：单个客户合同验收归L-customers-04；资质按实际许可对象选择，不一律归此"
+  - code: L-operations-04
+    trunk: operations
+    title: "设备、场地与运营资产"
+    scope: "设备/厂房/土地等运营资源、场地权属/租赁义务及争议；排除/交叉：账面金额归财务；同一付款记录只在财务现金叶"
+  - code: L-operations-05
+    trunk: operations
+    title: "供应商与采购供给"
+    scope: "供应商、品类、采购合同条件/账期、义务及关联交易/合同争议；排除/交叉：实际预付/应付/收付款归财务，单一供应来源事实归L-operations-06"
+  - code: L-operations-06
+    trunk: operations
+    title: "供应与交付依赖"
+    scope: "单一来源、外包依赖、中断和替代能力的可回查陈述；排除/交叉：供应商清单引用L-operations-05，风险结论另存诊断，不推定为事实"
+  - code: L-operations-07
+    trunk: operations
+    title: "运营系统与自动化"
+    scope: "内部信息系统、自动化措施、数据使用/隐私运营措施及相关事件；排除/交叉：产品能力/技术设计归产品；具体客户数据合同义务归客户；跨域无主事项则待归类"
+  - code: L-operations-08
+    trunk: operations
+    title: "运营扩张与资本项目"
+    scope: "产线/场地/交付能力建设计划及节点；排除/交叉：融资资金用途归融资；支出预测归财务预测"
+  - code: L-finance-01
+    trunk: finance
+    title: "收入、成本与利润"
+    scope: "经营总额、利润/毛利、普通经营收支口径、按产品或客户的收入构成；排除/交叉：研发/人员明细归L-finance-05、资本支出指标归06、税务指标归07；原值只引用不重复"
+  - code: L-finance-02
+    trunk: finance
+    title: "现金、回款与应收应付"
+    scope: "单笔收付款、现金流、回款、应收应付和结算结果（含研发/资本支出/税款支付流水）；排除/交叉：预算/支出统计指标与支付流水是不同事实；不把一笔支付再复制到费用专题"
+  - code: L-finance-03
+    trunk: finance
+    title: "资产、负债与权益"
+    scope: "资产负债/权益余额、报表口径与审计信息；排除/交叉：应收应付明细归02，汇总引用；法律股权比例归治理；员工算出的数另留计算依据"
+  - code: L-finance-04
+    trunk: finance
+    title: "预算与财务预测"
+    scope: "所有未来财务预算/预测，包括研发、人员、税务和资本支出，保留假设和版本；排除/交叉：未来/实际先分流；其他财务叶只引用未来数，不再次保存"
+  - code: L-finance-05
+    trunk: finance
+    title: "研发与人员投入金额"
+    scope: "实际研发/人员费用的期间统计、组成和比例；排除/交叉：对应单笔支付归02，未来预算归04，人数归团队；总成本中的同一明细只引用"
+  - code: L-finance-06
+    trunk: finance
+    title: "资本支出与融资资金执行"
+    scope: "实际资本支出统计、资金使用/预算执行指标；排除/交叉：支付流水归02，未来财务预算归04，用途承诺归融资；批准预算不冒充已支出"
+  - code: L-finance-07
+    trunk: finance
+    title: "税务、补贴与财务优惠"
+    scope: "税额/补贴指标、申报义务、优惠资格、税务争议和处罚决定；排除/交叉：税款/补贴实际流水归02，未来预测归04；决定与付款是不同事件，关联不复制"
+  - code: L-funding-01
+    trunk: funding
+    title: "融资历史与交易"
+    scope: "股权融资轮次、投资人、金额、时间和状态；排除/交叉：股权结构当前状态归治理；到账流水归财务"
+  - code: L-funding-02
+    trunk: funding
+    title: "债务与融资义务"
+    scope: "债权融资、担保/偿付条款及债务履行/争议事件；排除/交叉：股权投资对赌归L-funding-05；本金/利息到账及支付流水归财务"
+  - code: L-funding-03
+    trunk: funding
+    title: "本轮融资目标与方案"
+    scope: "拟融金额、轮次、估值/条款主张、融资状态；排除/交叉：估值保留公司主张/谈判性质，不当作已核实价值；员工自行估算进入诊断"
+  - code: L-funding-04
+    trunk: funding
+    title: "资金用途与里程碑"
+    scope: "融资用途分配及对应目标、阶段节点；排除/交叉：实际资金支出归财务/运营"
+  - code: L-funding-05
+    trunk: funding
+    title: "投资协议与交割条件"
+    scope: "具体股权投资协议、对赌条件、交割要求、履行及争议事件；排除/交叉：当前有效持股/表决权归治理；合同约定与权利生效是不同事实并关联"
+  - code: L-funding-06
+    trunk: funding
+    title: "上市与退出准备"
+    scope: "上市规划、准备事项、上市中介合作状态；排除/交叉：投资人退出方式/收益测算不属于公司事实，转任务分析"

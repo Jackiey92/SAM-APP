@@ -1,0 +1,68 @@
+{% extends 'base.html' %}
+{% block crumb %}文件柜{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>文件柜</h1><p>文件先入队，再由后台逐步解析、归类和固化；页面不会被慢引擎卡住。</p></div></div>
+<section class="card inbox-card">
+  <label class="dropzone" for="inbox-input"><input id="inbox-input" type="file" multiple>
+    <span>选择或拖入文件</span><small>支持 PDF、Excel、PPT、Word；可继续追加上传</small>
+  </label>
+  <div id="inbox-feedback" class="feedback" aria-live="polite"></div>
+  <div id="inbox-jobs" class="result-list" aria-live="polite">
+    {% if not jobs %}<div class="empty">暂无上传任务。</div>{% endif %}
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+  const company = window.SAM_COMPANY_ID || 'default';
+  const list = document.querySelector('#inbox-jobs');
+  const input = document.querySelector('#inbox-input');
+  const feedback = document.querySelector('#inbox-feedback');
+  let timer = null;
+  const active = new Set(['queued', 'parsing']);
+  const labels = {queued:'排队中', parsing:'解析中', done:'已完成', failed:'解析失败', canceled:'已停止', needs_human:'需人工核验'{% if facts_tree_enabled %}, partial:'已保留进度'{% endif %}};
+  const stages = {queued:'等待后台处理', uploading:'保存原件', starting_engine:'启动解析引擎', parsing:'读取正文', reviewing:'核验转换质量', needs_human:'需人工核验', consolidating:'正在完成写入', done:'已完成', failed:'失败', canceled:'已停止'{% if facts_tree_enabled %}, reading:'分段阅读资料', partial:'等待继续处理'{% endif %}};
+  const esc = value => String(value ?? '');
+  async function api(url, options={}) {
+    const response = await fetch(url, options);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.message || body.error || `请求失败 (${response.status})`);
+    return body;
+  }
+  function render(jobs) {
+    list.textContent = '';
+    if (!jobs.length) { const empty=document.createElement('div'); empty.className='empty'; empty.textContent='暂无上传任务。'; list.append(empty); return; }
+    jobs.forEach(job => {
+      const card=document.createElement('article'); card.className='result inbox-job'; card.dataset.jobId=job.job_id;
+      const title=document.createElement('div'); title.className='inbox-job-head';
+      const name=document.createElement('strong'); name.textContent=esc(job.original_name); title.append(name);
+      const badge=document.createElement('span'); badge.className=`badge job-${job.status}`; badge.textContent=job.status==='failed' && job.l2_committed ? '简报/导览失败' : (labels[job.status] || job.status); title.append(badge); card.append(title);
+      const detail=document.createElement('div'); detail.className='inbox-job-detail';
+      const stage=document.createElement('span'); stage.textContent=stages[job.stage] || job.stage || ''; detail.append(stage);
+      if (job.progress_total) { const count=document.createElement('span'); count.textContent=` · ${job.progress_current || 0}/${job.progress_total} 页`; detail.append(count); }
+      card.append(detail);
+      if (job.message) { const msg=document.createElement('p'); msg.className='muted'; msg.textContent=job.message; card.append(msg); }
+      if (job.error_kind && ['failed','needs_human'].includes(job.status)) { const err=document.createElement('p'); err.className='job-error'; err.textContent=`原因：${job.error_kind}`; card.append(err); }
+      if (job.quality_status) { const quality=document.createElement('p'); quality.className='inbox-job-detail'; quality.textContent=`质检：${job.quality_status}；模型调用 ${job.quality_model_calls || 0} 次，核验脚本 ${job.quality_script_calls || 0} 次，重转 ${job.quality_reworks || 0} 次`; card.append(quality); }
+      if (job.quality_issues) { try { const issues=JSON.parse(job.quality_issues); for (const issue of issues) { const line=document.createElement('p'); line.className='job-error'; line.textContent=`${issue.source_loc}：${issue.problem}；期望：${issue.expected}`; card.append(line); } } catch (_) {} }
+      const actions=document.createElement('div'); actions.className='todo-actions';
+      if (job.status==='done') { const link=document.createElement('a'); link.className='button small'; link.href=`/files/${encodeURIComponent(job.file_hash)}`; link.textContent='查看文件'; actions.append(link); }
+      if (active.has(job.status)) {
+        const stop=document.createElement('button'); stop.type='button'; stop.className='button small danger'; stop.textContent=job.stage==='consolidating'?'即将完成，无法中途停止':'停止'; stop.disabled=job.stage==='consolidating';
+        stop.addEventListener('click', async () => { stop.disabled=true; try { await api(`/api/parse-jobs/${encodeURIComponent(job.job_id)}/cancel?company_id=${encodeURIComponent(company)}`, {method:'POST'}); await load(); } catch (error) { feedback.textContent=error.message; stop.disabled=false; } }); actions.append(stop);
+      }
+      if (job.status==='failed' || job.status==='canceled' || job.status==='needs_human'{% if facts_tree_enabled %} || job.status==='partial'{% endif %}) { const retry=document.createElement('button'); retry.type='button'; retry.className='button small'; retry.textContent={% if facts_tree_enabled %}'继续处理'{% else %}job.l2_committed ? '重建简报/导览' : '重新解析'{% endif %}; retry.addEventListener('click', async () => { retry.disabled=true; try { {% if facts_tree_enabled %}const renewed=window.confirm('是否明确给予本次续跑新的30分钟处理期限？已有调用额度不会重置。'); {% endif %}await api(`/api/parse-jobs/${encodeURIComponent(job.job_id)}/retry?company_id=${encodeURIComponent(company)}`, {method:'POST'{% if facts_tree_enabled %}, headers:{'Content-Type':'application/json'},body:JSON.stringify({resume_unresolved:true,renew_deadline_seconds:renewed?1800:null}){% endif %}}); await load(); } catch (error) { feedback.textContent=error.message; retry.disabled=false; } }); actions.append(retry); }
+      if (actions.children.length) card.append(actions);
+      list.append(card);
+    });
+  }
+  async function load() { try { const body=await api(`/api/parse-jobs?company_id=${encodeURIComponent(company)}`); render(body.jobs || []); } catch (error) { feedback.textContent=error.message; } }
+  function schedule() { if (!document.hidden && !timer) timer=setInterval(load, 1500); }
+  function stopSchedule() { if (timer) { clearInterval(timer); timer=null; } }
+  input?.addEventListener('change', async () => { const files=Array.from(input.files || []); input.value=''; for (const file of files) { const data=new FormData(); data.append('file',file); data.append('company_id',company); try { await api('/api/upload',{method:'POST',body:data}); } catch (error) { feedback.textContent=`${file.name}：${error.message}`; } } await load(); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stopSchedule(); else { load(); schedule(); } });
+  load(); schedule();
+})();
+</script>
+{% endblock %}

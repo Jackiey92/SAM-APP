@@ -1,0 +1,109 @@
+{
+  "catalog_version": "phase1",
+  "scan_root": "skills",
+  "skills": [
+    {
+      "skill_id": "business-prose-extraction",
+      "name": "business-prose-extraction",
+      "description": "Extract business analysis evidence and unresolved handoffs.",
+      "version": "1.1.0",
+      "source": "business-prose-extraction/SKILL.md",
+      "content_sha256": "9f95a52b2018f9019287e2d5d9286e5505ea36819c2382b6e04c20f5a261121f",
+      "roles": [
+        "business_analyst"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "skill_id": "document-classifier",
+      "name": "document-classifier",
+      "description": "Classify parsed documents and attribute evidence blocks by meaning.",
+      "version": "1.3.0",
+      "source": "document-classifier/SKILL.md",
+      "content_sha256": "6a9c26a4b95a0c39b20888c372a4b0872f90ba60cac4f798499001e5f7c0b1d8",
+      "roles": [
+        "file_processor"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "skill_id": "document-ingest",
+      "name": "document-ingest",
+      "description": "Convert source documents into readable Markdown with visible original coordinates and fidelity artifacts.",
+      "version": "1.1.0",
+      "source": "document-ingest/SKILL.md",
+      "content_sha256": "816ec5259e978e86577ec5d2514891bba7187e17bc8e94489518b91c4c5fd0b8",
+      "roles": [
+        "file_processor"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "skill_id": "fact-brief",
+      "name": "fact-brief",
+      "description": "Aggregate all verified company L2 facts into a cited L1 brief, without inventing numbers.",
+      "version": "1.2.0",
+      "source": "fact-brief/SKILL.md",
+      "content_sha256": "6ece66cd42e53ef022d7e613a411e930b1f1c2aeeec48ba35fe0fe449562b649",
+      "roles": [],
+      "visibility": "workspace"
+    },
+    {
+      "skill_id": "fact-guide",
+      "name": "fact-guide",
+      "description": "Compress only the supplied L1 brief into a budgeted LEADER guide pointing back to L1.",
+      "version": "1.2.0",
+      "source": "fact-guide/SKILL.md",
+      "content_sha256": "80454ed406a287c3512175a67f8ae82b44ad5d1c2ee016c5103e4716464d2080",
+      "roles": [],
+      "visibility": "workspace"
+    },
+    {
+      "skill_id": "fact-leaf",
+      "name": "fact-leaf",
+      "description": "Build one cited company fact-tree leaf from supplied parsed-document fragments, without inventing facts.",
+      "version": "0.5.3",
+      "source": "fact-leaf/SKILL.md",
+      "content_sha256": "01d0c75b4860f8374cbd423369207215c05103ff730eb03676236c0ecf219a76",
+      "roles": [],
+      "visibility": "workspace"
+    },
+    {
+      "skill_id": "file-processor",
+      "name": "file-processor",
+      "description": "Read a whole document, attribute evidence and extract source-cited facts as one employee.",
+      "version": "1.2.1",
+      "source": "file-processor/SKILL.md",
+      "content_sha256": "4fbf0a399f10c2452a3125d9d2119703e9abc73f15088bbcd161e5a0dfd4ae29",
+      "roles": [
+        "file_processor"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "skill_id": "finance-fact-extraction",
+      "name": "finance-fact-extraction",
+      "description": "Extract finance fact candidates without changing digits or units.",
+      "version": "1.1.0",
+      "source": "finance-fact-extraction/SKILL.md",
+      "content_sha256": "6f03289890ad94eb65bfbb237e27a1ddc3ec61533d9cc0c122538fcc2419e014",
+      "roles": [
+        "finance_analyst"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "skill_id": "legal-document-analysis",
+      "name": "legal-document-analysis",
+      "description": "Extract legally relevant evidence, obligations, and unresolved review items.",
+      "version": "1.0.0",
+      "source": "legal-document-analysis/SKILL.md",
+      "content_sha256": "12ba28cc39e0222ddfa7e4ad89cb58bd207c3b8d34d59f7c1bcd8742b057c0f2",
+      "roles": [
+        "legal_analyst"
+      ],
+      "visibility": "workspace"
+    }
+  ],
+  "rejected": []
+}

@@ -13,9 +13,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-from ...parsing import ParseResult
-from ...parsing.base import ParserRegistry
+from ..contracts import ParseResult
+from typing import Protocol
 from ..staging import StagingStore
+
+
+class ParserRegistry(Protocol):
+    def get(self, format: str): ...
 
 
 def _now() -> str:
@@ -67,15 +71,6 @@ class HarnessRuntime:
         from ...db.database import connect
 
         with connect() as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS audit_log ("
-                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                "action TEXT NOT NULL,"
-                "file_hash TEXT,"
-                "format TEXT,"
-                "detail TEXT,"
-                "created_at TEXT NOT NULL)"
-            )
             cur = conn.execute(
                 "INSERT INTO audit_log(action,file_hash,format,detail,created_at)"
                 " VALUES (?,?,?,?,?)",
@@ -93,6 +88,5 @@ class HarnessRuntime:
                 "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(r) for r in rows]
-
 
 
