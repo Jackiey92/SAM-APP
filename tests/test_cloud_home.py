@@ -496,11 +496,20 @@ def facts_tree_section(company='acc-cloud'):
     from app.facts_tree.tree_read import attach_placement_validation
     binding = {'template_pack': 'generic', 'pack_version': 1, 'binding_revision': 1,
                'pack_digest': 'a' * 64, 'digest_source': 'verified-manifest'}
+    # Navigation fields mirror TreeReadService.snapshot(): the tree carries the
+    # trunks summary from _read_tree and each trunk its leaf catalog from
+    # _read_trunk, so browser navigation renders from the fixture.
     section = {'company_id': company, 'state': 'ready',
                'tree': {'company_id': company, 'binding': binding,
-                        'node': 'tree', 'code': None, 'state': 'ready', 'brief': '树简报原文'},
+                        'node': 'tree', 'code': None, 'state': 'ready', 'brief': '树简报原文',
+                        'trunks': [{'code': 'bizov', 'order': 2, 'directory': '02-业务概览',
+                                    'state': 'ready', 'leaves': 15, 'generated_leaves': 1}]},
                'trunks': {'bizov': {'company_id': company, 'node': 'trunk', 'code': 'bizov',
-                                    'state': 'ready', 'brief': '枝简报原文'}},
+                                    'state': 'ready', 'brief': '枝简报原文',
+                                    'leaves': [{'code': 'L-bizov-08', 'trunk': 'bizov',
+                                                'title': '关键性能指标', 'shape': 's',
+                                                'scope': '产品关键性能/技术参数',
+                                                'state': 'ready', 'version': 1}]}},
                'leaves': {'L-bizov-08': {'company_id': company, 'node': 'leaf', 'code': 'L-bizov-08',
                                          'state': 'ready', 'version': 1, 'content': '叶正文原文'}}}
     return attach_placement_validation(section)
@@ -515,8 +524,13 @@ def test_cloud_facts_tree_reads_snapshot_only(cloud_web, monkeypatch):
     client = cloud_web.app.test_client()
     tree = client.get('/api/facts/tree').get_json()
     assert tree['state'] == 'ready' and tree['brief'] == '树简报原文'
+    nav = {item['code']: item for item in tree['trunks']}
+    assert nav['bizov']['directory'] == '02-业务概览' and nav['bizov']['generated_leaves'] == 1
     trunk = client.get('/api/facts/tree?node=trunk&code=bizov').get_json()
     assert trunk['brief'] == '枝简报原文' and trunk['code'] == 'bizov'
+    catalog = {item['code']: item for item in trunk['leaves']}
+    assert (catalog['L-bizov-08']['title'] == '关键性能指标'
+            and catalog['L-bizov-08']['state'] == 'ready')
     leaf = client.get('/api/facts/tree?node=leaf&code=L-bizov-08').get_json()
     assert leaf['content'] == '叶正文原文' and leaf['version'] == 1
     assert client.get('/api/facts/tree?node=trunk&code=nope').status_code == 404
