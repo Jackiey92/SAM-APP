@@ -10,6 +10,31 @@ from app.storage import ArchiveFileStore
 from app.runtime_config import RuntimeConfig
 
 
+def _isolated_config(tmp_path: Path, env: dict[str, str] | None = None,
+                     *, config_path: Path | None = None) -> RuntimeConfig:
+    """Point every runtime-writable root at tmp_path, keep read-only sources in the repo.
+
+    The OpenClaw adapter derives its writable locations from harness_root
+    (cache/inbox/outbox), state_dir (plugin mount, gateway log/owner), and
+    config_path, so all three must move together. The config template and the
+    sam-memory plugin stay read-only in the repository; the template is copied
+    under the temporary harness root so _ensure_skill_mount sees the same
+    production defaults.
+    """
+    config = RuntimeConfig.from_env(
+        project_root=Path(__file__).parents[1],
+        env=env or {"SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root", "SAM_PROFILE": "local"},
+    )
+    harness_root = tmp_path / "harness"
+    template = config.harness_root / "state" / "openclaw.example.json"
+    target = harness_root / "state" / "openclaw.example.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+    state_dir = tmp_path / "state"
+    return replace(config, harness_root=harness_root, state_dir=state_dir,
+                   config_path=config_path or state_dir / "openclaw.json")
+
+
 def test_agent_context_is_optional_and_deterministically_injected(tmp_path: Path):
     calls = []
 
@@ -18,8 +43,7 @@ def test_agent_context_is_optional_and_deterministically_injected(tmp_path: Path
         payload = {"meta": {"finalAssistantVisibleText": "ok"}}
         return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
 
-    config = RuntimeConfig.from_env(project_root=Path(__file__).parents[1], env={"SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root", "SAM_PROFILE": "local"})
-    config = replace(config, state_dir=tmp_path / "state", config_path=tmp_path / "state" / "openclaw.json")
+    config = _isolated_config(tmp_path)
     adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=runner)
     adapter.run_agent_message("裸问题")
     assert calls[-1][calls[-1].index("--message") + 1] == "裸问题"
@@ -41,8 +65,7 @@ def test_agent_scope_is_injected_outside_prompt(tmp_path: Path):
         calls.append((command, kwargs))
         return subprocess.CompletedProcess(command, 0, json.dumps({"meta": {"finalAssistantVisibleText": "ok"}}), "")
 
-    config = RuntimeConfig.from_env(project_root=Path(__file__).parents[1], env={"SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root", "SAM_PROFILE": "local"})
-    config = replace(config, state_dir=tmp_path / "state", config_path=tmp_path / "state" / "openclaw.json")
+    config = _isolated_config(tmp_path)
     adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=runner)
     adapter.run_agent_message("问题", company_id="acme", thread_id="t1")
     env = calls[-1][1]["env"]
@@ -61,8 +84,7 @@ def test_manager_agent_scope_is_distinct_and_read_only(tmp_path: Path):
         calls.append((command, kwargs))
         return subprocess.CompletedProcess(command, 0, json.dumps({"meta": {"finalAssistantVisibleText": "ok"}}), "")
 
-    config = RuntimeConfig.from_env(project_root=Path(__file__).parents[1], env={"SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root", "SAM_PROFILE": "local"})
-    config = replace(config, state_dir=tmp_path / "state", config_path=tmp_path / "state" / "openclaw.json")
+    config = _isolated_config(tmp_path)
     adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=runner)
     adapter.run_agent_message("经理问题", company_id="acme", thread_id="manager-thread", access_role="manager")
     env = calls[-1][1]["env"]
@@ -79,8 +101,7 @@ def test_scoped_employee_calls_reuse_one_openclaw_session(tmp_path: Path):
         calls.append(command)
         return subprocess.CompletedProcess(command, 0, json.dumps({"meta": {"finalAssistantVisibleText": "ok"}}), "")
 
-    config = RuntimeConfig.from_env(project_root=Path(__file__).parents[1], env={"SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root", "SAM_PROFILE": "local"})
-    config = replace(config, state_dir=tmp_path / "state", config_path=tmp_path / "state" / "openclaw.json")
+    config = _isolated_config(tmp_path)
     adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=runner)
     adapter.run_agent_message("第一块", company_id="acme", thread_id="parse-job-1")
     adapter.run_agent_message("第二块", company_id="acme", thread_id="parse-job-1")
@@ -96,8 +117,7 @@ def test_unscoped_parse_calls_use_independent_openclaw_sessions(tmp_path: Path):
         calls.append(command)
         return subprocess.CompletedProcess(command, 0, json.dumps({"meta": {"finalAssistantVisibleText": "ok"}}), "")
 
-    config = RuntimeConfig.from_env(project_root=Path(__file__).parents[1], env={"SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root", "SAM_PROFILE": "local"})
-    config = replace(config, state_dir=tmp_path / "state", config_path=tmp_path / "state" / "openclaw.json")
+    config = _isolated_config(tmp_path)
     adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=runner)
     # run_parse uses this same unscoped invocation path; two files must never
     # inherit the leader's scoped conversation/session.
@@ -115,14 +135,14 @@ def test_runtime_injects_token_plan_provider_into_existing_config(tmp_path: Path
         calls.append((command, kwargs))
         return subprocess.CompletedProcess(command, 0, json.dumps({"meta": {"finalAssistantVisibleText": "ok"}}), "")
 
-    config = RuntimeConfig.from_env(
-        project_root=Path(__file__).parents[1],
-        env={"SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root", "SAM_PROFILE": "local", "SAM_LEADER_MODEL": "qwen3.8-max"},
-    )
     config_path = tmp_path / "e2e-state" / "openclaw.json"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(json.dumps({"agents": {"list": [{"id": "sam-guide"}]}}), encoding="utf-8")
-    config = replace(config, state_dir=tmp_path / "state", config_path=config_path)
+    config = _isolated_config(
+        tmp_path,
+        env={"SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root", "SAM_PROFILE": "local", "SAM_LEADER_MODEL": "qwen3.8-max"},
+        config_path=config_path,
+    )
     adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=runner)
     adapter.run_agent_message("问题")
     generated = json.loads(config_path.read_text(encoding="utf-8"))
@@ -155,8 +175,7 @@ def test_document_ingest_agent_keeps_model_proxy_boundary(tmp_path: Path, monkey
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:10808")
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:10808")
     monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:10808")
-    config = RuntimeConfig.from_env(project_root=Path(__file__).parents[1], env={"SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root", "SAM_PROFILE": "local"})
-    config = replace(config, state_dir=tmp_path / "state", config_path=tmp_path / "state" / "openclaw.json")
+    config = _isolated_config(tmp_path)
     adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "db.sqlite"), config=config, runner=runner)
     adapter.run_agent_message("document-ingest skill task")
     env = calls[-1]["env"]
@@ -215,8 +234,7 @@ def test_gateway_mode_starts_one_daemon_and_reuses_it(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(adapter_module.socket, "create_connection", socket_connection)
 
-    config = RuntimeConfig.from_env(project_root=Path(__file__).parents[1], env={"SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root", "SAM_PROFILE": "local"})
-    config = replace(config, state_dir=tmp_path / "state", config_path=tmp_path / "state" / "openclaw.json")
+    config = _isolated_config(tmp_path)
     adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config)
     adapter.run_agent_message("第一问")
     adapter.run_agent_message("第二问")
@@ -276,8 +294,7 @@ def test_gateway_health_probe_retries_within_long_startup_budget(tmp_path: Path,
     monkeypatch.setattr(adapter_module.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(adapter_module.socket, "create_connection", socket_connection)
     monkeypatch.setenv("SAM_GATEWAY_STARTUP_TIMEOUT", "3")
-    config = RuntimeConfig.from_env(project_root=Path(__file__).parents[1], env={"SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root", "SAM_PROFILE": "local"})
-    config = replace(config, state_dir=tmp_path / "state", config_path=tmp_path / "state" / "openclaw.json")
+    config = _isolated_config(tmp_path)
     adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config)
     adapter.ensure_runtime_ready(timeout=3)
     assert len(gateway_calls) == 1
@@ -296,8 +313,7 @@ def test_gateway_rejects_unknown_listener_instead_of_reusing_wrong_config(tmp_pa
             return False
 
     monkeypatch.setattr(adapter_module.socket, "create_connection", lambda *args, **kwargs: ReadySocket())
-    config = RuntimeConfig.from_env(project_root=Path(__file__).parents[1], env={"SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root", "SAM_PROFILE": "local"})
-    config = replace(config, state_dir=tmp_path / "state", config_path=tmp_path / "state" / "openclaw.json")
+    config = _isolated_config(tmp_path)
     adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config)
     try:
         adapter._ensure_gateway({}, timeout=1)
@@ -308,8 +324,7 @@ def test_gateway_rejects_unknown_listener_instead_of_reusing_wrong_config(tmp_pa
 
 
 def test_gateway_fingerprint_binds_state_port_and_effective_model(tmp_path: Path):
-    config = RuntimeConfig.from_env(project_root=Path(__file__).parents[1], env={"SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root", "SAM_PROFILE": "local"})
-    config = replace(config, state_dir=tmp_path / "state", config_path=tmp_path / "state" / "openclaw.json")
+    config = _isolated_config(tmp_path)
     config.state_dir.mkdir(parents=True)
     config.config_path.write_text("{}", encoding="utf-8")
     adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config)

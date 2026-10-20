@@ -62,9 +62,9 @@
       "skill_id": "fact-leaf",
       "name": "fact-leaf",
       "description": "Build one cited company fact-tree leaf from supplied parsed-document fragments, without inventing facts.",
-      "version": "0.5.3",
+      "version": "0.6.6",
       "source": "fact-leaf/SKILL.md",
-      "content_sha256": "01d0c75b4860f8374cbd423369207215c05103ff730eb03676236c0ecf219a76",
+      "content_sha256": "9049fef43288ef95898e00e64b9b1178e70ee6fc986f5075c7d38d3b876eb762",
       "roles": [],
       "visibility": "workspace"
     },
@@ -72,9 +72,9 @@
       "skill_id": "file-processor",
       "name": "file-processor",
       "description": "Read a whole document, attribute evidence and extract source-cited facts as one employee.",
-      "version": "1.2.1",
+      "version": "1.3.5",
       "source": "file-processor/SKILL.md",
-      "content_sha256": "4fbf0a399f10c2452a3125d9d2119703e9abc73f15088bbcd161e5a0dfd4ae29",
+      "content_sha256": "39c53b1700c26b914f95753490bdef0b419d125d8e04300d16de55f0e3e30160",
       "roles": [
         "file_processor"
       ],

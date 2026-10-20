@@ -169,11 +169,49 @@ def test_all_cloud_pages_and_read_apis(cloud_web, with_snapshot, monkeypatch):
         assert f'<button class="sub-item" data-go="bizov"><span class="dot"></span>{label}</button>' in landing_html
     assert '<div class="crumb" id="crumb">企业综合</div>' in landing_html
     assert 'overview:"企业综合"' in landing_html
+    # CHG-045 公司看板切片：只核对首页 overview 区块，隐藏旧原型页里的演示
+    # 文字不作为首页功能证据。
+    overview_html = landing_html.split('<div class="screen active" id="overview">', 1)[1]
+    overview_html = overview_html.split('<div class="screen" id="facts">', 1)[0]
+    # FactsTree 真实状态卡：壳内只有状态占位与入口，数据由前端异步读取。
+    assert '<div class="card" id="factsBoard">' in overview_html
+    assert '<h3>事实树</h3>' in overview_html
+    assert '正在读取当前公司事实树状态…' in overview_html  # 空态/加载态占位
+    assert 'id="factsBoardSub"' in overview_html
+    assert 'id="factsState" role="status"' in overview_html
+    assert 'id="factsBrief" hidden' in overview_html
+    assert 'id="factsTrunks" hidden' in overview_html
+    assert 'id="factsRetryBtn" type="button" hidden' in overview_html
+    # 事实库入口与上传资料入口都在看板卡上；事实库入口在同一主页壳内切页，不跳出外壳。
+    assert '<button class="drive-btn" id="factsTreeLink" type="button" data-go="facts">查看事实库</button>' in overview_html
+    assert '<button class="drive-btn primary" id="factsUploadBtn" type="button">上传企业资料</button>' in overview_html
+    # 旧版静态经营卡片字段不得出现在首页 overview 区块。
     for label in ('企业健康度', '营业收入（1–9月）', '净利润', '现金跑道',
                   '在手订单', '员工激励待办', '研发项目进展', '订单进展'):
-        assert label in landing_html
-    assert '<button class="sys-item" type="button" data-go="knowledge">' in landing_html
-    assert landing_html.index('data-go="knowledge"') < landing_html.index('id="importNavBtn"')
+        assert label not in overview_html
+    # 失败态明文不回退演示数据。
+    assert '未回退到演示数据' in landing_html
+    # 侧栏“事实库”在同一主页壳内打开完整只读 FactsTree，位置在文件柜入口之前。
+    assert '<button class="sys-item" type="button" data-go="facts">' in landing_html
+    assert landing_html.index('data-go="facts"') < landing_html.index('id="importNavBtn"')
+    assert 'facts:"事实库"' in landing_html
+    # 事实库页面呈现整棵树：树/枝/叶导航、状态行、详情区与脚注来源回查，均复用
+    # 只读渲染器 webapp/static/js/facts-tree.js（同 /facts 页共用的容器结构）。
+    assert '<div class="screen" id="facts">' in landing_html
+    facts_html = landing_html.split('<div class="screen" id="facts">', 1)[1]
+    facts_html = facts_html.split('<div class="import-mask" id="knowledgeSourceMask"', 1)[0]
+    for marker in ('id="facts-tree"', 'id="facts-tree-status"',
+                   'id="facts-tree-nav"', 'id="facts-tree-detail"'):
+        assert marker in facts_html
+    assert '<script src="/static/js/facts-tree.js"></script>' in landing_html
+    # 旧知识库平铺事实页已淘汰：旧导航、旧页面与按来源平铺的旧事实/股权链/工作
+    # 记忆区块不得作为新版事实库的通过证据。
+    assert 'data-go="knowledge"' not in landing_html
+    assert 'id="knowledge"' not in landing_html
+    for legacy in ('id="knowledgeFacts"', 'id="knowledgeEquity"', 'id="knowledgeRuntime"',
+                   'id="confirmed-facts"', 'id="working-memory"',
+                   'id="knowledgeTree"', 'id="knowledgeSelect"'):
+        assert legacy not in landing_html
     prototype = client.get('/prototype')
     assert prototype.status_code == 200
     assert prototype.get_data(as_text=True) == landing_html

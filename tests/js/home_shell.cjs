@@ -61,7 +61,7 @@ const screens = [...html.matchAll(/class="screen( active)?" id="([^"]+)"/g)].map
 });
 const suggestion = new Element(); suggestion.dataset.q = '测试建议';
 const skill = new Element(); skill.dataset.q = '测试技能';
-const knowledgeNav = new Element(); knowledgeNav.dataset.go = 'knowledge';
+const factsNav = new Element(); factsNav.dataset.go = 'facts';
 const driveNav = elements.get('importNavBtn'); driveNav.dataset.go = 'drive';
 const document = {
   body: new Element(), hidden: false, events: {},
@@ -69,7 +69,7 @@ const document = {
   createElement: () => new Element(),
   getElementById(id) {if (id.startsWith('source-') && !elements.has(id)) return null; assert.ok(elements.has(id), 'missing element: ' + id); return elements.get(id);},
   querySelectorAll(selector) {
-    if (selector === '[data-go]') return [knowledgeNav, driveNav];
+    if (selector === '[data-go]') return [factsNav, driveNav];
     if (selector === '.screen') return screens;
     if (selector === '.sugg-card') return [suggestion];
     if (selector === '.skill') return [skill];
@@ -80,7 +80,7 @@ const context = vm.createContext({window, document, console, setInterval() {},
   setTimeout(fn, delay) {assert.equal(delay, 1800); const id = ++timerId; timers.set(id, fn); return id;},
   clearTimeout(id) {timers.delete(id);},
   URLSearchParams, FormData: class {append() {}}, getComputedStyle: () => ({background: ''})});
-if (!caseName.startsWith('ui-knowledge-') && !caseName.startsWith('ui-facts-') && !caseName.startsWith('ui-company-title')) vm.runInContext(caseName.startsWith('ui-') ? script : foundation, context);
+if (!caseName.startsWith('ui-drive-') && !caseName.startsWith('ui-facts-') && !caseName.startsWith('ui-company-title')) vm.runInContext(caseName.startsWith('ui-') ? script : foundation, context);
 const SAM = window.SAM;
 if (SAM) SAM.demo.probe = [{id: 'demo'}];
 const load = options => SAM.data.load('probe', {url: '/api/probe', ...options});
@@ -288,14 +288,19 @@ const knowledgeFixture = {
     events: [{type: 'open_loop_add', payload: {id: 'acc-closed', text: 'acc 已闭环'}},
       {type: 'open_loop_remove', payload: {id: 'acc-closed'}}]}]}
 };
-async function knowledgeCase(name) {
-  assert.match(html, /<div class="screen" id="knowledge">/);
-  assert.match(html, /<button class="sys-item" type="button" data-go="knowledge">/);
-  assert.doesNotMatch(html, /<a class="sys-item" href="\/knowledge">/);
-  assert.match(html, /knowledge:"知识库"/);
+async function driveCase(name) {
+  // 文件柜只读投影保留在企业综合主页壳内；旧知识库平铺事实页已淘汰（见 factsLibraryCase 的拒绝断言）。
+  assert.match(html, /<div class="screen" id="drive">/);
+  assert.match(html, /class="sys-item import-entry" id="importNavBtn" type="button" data-go="drive">/);
+  assert.match(html, /drive:"文件柜"/);
   assert.match(script, /routeKnowledgeLocation\(\);\s*}\)\(\);\s*$/);
+  // 新版边界：文件柜只是原始文件入口——无“查看映射”按钮、无映射正文/页坐标浏览、无映射状态缺失提示；
+  // 映射文件留在后端存储。旧知识库页面与旧导航同样不得作为新版证据。
+  assert.match(html, /文件柜 · 原件/);
+  assert.doesNotMatch(html, /查看映射|尚无解析映射|尚无可读取的 L2|原文页码/);
+  assert.doesNotMatch(script, /\bkL2\b|\bkProse\b/);
+  assert.doesNotMatch(html, /data-go="knowledge"|id="knowledge"/);
   let body = name.includes('empty') ? {} : knowledgeFixture;
-  if (name.endsWith('payload')) body = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
   fetchImpl = async url => {
     if (url === '/api/knowledge') {
       if (name.includes('failure')) throw new Error('unavailable');
@@ -312,63 +317,29 @@ async function knowledgeCase(name) {
       hash: name.includes('source') ? '' : '#source-acc-hash', search: '?page=2&locator=Sheet1%21B3'};
   }
   vm.runInContext(script, context); await flush();
-  if (!name.includes('legacy')) {knowledgeNav.click(); await flush();}
-  const legacy = name.includes('legacy');
-  assert.equal(el(legacy ? 'drive' : 'knowledge').classList.contains('active'), true);
+  if (!name.includes('legacy')) {driveNav.click(); await flush();}
+  assert.equal(el('drive').classList.contains('active'), true);
   assert.equal(el('overview').classList.contains('active'), false);
-  assert.equal(el('crumb').textContent, legacy ? '文件柜' : '知识库');
+  assert.equal(el('crumb').textContent, '文件柜');
   assert.ok(calls.some(call => call[0] === '/api/knowledge' && (call[1].method || 'GET') === 'GET'));
-  if (name.endsWith('payload')) {
-    const first = body.evidence.files[0];
-    const link = new Element(); link.dataset.knowledgeSource = first.file_hash;
-    el('drive').dispatch('click', {target: link});
-    console.log(JSON.stringify({files: el('driveFiles').innerHTML, mapping: el('knowledgeSourceBody').innerHTML, facts: el('knowledgeFacts').innerHTML,
-      equity: el('knowledgeEquity').innerHTML, runtime: el('knowledgeRuntime').innerHTML})); return;
-  }
   if (name.includes('empty') || name.includes('failure')) {
     assert.equal(el('driveFiles').innerHTML, '');
     assert.equal(el('driveEmpty').hidden, false);
-    assert.match(el('knowledgeFacts').innerHTML, /暂无确认事实/);
-    assert.match(el('knowledgeEquity').innerHTML, /暂无已存股权事件链/);
-    assert.match(el('knowledgeRuntime').innerHTML, /暂无当前公司/);
-    assert.equal(el('knowledgeDataSource').textContent, name.includes('failure') ? '读取失败，请刷新重试' : '暂无可用数据'); return;
+    assert.equal(el('driveDataSource').textContent, name.includes('failure') ? '读取失败，请刷新重试' : '暂无可用数据'); return;
   }
   assert.doesNotMatch(el('driveFiles').innerHTML, /acc L0 摘要|acc L1 概览/);
   assert.match(el('driveFiles').innerHTML, /&lt;script&gt;/);
   assert.doesNotMatch(el('driveFiles').innerHTML, /<script>|<img/);
-  assert.match(el('knowledgeFacts').innerHTML, /acc 自定义分类/);
-  assert.match(el('knowledgeFacts').innerHTML, /<td>0<\/td><td>false<\/td>/);
-  assert.match(el('knowledgeEquity').innerHTML, /已发行总股数：0/);
-  assert.match(el('knowledgeEquity').innerHTML, /0%/);
-  assert.match(el('knowledgeEquity').innerHTML, /acc-event/);
-  for (const text of ['acc 目标', 'acc 未闭环', 'acc 已闭环', 'acc 待固化', '置信度：0', '2026-10-11', '事件时间线'])
-    assert.ok(el('knowledgeRuntime').innerHTML.includes(text), text);
-  assert.equal(el('knowledgeDataSource').textContent, '');
-  assert.match(el('knowledgeRuntime').innerHTML, /<table>[\s\S]*<tbody>[\s\S]*<\/tbody><\/table>/);
+  // 接口即使返回映射字段，映射正文/坐标/缺失提示也不进入文件柜 DOM；操作列只有原件入口。
+  assert.doesNotMatch(el('driveFiles').innerHTML, /acc 原文 Sheet1!B3|第零页|viking:\/\/acc\/l2|尚无解析映射|查看映射/);
+  assert.match(el('driveFiles').innerHTML, /data-knowledge-source="acc-hash">查看原件/);
+  // 文件柜不再渲染平铺事实/股权链/工作记忆；这些字段即使由接口返回也不进入文件柜 DOM。
+  assert.doesNotMatch(el('driveFiles').innerHTML + el('driveTree').innerHTML, /acc 实体|acc 持有人|acc 目标|acc-event/);
+  assert.equal(el('driveDataSource').textContent, '');
   if (name.includes('explorer')) {
-    assert.doesNotMatch(html.split('id="knowledge">')[1].split('id="knowledgeSourceMask"')[0], /2A|2B|2C|knowledgeEvidence/);
-    assert.match(el('knowledgeTree').innerHTML, /确认事实/);
-    assert.match(el('knowledgeTree').innerHTML, /工作记忆/);
-    assert.doesNotMatch(el('knowledgeTree').innerHTML, /原始证据/);
-    for (const id of ['knowledgeFacts', 'knowledgeRuntime']) assert.doesNotMatch(el(id).innerHTML, /2A|2B|2C/);
-    const readCount = calls.length;
-    const node = new Element(); node.dataset.explorerNode = 'working';
-    el('knowledgeTree').dispatch('click', {target: node});
-    assert.equal(el('confirmed-facts').hidden, true);
-    assert.equal(el('working-memory').hidden, false);
-    assert.equal(el('knowledgePath').textContent, '知识库 / 工作记忆');
-    el('knowledgeSelect').value = 'group:0'; el('knowledgeSelect').dispatch('change');
-    assert.equal(el('working-memory').hidden, true);
-    assert.equal(el('knowledgeEquity').hidden, true);
-    assert.match(el('knowledgePath').textContent, /acc 自定义分类/);
-    assert.equal(calls.length, readCount); // navigation uses existing data, no writes/reads
-    driveNav.click(); await flush();
-    assert.equal(el('drive').classList.contains('active'), true);
-    assert.equal(el('knowledge').classList.contains('active'), false);
-    assert.equal(el('importMask').classList.contains('open'), false);
-    assert.equal(el('crumb').textContent, '文件柜');
     assert.match(el('driveStats').textContent, /1 个文件 · 合计 2.0 KB/);
     assert.match(el('driveFiles').innerHTML, /pdf|acc-upload|2026-10-10/);
+    assert.equal(el('importMask').classList.contains('open'), false);
     body = JSON.parse(JSON.stringify(knowledgeFixture));
     body.modules.push({code: 'acc-other', name: '<img src=x>', hidden: false});
     body.evidence.files.push({file_hash: 'acc-other', original_name: 'other.xlsx', category: 'acc-other', label: '<img src=x>', size_bytes: 0});
@@ -376,11 +347,13 @@ async function knowledgeCase(name) {
     assert.match(el('driveStats').textContent, /2 个文件/);
     assert.match(el('driveTree').innerHTML, /&lt;img/);
     assert.doesNotMatch(el('driveTree').innerHTML, /<img/);
+    const readCount = calls.length;
     const folder = new Element(); folder.dataset.explorerNode = 'category:1';
     el('driveTree').dispatch('click', {target: folder});
     assert.match(el('driveFiles').innerHTML, /other.xlsx/);
     assert.doesNotMatch(el('driveFiles').innerHTML, /alert\(1\)/);
     assert.match(el('driveStats').textContent, /合计 0 B/);
+    assert.equal(calls.length, readCount); // navigation uses existing data, no writes/reads
     el('driveSelect').value = 'all'; el('driveSelect').dispatch('change');
     const original = new Element(); original.dataset.knowledgeSource = 'acc-hash'; original.dataset.sourceView = 'original';
     el('drive').dispatch('click', {target: original});
@@ -413,30 +386,27 @@ async function knowledgeCase(name) {
   if (name.includes('partial')) {
     body = {evidence: {files: [{file_hash: 'acc-hash'}]}, facts: {groups: [{facts: [{value: false}]}]},
       working_memory: {items: [{runtime: {working_notes: [{}]}}]}};
-    knowledgeNav.click(); await flush();
-    assert.match(el('driveFiles').innerHTML, /尚无解析映射/);
+    driveNav.click(); await flush();
+    assert.doesNotMatch(el('driveFiles').innerHTML, /尚无解析映射|尚无可读取的 L2|映射/); // 映射状态缺失提示已移除
+    assert.doesNotMatch(el('driveFiles').innerHTML, /<td>false<\/td>/); // 平铺事实不再进入文件柜
     const link = new Element(); link.dataset.knowledgeSource = 'acc-hash';
     el('drive').dispatch('click', {target: link});
-    assert.match(el('knowledgeSourceBody').innerHTML, /尚无可读取的 L2 原文/);
-    assert.match(el('knowledgeFacts').innerHTML, /未存分类/);
-    assert.match(el('knowledgeFacts').innerHTML, /<td>false<\/td>/);
-    assert.match(el('knowledgeFacts').innerHTML, /原文定位字段未提供/);
-    assert.match(el('knowledgeRuntime').innerHTML, /置信度：未提供/); return;
+    // 缺字段的原件仍只打开原件卡片：缺失字段直说“未提供”，不展示映射正文或映射缺失提示。
+    assert.match(el('knowledgeSourceBody').innerHTML, /企业原件/);
+    assert.match(el('knowledgeSourceBody').innerHTML, /未提供/);
+    assert.doesNotMatch(el('knowledgeSourceBody').innerHTML, /尚无|L2|映射/); return;
   }
   if (name.includes('warnings')) {
     body = {evidence: {files: [{warnings: ['证据暂不可读']}]}, facts: {cap_table: {warnings: ['回放校验失败']}},
       working_memory: {warnings: ['工作记忆暂不可读']}};
-    knowledgeNav.click(); await flush();
+    driveNav.click(); await flush();
     assert.match(el('driveFiles').innerHTML, /证据暂不可读/);
-    assert.match(el('knowledgeEquity').innerHTML, /回放校验失败/);
-    assert.doesNotMatch(el('knowledgeEquity').innerHTML, /暂无已存股权事件链/);
-    assert.match(el('knowledgeRuntime').innerHTML, /工作记忆暂不可读/);
-    assert.doesNotMatch(el('knowledgeRuntime').innerHTML, /暂无当前公司/); return;
+    assert.doesNotMatch(el('driveFiles').innerHTML, /回放校验失败|工作记忆暂不可读/); return;
   }
   if (name.includes('race')) {
     const pending = deferred(); fetchImpl = () => pending.promise;
-    knowledgeNav.click(); await flush();
-    fetchImpl = () => ok({}); knowledgeNav.click(); await flush();
+    driveNav.click(); await flush();
+    fetchImpl = () => ok({}); driveNav.click(); await flush();
     pending.resolve(ok(knowledgeFixture)); await flush();
     assert.equal(el('driveFiles').innerHTML, '');
     assert.equal(el('driveEmpty').hidden, false); return;
@@ -445,26 +415,32 @@ async function knowledgeCase(name) {
     el('driveWizardBtn').click(); await flush();
     await action('result');
     assert.equal(el('importMask').classList.contains('open'), false);
-    assert.equal(el('knowledge').classList.contains('active'), true);
+    assert.equal(el('drive').classList.contains('active'), true);
     assert.equal(el('knowledgeSourceMask').classList.contains('open'), true);
     el('driveWizardBtn').click(); await flush();await action('source');
     assert.equal(el('importMask').classList.contains('open'), false);
   } else if (!name.includes('legacy-source')) {
     const link = new Element();link.dataset.knowledgeSource = 'acc-hash';link.dataset.page = '2';link.dataset.locator = 'Sheet1!B3';
-    el('knowledge').dispatch('click', {target: link});
+    el('drive').dispatch('click', {target: link});
   }
+  // 出处/向导回查只进入对应原件：弹窗只展示原件信息与下载入口，不暴露映射正文或页坐标。
   assert.equal(el('knowledgeSourceMask').classList.contains('open'), true);
-  assert.match(el('knowledgeSourceBody').innerHTML, /Sheet1!B3/);
-  assert.match(el('knowledgeSourceBody').innerHTML, /&lt;img/);
-  assert.doesNotMatch(el('knowledgeSourceBody').innerHTML, /<img/);
-  if (name.includes('legacy-source')) assert.match(el('knowledgeSourceBody').innerHTML, /knowledge-selected/);
+  assert.match(el('knowledgeSourceBody').innerHTML, /企业原件/);
+  assert.match(el('knowledgeSourceBody').innerHTML, /&lt;script&gt;/);
+  assert.doesNotMatch(el('knowledgeSourceBody').innerHTML, /<script>/);
+  assert.doesNotMatch(el('knowledgeSourceBody').innerHTML, /Sheet1!B3|acc 原文|第零页|viking:\/\/acc\/l2|原文页码|尚无/);
+  if (readonly) {
+    assert.doesNotMatch(el('knowledgeSourceBody').innerHTML, /download/);
+    assert.match(el('knowledgeSourceBody').innerHTML, /回本地查看/);
+  } else assert.match(el('knowledgeSourceBody').innerHTML, /\/api\/knowledge\/sources\/acc-hash\/original" download>下载原件/);
+  if (name.includes('legacy-source')) assert.equal(elements.get('source-acc-hash').classList.contains('knowledge-selected'), true);
   el('knowledgeSourceMask').dispatch('keydown', {key: 'Escape'});
   assert.equal(el('knowledgeSourceMask').classList.contains('open'), false);
   assert.equal(el('knowledgeSourceMask').attributes['aria-hidden'], 'true');
   const missing = new Element();missing.dataset.knowledgeSource = 'foreign-or-missing';
-  el('knowledge').dispatch('click', {target: missing});
-  assert.match(el('knowledgeSourceBody').innerHTML, /尚无可读取的 L2 原文/);
-  assert.doesNotMatch(el('knowledgeSourceBody').innerHTML, /Sheet1!B3/);
+  el('drive').dispatch('click', {target: missing});
+  assert.match(el('knowledgeSourceBody').innerHTML, /当前文件柜中没有该原件/);
+  assert.doesNotMatch(el('knowledgeSourceBody').innerHTML, /Sheet1!B3|尚无|映射/);
   el('knowledgeSourceMask').dispatch('click');
   assert.equal(el('knowledgeSourceMask').classList.contains('open'), false);
   assert.equal(calls.some(call => (call[1].method || 'GET') !== 'GET' && call[0] !== '/api/import-guide'), false);
@@ -472,10 +448,11 @@ async function knowledgeCase(name) {
 
 async function factsTreeCase(name) {
   // 公司看板结构契约：主屏不再展示静态样例公司数字，保留既有导航与入口。
-  const overviewHtml = html.split('id="overview">')[1].split('id="knowledge">')[0];
+  const overviewHtml = html.split('id="overview">')[1].split('id="facts">')[0];
   assert.match(overviewHtml, /id="factsBoard"/);
   assert.match(overviewHtml, /id="factsState"/);
-  assert.match(overviewHtml, /href="\/facts"/);
+  assert.match(overviewHtml, /id="factsTreeLink" type="button" data-go="facts"/); // 事实库入口在壳内切页，不跳出外壳
+  assert.doesNotMatch(overviewHtml, /href="\/facts"/);
   assert.match(overviewHtml, /id="factsUploadBtn"/);
   assert.match(overviewHtml, /hero-ask" data-go="chat"/);
   assert.doesNotMatch(overviewHtml, /企业健康度|214\.00|净利润|现金跑道|在手订单|股权结构|growth-card|data-gkey/);
@@ -618,6 +595,67 @@ async function factsTreeCase(name) {
   throw new Error('Unknown contract: ' + name);
 }
 
+async function factsLibraryCase(name) {
+  // 事实库入口与页面：同一永久主页壳内切页，复用 webapp/static/js/facts-tree.js 完整只读
+  // 渲染（树/枝/叶、正文/索引与脚注来源回查由该渲染器承担，行为契约见 tests/test_facts_tree_ui.py）。
+  assert.match(html, /<button class="sys-item" type="button" data-go="facts">/);
+  assert.ok(html.indexOf('data-go="facts"') < html.indexOf('id="importNavBtn"'));
+  assert.match(html, /facts:"事实库"/);
+  assert.doesNotMatch(html, /<a class="sys-item" href="\/facts">/); // 侧栏入口不跳出主页壳
+  assert.match(html, /<div class="screen" id="facts">/);
+  const factsHtml = html.split('<div class="screen" id="facts">')[1].split('id="knowledgeSourceMask"')[0];
+  for (const marker of ['id="facts-tree"', 'id="facts-tree-status"', 'id="facts-tree-nav"', 'id="facts-tree-detail"'])
+    assert.ok(factsHtml.includes(marker), marker);
+  assert.match(html, /<script src="\/static\/js\/facts-tree\.js"><\/script>/);
+  // 拒绝旧知识库作为新版事实库证据：旧导航、旧页面与按来源平铺的旧事实/股权链/工作记忆区块均已移除。
+  assert.doesNotMatch(html, /data-go="knowledge"/);
+  assert.doesNotMatch(html, /id="knowledge"/);
+  for (const legacy of ['id="knowledgeFacts"', 'id="knowledgeEquity"', 'id="knowledgeRuntime"',
+    'id="confirmed-facts"', 'id="working-memory"', 'id="knowledgeTree"', 'id="knowledgeSelect"'])
+    assert.ok(!html.includes(legacy), legacy);
+  assert.doesNotMatch(script, /renderExplorerTree|knowledgeSelection|knowledgeFacts|knowledgeEquity|knowledgeRuntime/);
+  fetchImpl = async url => {
+    if (url === '/api/facts/tree') return ok(factsTreeBody('ready', {brief: 'acc 摘要'}));
+    if (url === '/api/entity-roster') return ok({entities: [selfNamed]});
+    if (url === '/api/knowledge') return ok({});
+    throw new Error('Unexpected URL ' + url);
+  };
+  if (name === 'ui-facts-library-legacy') {
+    // 旧 /knowledge 平铺页链接落到壳内事实库，不再打开旧页面。
+    window.location = {pathname: '/knowledge', hash: '', search: ''};
+  }
+  vm.runInContext(script, context); await flush();
+  if (name === 'ui-facts-library-legacy') {
+    assert.equal(el('facts').classList.contains('active'), true);
+    assert.equal(el('overview').classList.contains('active'), false);
+    assert.equal(el('crumb').textContent, '事实库');
+    assert.equal(calls.some(call => call[0] === '/api/knowledge'), false);
+    return;
+  }
+  // 默认首页仍是公司看板；首次进入只读事实树状态与登记公司名，不读旧平铺事实。
+  assert.match(html, /<div class="screen active" id="overview">/);
+  assert.match(html, /<div class="crumb" id="crumb">企业综合<\/div>/);
+  assert.equal(el('overview').classList.contains('active'), true);
+  assert.equal(el('facts').classList.contains('active'), false);
+  assert.equal(calls.filter(call => call[0] === '/api/facts/tree').length, 1);
+  assert.equal(calls.some(call => call[0] === '/api/knowledge'), false);
+  factsNav.click(); await flush();
+  assert.equal(el('facts').classList.contains('active'), true);
+  assert.equal(el('overview').classList.contains('active'), false);
+  assert.equal(el('crumb').textContent, '事实库');
+  assert.equal(el('topbar').style.display, 'flex'); // 顶栏保留，仍为同一主页壳
+  assert.equal(calls.some(call => call[0] === '/api/knowledge'), false); // 事实库切页不读取旧平铺事实接口
+  driveNav.click(); await flush();
+  assert.equal(el('drive').classList.contains('active'), true);
+  assert.equal(el('facts').classList.contains('active'), false);
+  assert.equal(el('crumb').textContent, '文件柜');
+  assert.equal(calls.filter(call => call[0] === '/api/knowledge').length, 1); // 文件柜保留既有只读投影
+  factsNav.click(); await flush();
+  assert.equal(el('facts').classList.contains('active'), true);
+  assert.equal(el('drive').classList.contains('active'), false);
+  assert.equal(el('crumb').textContent, '事实库');
+}
+
 async function companyTitleCase(name) {
   // 首页标题契约：hero 不再持有静态演示公司名，只显示宿主登记接口确认的名称。
   const hero = html.split('class="hero"')[1].split('id="factsBoard"')[0];
@@ -692,7 +730,8 @@ async function companyTitleCase(name) {
 }
 
 async function main() {
-  if (caseName.startsWith('ui-knowledge-')) {await knowledgeCase(caseName); return;}
+  if (caseName.startsWith('ui-drive-')) {await driveCase(caseName); return;}
+  if (caseName.startsWith('ui-facts-library')) {await factsLibraryCase(caseName); return;}
   if (caseName.startsWith('ui-facts-')) {await factsTreeCase(caseName); return;}
   if (caseName.startsWith('ui-company-title')) {await companyTitleCase(caseName); return;}
   switch (caseName) {

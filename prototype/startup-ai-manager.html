@@ -317,6 +317,30 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
 #factsBoard #factsBrief{max-height:280px;overflow-y:auto;}
 #factsBoard #factsTrunks{margin-top:12px;overflow-x:auto;}
 
+/* ===== 事实库：与 webapp/static/css/app.css 中 facts-tree 样式保持一致（变量按本壳适配） ===== */
+.facts-tree{display:grid;gap:14px;min-width:0}
+.facts-tree-readonly{margin:0 0 14px;padding:10px 14px;border:1px solid #c7d2fe;border-radius:10px;background:#f5f7ff;color:var(--t2);font-size:13px}
+.facts-tree-status{color:var(--t3);font-size:13px;min-height:18px;overflow-wrap:anywhere}
+.facts-tree-status.facts-tree-error{color:var(--red)}
+.facts-tree-layout{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;align-items:start}
+.facts-tree-nav-panel{background:var(--card);border:1px solid var(--border);border-radius:11px;box-shadow:var(--sh);padding:12px;max-height:calc(100vh - 200px);overflow:auto}
+.facts-tree-nav-list{min-width:0}
+.facts-tree-nav-list ul{list-style:none;margin:0;padding:0}
+.facts-tree-nav-list ul ul{padding-left:16px;border-left:2px solid #eef1ff;margin-left:6px}
+.facts-tree-node{display:flex;align-items:center;gap:7px;width:100%;min-height:34px;padding:0 9px;border:0;border-radius:7px;background:none;font:inherit;font-weight:600;color:var(--t2);cursor:pointer;text-align:left;overflow-wrap:anywhere}
+.facts-tree-node:hover{background:#f2f3f5;color:var(--t1)}
+.facts-tree-node.active{background:#eef1ff;color:var(--primary)}
+.facts-tree-node.facts-tree-leaf{font-weight:500;font-size:13px}
+.facts-tree-node small{margin-left:auto;color:var(--t3);font-weight:400;white-space:nowrap}
+.facts-tree-detail{background:var(--card);border:1px solid var(--border);border-radius:11px;box-shadow:var(--sh);padding:18px;min-width:0;min-height:220px}
+.facts-tree-detail:empty::before{content:"在左侧导航选择树、枝或叶查看详情。";display:block;padding:26px 16px;text-align:center;color:var(--t3)}
+.facts-tree-detail-title{font-size:16px;margin:0 0 10px;overflow-wrap:anywhere}
+.facts-tree-meta{display:flex;flex-wrap:wrap;gap:8px 14px;margin:0 0 12px;color:var(--t3);font-size:12px;overflow-wrap:anywhere}
+.facts-tree-leaf-content{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;line-height:1.7;color:var(--t2);margin:10px 0}
+.facts-tree-section{margin-top:14px;border-top:1px solid var(--border);padding-top:12px}
+.facts-tree-section h3{font-size:13px;margin:0 0 8px;color:var(--t1)}
+@media(max-width:850px){.facts-tree-layout{grid-template-columns:minmax(0,1fr)}.facts-tree-nav-panel{max-height:none}}
+
 /* ============ 企业成长信息 ============ */
 .growth-card{margin-top:16px;}
 .growth-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:13px;}
@@ -882,11 +906,11 @@ a.sys-item{text-decoration:none;}
         </button>
       </div>
 
-      <!-- 系统入口：知识库与文件柜始终保留，其他系统工具暂隐 -->
+      <!-- 系统入口：事实库与文件柜始终保留，其他系统工具暂隐 -->
       <div class="nav-label">系统入口</div>
-      <button class="sys-item" type="button" data-go="knowledge">
+      <button class="sys-item" type="button" data-go="facts">
         <span class="ah-ic" style="background:#f0ecff;color:var(--purple)"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5C9 3 5 3 2 4v15c3-1 7-1 10 1 3-2 7-2 10-1V4c-3-1-7-1-10 1zM12 5v15"/></svg></span>
-        知识库
+        事实库
       </button>
       <button class="sys-item import-entry" id="importNavBtn" type="button" data-go="drive">
         <span class="ah-ic" style="background:#f0ecff;color:var(--purple)"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>
@@ -943,7 +967,7 @@ a.sys-item{text-decoration:none;}
             <span class="sub" id="factsBoardSub">正在读取当前公司事实树状态…</span>
             <span style="flex:1"></span>
             <button class="drive-btn" id="factsRetryBtn" type="button" hidden>重试</button>
-            <a class="drive-btn" id="factsTreeLink" href="/facts">查看事实库</a>
+            <button class="drive-btn" id="factsTreeLink" type="button" data-go="facts">查看事实库</button>
             <button class="drive-btn primary" id="factsUploadBtn" type="button">上传企业资料</button>
           </div>
           <p class="knowledge-meta" id="factsState" role="status"></p>
@@ -968,25 +992,17 @@ a.sys-item{text-decoration:none;}
       </div>
     </div>
 
-    <!-- ================= KNOWLEDGE ================= -->
-    <!-- 知识库：只读投影，永久主页壳内切页 -->
-    <div class="screen" id="knowledge">
-      <div class="board-scroll" id="knowledgeScroll">
-        <div class="sec-head"><h2>知识库</h2><span class="sub">只读查看已存知识和来源；不在此编辑、裁决或固化。</span><span class="sub" id="knowledgeDataSource" aria-live="polite"></span></div>
-        <div class="explorer-toolbar"><span class="explorer-path" id="knowledgePath">知识库 / 确认事实</span><button class="drive-btn" id="knowledgeRefresh" type="button">刷新</button></div>
-        <label class="explorer-mobile">浏览分类<select id="knowledgeSelect" aria-label="知识库分类"></select></label>
-        <div class="explorer-layout">
-          <nav class="explorer-tree" id="knowledgeTree" aria-label="知识库分类"></nav>
-          <div class="explorer-content">
-            <section id="confirmed-facts">
-              <div class="sec-head"><h2>确认事实</h2><span class="sub">已核验的信息，按来源文件的现有分类整理。</span></div>
-              <div class="knowledge-stack" id="knowledgeFacts"><div class="card knowledge-empty">暂无确认事实。</div></div>
-              <div class="card mt16" id="knowledgeEquity"></div>
-            </section>
-            <section id="working-memory" hidden>
-              <div class="sec-head"><h2>工作记忆</h2><span class="sub">当前目标、工作事件与待核验笔记；临时上下文不等同于确认事实。</span></div>
-              <div class="knowledge-stack" id="knowledgeRuntime"><div class="card knowledge-empty">暂无当前公司可读取的工作记忆。</div></div>
-            </section>
+    <!-- ================= 事实库 ================= -->
+    <!-- 事实库：完整只读 FactsTree，同一永久主页壳内切页；结构沿用 webapp/templates/facts.html，
+         渲染复用 webapp/static/js/facts-tree.js（树/枝/叶、正文/索引与脚注来源回查）。 -->
+    <div class="screen" id="facts">
+      <div class="board-scroll">
+        <div class="sec-head"><h2>事实库</h2><span class="sub">事实树只读视图：按枝与叶浏览完整事实树，所有内容可追溯到原始资料；不在此编辑。</span></div>
+        <div id="facts-tree" class="facts-tree">
+          <div id="facts-tree-status" class="facts-tree-status" role="status" aria-live="polite">正在读取事实树…</div>
+          <div class="facts-tree-layout">
+            <nav class="facts-tree-nav-panel" aria-label="事实树导航"><div id="facts-tree-nav" class="facts-tree-nav-list"></div></nav>
+            <div id="facts-tree-detail" class="facts-tree-detail"></div>
           </div>
         </div>
       </div>
@@ -994,7 +1010,7 @@ a.sys-item{text-decoration:none;}
 
     <div class="import-mask" id="knowledgeSourceMask" aria-hidden="true">
       <section class="import-wizard" role="dialog" aria-modal="true" aria-labelledby="knowledgeSourceTitle">
-        <header class="import-head"><div><div class="import-eyebrow">文件柜 · 来源查看</div><h2 id="knowledgeSourceTitle">来源原文</h2><p>已存原文与原始坐标；只读，不补造缺失值。</p></div><button class="import-close" id="knowledgeSourceClose" type="button" aria-label="关闭原文弹窗">×</button></header>
+        <header class="import-head"><div><div class="import-eyebrow">文件柜 · 原件</div><h2 id="knowledgeSourceTitle">企业原件</h2><p>原始文件信息与下载入口；只读，不补造缺失值。映射文件留在后端存储，不在此查看。</p></div><button class="import-close" id="knowledgeSourceClose" type="button" aria-label="关闭原件弹窗">×</button></header>
         <div class="import-main" id="knowledgeSourceBody"></div>
       </section>
     </div>
@@ -1438,7 +1454,7 @@ a.sys-item{text-decoration:none;}
     <!-- ================= 文件柜 ================= -->
     <div class="screen" id="drive">
       <div class="board-scroll">
-        <div class="sec-head"><h2>文件柜</h2><span class="sub">企业原件与解析映射，按已存分类整理。</span><span class="sub" id="driveDataSource" aria-live="polite"></span></div>
+        <div class="sec-head"><h2>文件柜</h2><span class="sub">企业原件，按已存分类整理；映射文件留在后端存储。</span><span class="sub" id="driveDataSource" aria-live="polite"></span></div>
         <div class="explorer-toolbar">
           <span class="explorer-path" id="drivePath">文件柜 / 全部文件</span>
           <button class="drive-btn" id="driveRefresh" type="button">刷新</button>
@@ -1451,7 +1467,7 @@ a.sys-item{text-decoration:none;}
           <div class="explorer-content">
             <p class="knowledge-meta" id="driveStats" aria-live="polite"></p>
             <div class="card drive-files"><div class="table-wrap"><table><thead><tr><th>名称</th><th>格式</th><th>分类</th><th>大小</th><th>状态</th><th>来源</th><th>上传时间</th><th>操作</th></tr></thead><tbody id="driveFiles"></tbody></table></div></div>
-            <div class="card knowledge-empty" id="driveEmpty" hidden>暂无原始证据。当前公司尚未存入来源文件。<p>上传企业资料后，原件与解析映射会保存在这里。</p><button class="drive-btn primary" id="driveEmptyUpload" type="button">上传企业资料</button></div>
+            <div class="card knowledge-empty" id="driveEmpty" hidden>暂无原始证据。当前公司尚未存入来源文件。<p>上传企业资料后，原件会保存在这里。</p><button class="drive-btn primary" id="driveEmptyUpload" type="button">上传企业资料</button></div>
           </div>
         </div>
       </div>
@@ -1621,7 +1637,7 @@ a.sys-item{text-decoration:none;}
   var TITLES={
     overview:"企业综合",chat:"Startup AI Manager",info:"企业基本信息",bizov:"业务概览",hr:"人员管理",
     prod:"生产",purch:"采购",sales:"销售",mkt:"市场",fin:"财务",fund:"融资",
-    ext:"扩展中心",cal:"日程",drive:"文件柜",knowledge:"知识库"
+    ext:"扩展中心",cal:"日程",drive:"文件柜",facts:"事实库"
   };
   var topbar=document.getElementById('topbar'),crumb=document.getElementById('crumb');
 
@@ -1635,7 +1651,7 @@ a.sys-item{text-decoration:none;}
     document.querySelectorAll('.ov-item,.sys-item').forEach(function(n){n.classList.toggle('active',n.dataset.go===id);});
     crumb.textContent=TITLES[id]||'';
     topbar.style.display=(id==='chat')?'none':'flex';
-    if(id==='knowledge'||id==='drive')return loadKnowledge();
+    if(id==='drive')return loadKnowledge();
   }
   document.querySelectorAll('[data-go]').forEach(function(b){
     b.addEventListener('click',function(){go(b.dataset.go);});
@@ -2139,7 +2155,8 @@ a.sys-item{text-decoration:none;}
   document.getElementById('importRefresh').addEventListener('click',refreshGuide);
   importMask.addEventListener('click',function(e){if(e.target===importMask)closeImportWizard();});
 
-  /* ---------- knowledge: opaque read projection, no classification/inference ---------- */
+  /* ---------- 文件柜只读投影：只作为原始文件入口 ---------- */
+  // 平铺事实由壳内事实库（facts-tree.js）承担；映射正文留在后端存储，本段不渲染映射内容。
   var knowledgeData={},knowledgeVersion=0,sourceReturnFocus=null;
   var sourceMask=document.getElementById('knowledgeSourceMask');
   var sourceClose=document.getElementById('knowledgeSourceClose');
@@ -2152,39 +2169,12 @@ a.sys-item{text-decoration:none;}
     return escapeImport(typeof value==='object'?JSON.stringify(value,null,2):String(value));
   }
   function kEmpty(text){return '<div class="card knowledge-empty">'+text+'</div>';}
-  function kProse(value){return '<pre class="knowledge-prose">'+kText(value)+'</pre>';}
   function kWarnings(value){return kList(value).map(function(w){return '<p class="knowledge-meta" role="status">'+kText(w)+'</p>';}).join('');}
-  function kRef(value){
-    var ref=kObject(value);
-    if(kMissing(ref.file_hash))return '<p class="knowledge-meta">暂无可用来源原文链接</p>';
-    var url='/knowledge/sources/'+encodeURIComponent(ref.file_hash),params=[];
-    if(!kMissing(ref.page))params.push('page='+encodeURIComponent(ref.page));
-    if(!kMissing(ref.locator))params.push('locator='+encodeURIComponent(ref.locator));
-    if(params.length)url+='?'+params.join('&');
-    return '<a class="knowledge-source" href="'+kText(url)+'" data-knowledge-source="'+kText(ref.file_hash)+'" data-page="'+kText(ref.page,'')+'" data-locator="'+kText(ref.locator,'')+'">查看来源原文 · 页码 '+kText(ref.page,'未提供（整文件）')+(kMissing(ref.locator)?'':' · '+kText(ref.locator))+'</a>';
-  }
-  function kL2(file,ref){
-    var l2=kObject(file.l2),pages=kList(l2.pages);
-    var body=kWarnings(file.warnings)+'<p class="knowledge-meta">file_hash：'+kText(file.file_hash)+'</p>';
-    if(!kMissing(l2.manifest_uri))body+='<p class="knowledge-meta">L2 manifest：'+kText(l2.manifest_uri)+'</p>';
-    if(ref&&(!kMissing(ref.page)||!kMissing(ref.locator)))body+='<p class="knowledge-meta">请求查看的坐标：页码 '+kText(ref.page)+' · '+kText(ref.locator,'定位字段未提供')+'。以下保留已存原文坐标，不补造缺失值。</p>';
-    if(pages.length){
-      body+=pages.map(function(page){
-        page=kObject(page);
-        var selected=ref&&!kMissing(ref.page)&&String(ref.page)===String(page.page);
-        return '<details class="card knowledge-detail'+(selected?' knowledge-selected':'')+'" '+(!ref||kMissing(ref.page)||selected?'open':'')+'><summary>原文页码：'+kText(page.page)+'</summary>'+(!kMissing(page.mapping)?kProse(page.mapping):'<p class="knowledge-empty">尚无可读取的 L2 原文。</p>')+'</details>';
-      }).join('');
-    }else body+=!kMissing(l2.mapping)?kProse(l2.mapping):kEmpty('尚无可读取的 L2 原文，文件可能仍在解析或解析未成功。');
-    return body;
-  }
-  var driveSelection='all',knowledgeSelection='facts';
+  var driveSelection='all';
   function categoryLabel(item){return kMissing(item.label)?(kMissing(item.category)?'未存分类':String(item.category)):String(item.label);}
   function fileCategory(file){return kMissing(file.category)?null:String(file.category);}
   function moduleDictionary(data){
     return kList(data.modules||kObject(window.SAM_CONFIG).modules).map(kObject);
-  }
-  function moduleHidden(data,key){
-    return moduleDictionary(data).some(function(module){return module.code===key&&module.hidden;});
   }
   function driveCategories(data){
     var categories=moduleDictionary(data).filter(function(module){return !module.hidden;}).map(function(module){
@@ -2199,21 +2189,6 @@ a.sys-item{text-decoration:none;}
     document.getElementById(id+'Tree').innerHTML=nodes.map(function(node){return '<button class="explorer-node'+(node.child?' child':'')+'" type="button" data-explorer-node="'+kText(node.key)+'" aria-current="'+(selection===node.key?'true':'false')+'">'+kText(node.label)+'</button>';}).join('');
     var select=document.getElementById(id+'Select');
     select.innerHTML=nodes.map(function(node){return '<option value="'+kText(node.key)+'">'+(node.child?'　':'')+kText(node.label)+'</option>';}).join('');select.value=selection;
-  }
-  function renderExplorerTree(data){
-    var facts=kObject(data.facts),nodes=[{key:'facts',label:'确认事实'}];
-    kList(facts.groups).forEach(function(group,index){if(!moduleHidden(data,kObject(group).category))nodes.push({key:'group:'+index,label:categoryLabel(kObject(group)),child:true});});
-    var equity=kObject(facts.cap_table);
-    if(kList(equity.events).length||Object.keys(kObject(equity.snapshot)).length||kList(equity.warnings).length)nodes.push({key:'equity',label:'股权事件链',child:true});
-    nodes.push({key:'working',label:'工作记忆'});
-    if(!nodes.some(function(node){return node.key===knowledgeSelection;}))knowledgeSelection='facts';
-    renderTree('knowledge',nodes,knowledgeSelection);
-    var selected=nodes.find(function(node){return node.key===knowledgeSelection;});
-    document.getElementById('knowledgePath').textContent='知识库 / '+(selected.child?'确认事实 / ':'')+selected.label;
-    document.getElementById('confirmed-facts').hidden=knowledgeSelection==='working';
-    document.getElementById('working-memory').hidden=knowledgeSelection!=='working';
-    document.getElementById('knowledgeFacts').hidden=knowledgeSelection==='equity';
-    document.getElementById('knowledgeEquity').hidden=knowledgeSelection.indexOf('group:')===0;
   }
   function renderDrive(data){
     var files=kList(kObject(data.evidence).files).map(kObject),categories=driveCategories(data);
@@ -2231,8 +2206,8 @@ a.sys-item{text-decoration:none;}
       if(!format&&name.lastIndexOf('.')>=0)format=name.slice(name.lastIndexOf('.')+1).toUpperCase();
       var size=typeof file.size_bytes==='number'&&Number.isFinite(file.size_bytes)&&file.size_bytes>=0?fmtSize(file.size_bytes):'未提供';
       var action=kMissing(file.file_hash)?'暂无可用来源':
-        '<button class="file-act" type="button" data-knowledge-source="'+kText(file.file_hash)+'">查看映射</button><button class="file-act" type="button" data-knowledge-source="'+kText(file.file_hash)+'" data-source-view="original">查看原件</button>';
-      return '<tr id="source-'+kText(encodeURIComponent(file.file_hash||''))+'"><td class="b">'+kText(file.original_name)+'</td><td>'+kText(format)+'</td><td>'+kText(categoryLabel(file))+'</td><td>'+size+'</td><td>'+kText(file.status)+(!kMissing(kObject(file.l2).mapping)?'':'<p class="knowledge-meta">尚无解析映射</p>')+kWarnings(file.warnings)+'</td><td>'+kText(file.origin_zone)+'</td><td>'+kText(fmtTime(file.uploaded_at))+'</td><td>'+action+'</td></tr>';
+        '<button class="file-act" type="button" data-knowledge-source="'+kText(file.file_hash)+'">查看原件</button>';
+      return '<tr id="source-'+kText(encodeURIComponent(file.file_hash||''))+'"><td class="b">'+kText(file.original_name)+'</td><td>'+kText(format)+'</td><td>'+kText(categoryLabel(file))+'</td><td>'+size+'</td><td>'+kText(file.status)+kWarnings(file.warnings)+'</td><td>'+kText(file.origin_zone)+'</td><td>'+kText(fmtTime(file.uploaded_at))+'</td><td>'+action+'</td></tr>';
     }).join('');
   }
   function kOriginal(file){
@@ -2241,44 +2216,22 @@ a.sys-item{text-decoration:none;}
     else body+='<p class="knowledge-meta">当前云端仅保存只读资料快照，原件请回本地查看。</p>';
     return body+'</div>';
   }
-  ['drive','knowledge'].forEach(function(id){
-    function selectNode(key){if(id==='drive')driveSelection=key;else knowledgeSelection=key;renderKnowledge(knowledgeData);}
-    document.getElementById(id+'Tree').addEventListener('click',function(event){
+  (function(){
+    function selectNode(key){driveSelection=key;renderDrive(knowledgeData);}
+    document.getElementById('driveTree').addEventListener('click',function(event){
       var node=event.target.closest('[data-explorer-node]');
-      if(node&&document.getElementById(id+'Tree').contains(node))selectNode(node.dataset.explorerNode);
+      if(node&&document.getElementById('driveTree').contains(node))selectNode(node.dataset.explorerNode);
     });
-    document.getElementById(id+'Select').addEventListener('change',function(event){selectNode(event.target.value);});
-    document.getElementById(id+'Refresh').addEventListener('click',loadKnowledge);
-  });
-  function renderKnowledge(data){
-    data=kObject(data);var facts=kObject(data.facts),working=kObject(data.working_memory);
-    renderDrive(data);renderExplorerTree(data);
-    var groups=kList(facts.groups);
-    if(knowledgeSelection.indexOf('group:')===0)groups=groups.filter(function(_,index){return knowledgeSelection==='group:'+index;});
-    document.getElementById('knowledgeFacts').innerHTML=groups.map(function(group){
-      group=kObject(group);
-      return '<article class="card"><div class="card-h"><h3>'+kText(kMissing(group.label)?group.category:group.label,'未存分类')+'</h3></div><div class="table-wrap"><table><thead><tr><th>实体</th><th>属性</th><th>数值 / 内容</th><th>期间</th><th>来源</th></tr></thead><tbody>'+kList(group.facts).map(function(fact){fact=kObject(fact);return '<tr><td>'+kText(fact.entity)+'</td><td>'+kText(fact.attribute)+'</td><td>'+kText(fact.value)+(kMissing(fact.unit)?'':' '+kText(fact.unit))+'</td><td>'+kText(fact.period)+'</td><td>'+kRef(fact.source_ref)+(kMissing(kObject(fact.source_ref).locator)?'<p class="knowledge-meta">原文定位字段未提供</p>':'')+'</td></tr>';}).join('')+'</tbody></table></div></article>';
-    }).join('')||kEmpty('暂无确认事实。未确认候选不会显示为确认事实。');
-    var equity=kObject(facts.cap_table),balance=kObject(equity.snapshot);
-    var equityHtml='<div class="card-h"><h3>股权事件链回放</h3></div>'+kWarnings(equity.warnings);
-    if(Object.keys(balance).length){
-      equityHtml+='<p class="knowledge-meta">已发行总股数：'+kText(balance.total_issued)+' · 完全稀释总股数：'+kText(balance.total_fully_diluted)+' · 期权池：'+kText(balance.option_pool)+'</p><div class="table-wrap"><table><thead><tr><th>持有人</th><th>已发行</th><th>完全稀释</th><th>已发行持股比例</th><th>完全稀释持股比例</th></tr></thead><tbody>'+Object.entries(kObject(balance.holders)).map(function(pair){var h=kObject(pair[1]);return '<tr><td>'+kText(pair[0])+'</td>'+['issued','fully_diluted','ownership_issued_pct','ownership_fully_diluted_pct'].map(function(key){return '<td>'+kText(h[key])+(key.endsWith('_pct')&&!kMissing(h[key])?'%':'')+'</td>';}).join('')+'</tr>';}).join('')+'</tbody></table></div><p class="knowledge-meta">由现有回放函数计算，不写入或更新股权快照。</p>';
-      if(balance.event_ids)equityHtml+='<p class="knowledge-meta">有效事件 event_ids：'+kText(balance.event_ids)+'</p>';
-    }else if(!kList(equity.warnings).length)equityHtml+='<p class="knowledge-empty">暂无已存股权事件链，不展示占位持股数值。</p>';
-    if(kList(equity.events).length)equityHtml+='<details class="knowledge-detail"><summary>查看事件与来源（含历史修正；有效事件以回放 event_ids 为准）</summary>'+equity.events.map(function(event){event=kObject(event);return '<div class="mt16"><b>'+kText(event.effective_at)+' · '+kText(event.event_type)+'</b><p class="knowledge-meta">'+kText(event.holder_id)+' · '+kText(event.instrument)+' · '+kText(event.shares_delta)+' · '+kText(event.ownership_basis)+' · '+kText(event.event_id)+'</p>'+kList(event.provenance).map(function(ref){ref=kObject(ref);return kRef(ref.source_ref)+kProse(ref.anchor);}).join('')+'</div>';}).join('')+'</details>';
-    document.getElementById('knowledgeEquity').innerHTML=equityHtml;
-    document.getElementById('knowledgeRuntime').innerHTML=kWarnings(working.warnings)+(kList(working.items).length?'<div class="card"><div class="table-wrap"><table><thead><tr><th>目标</th><th>状态</th><th>到期时间</th><th>工作记录</th></tr></thead><tbody>':'')+(kList(working.items).map(function(item){
-      item=kObject(item);var runtime=kObject(item.runtime),events=kList(item.events).map(kObject);
-      var closed=events.filter(function(e){return e.type==='open_loop_remove';});
-      return '<tr><td>'+kText(runtime.goal)+'</td><td>'+kText(runtime.state)+'</td><td>'+kText(runtime.expires_at)+'</td><td><details class="knowledge-detail"><summary>查看目标与工作记录</summary><p class="knowledge-meta">会话：'+kText(runtime.session_id)+' · 任务：'+kText(runtime.task_id)+'</p><p class="knowledge-meta">临时性 · 到期时间：'+kText(runtime.expires_at)+'</p><div class="grid g2 mt16"><div><h4>未完成事项</h4>'+ (kList(runtime.open_loops).map(function(loop){loop=kObject(loop);return '<p class="knowledge-prose">'+kText(loop.id)+' · '+kText(loop.text)+'</p>';}).join('')||'<p class="knowledge-meta">暂无未完成事项。</p>')+'</div><div><h4>闭环记录</h4>'+ (closed.map(function(event){var payload=kObject(event.payload);return '<p class="knowledge-prose">'+kText(event.at)+' · '+kText(payload.id)+events.filter(function(e){return e.type==='open_loop_add'&&kObject(e.payload).id===payload.id;}).map(function(e){return ' · '+kText(kObject(e.payload).text);}).join('')+'</p>';}).join('')||'<p class="knowledge-meta">暂无已存闭环事件。</p>')+'</div></div><div class="mt16"><h4>待固化候选 / 临时笔记</h4><p class="knowledge-meta">以下为工作笔记，尚未成为确认事实，仅供后续核验。</p>'+ (kList(runtime.working_notes).map(function(note){note=kObject(note);return kProse(note.text)+'<p class="knowledge-meta">置信度：'+kText(note.confidence)+' · '+kText(note.status)+(note.inferred?' · 推断':'')+' · 到期 '+kText(runtime.expires_at)+'</p>';}).join('')||'<p class="knowledge-meta">暂无待固化候选或临时笔记。</p>')+'</div><details class="knowledge-detail"><summary>事件时间线</summary>'+ (events.map(function(event){return '<div class="mt16"><b>'+kText(event.at)+' · '+kText(event.type)+'</b>'+kProse(event.payload)+'</div>';}).join('')||'<p class="knowledge-meta">暂无已存事件。</p>')+'</details></details></td></tr>';
-    }).join('')||(!kList(working.warnings).length?kEmpty('暂无当前公司可读取的工作记忆。'):''))+(kList(working.items).length?'</tbody></table></div></div>':'');
-  }
+    document.getElementById('driveSelect').addEventListener('change',function(event){selectNode(event.target.value);});
+    document.getElementById('driveRefresh').addEventListener('click',loadKnowledge);
+  })();
   async function loadKnowledge(){
     var version=++knowledgeVersion;
     var result=await window.SAM.data.load('knowledge',{url:'/api/knowledge',isEmpty:function(value){return value==null;}});
     if(version!==knowledgeVersion)return false;
-    knowledgeData=kObject(result.data);renderKnowledge(knowledgeData);
-    ['knowledgeDataSource','driveDataSource'].forEach(function(id){var label=document.getElementById(id);label.textContent=result.error?'读取失败，请刷新重试':!Object.keys(knowledgeData).length?'暂无可用数据':'';});
+    knowledgeData=kObject(result.data);renderDrive(knowledgeData);
+    var label=document.getElementById('driveDataSource');
+    label.textContent=result.error?'读取失败，请刷新重试':!Object.keys(knowledgeData).length?'暂无可用数据':'';
     return true;
   }
   function focusKnowledgeFile(hash){
@@ -2286,25 +2239,24 @@ a.sys-item{text-decoration:none;}
     var card=document.getElementById('source-'+encodeURIComponent(hash));
     if(card&&document.getElementById('drive').classList.contains('active')){card.classList.add('knowledge-selected');card.scrollIntoView({block:'start',behavior:'smooth'});}
   }
+  // 出处回查只进入对应原件：无论 ref 是否带页码/定位，弹窗只展示原件信息与下载入口。
   function openKnowledgeSource(ref,returnFocus){
     var file=kList(kObject(knowledgeData.evidence).files).find(function(item){return kObject(item).file_hash===ref.file_hash;});
     sourceReturnFocus=returnFocus||document.activeElement;
-    document.getElementById('knowledgeSourceTitle').textContent=file&&!kMissing(file.original_name)?String(file.original_name):'L2 原文';
-    document.getElementById('knowledgeSourceBody').innerHTML=file?(ref.original?kOriginal(file):kL2(file,ref)):kEmpty('尚无可读取的 L2 原文，文件可能仍在解析或解析未成功。');
+    document.getElementById('knowledgeSourceTitle').textContent=file&&!kMissing(file.original_name)?String(file.original_name):'企业原件';
+    document.getElementById('knowledgeSourceBody').innerHTML=file?kOriginal(file):kEmpty('当前文件柜中没有该原件。');
     sourceMask.classList.add('open');sourceMask.setAttribute('aria-hidden','false');sourceClose.focus();
     document.getElementById('knowledgeSourceBody').scrollTop=0;
-    var selected=sourceMask.querySelector('.knowledge-selected');
-    if(selected)selected.scrollIntoView({block:'nearest'});
   }
   function closeKnowledgeSource(){
     sourceMask.classList.remove('open');sourceMask.setAttribute('aria-hidden','true');
     if(sourceReturnFocus&&sourceReturnFocus.isConnected)sourceReturnFocus.focus();
   }
-  ['knowledge','drive'].forEach(function(id){document.getElementById(id).addEventListener('click',function(event){
+  document.getElementById('drive').addEventListener('click',function(event){
     var link=event.target.closest('[data-knowledge-source]');
-    if(!link||!document.getElementById(id).contains(link))return;
-    event.preventDefault();openKnowledgeSource({file_hash:link.dataset.knowledgeSource,page:link.dataset.page,locator:link.dataset.locator,original:link.dataset.sourceView==='original'},link);
-  });});
+    if(!link||!document.getElementById('drive').contains(link))return;
+    event.preventDefault();openKnowledgeSource({file_hash:link.dataset.knowledgeSource},link);
+  });
   sourceClose.addEventListener('click',closeKnowledgeSource);
   sourceMask.addEventListener('click',function(event){if(event.target===sourceMask)closeKnowledgeSource();});
   sourceMask.addEventListener('keydown',function(event){
@@ -2316,17 +2268,19 @@ a.sys-item{text-decoration:none;}
     }
   });
   // Old links and refreshes resolve client-side; the backend only serves the shell.
+  // 旧 /knowledge 平铺事实页已淘汰：来源回查只落到文件柜对应原件，纯 /knowledge 与 #knowledge 进入壳内事实库。
   async function routeKnowledgeLocation(){
     var location=window.location;if(!location)return;
     var prefix='/knowledge/sources/',isSource=location.pathname.startsWith(prefix);
     if(location.pathname!=='/knowledge'&&!isSource&&!location.hash.startsWith('#source-')&&location.hash!=='#drive'&&location.hash!=='#knowledge')return;
-    var pending=go(isSource||location.hash.startsWith('#source-')?'drive':location.hash==='#drive'?'drive':'knowledge'),navigation=knowledgeNavigation,loaded=await pending;
+    if(!isSource&&!location.hash.startsWith('#source-')&&location.hash!=='#drive'){go('facts');return;}
+    var pending=go('drive'),navigation=knowledgeNavigation,loaded=await pending;
     if(!loaded||navigation!==knowledgeNavigation)return;
     var hash='';try{hash=decodeURIComponent(isSource?location.pathname.slice(prefix.length):location.hash.startsWith('#source-')?location.hash.slice(8):'');}catch(_){return;}
     if(hash)focusKnowledgeFile(hash);
-    if(isSource||hash){var params=new URLSearchParams(location.search);openKnowledgeSource({file_hash:hash,page:params.get('page'),locator:params.get('locator')});}
+    if(isSource||hash)openKnowledgeSource({file_hash:hash});
   }
-  renderKnowledge({});
+  renderDrive({});
   window.addEventListener('hashchange',routeKnowledgeLocation);
   window.addEventListener('popstate',routeKnowledgeLocation);
 
@@ -2554,5 +2508,7 @@ a.sys-item{text-decoration:none;}
   routeKnowledgeLocation();
 })();
 </script>
+<!-- 事实库渲染器：与 /facts 页共用的只读 FactsTree 浏览器，挂载在壳内 #facts-tree 容器上 -->
+<script src="/static/js/facts-tree.js"></script>
 </body>
 </html>

@@ -100,7 +100,16 @@ def test_network_errors_retryable_without_persisting_prompt(exc):
 
 
 def test_openclaw_default_floor_and_cli_use_python_budget(tmp_path, monkeypatch):
-    config = replace(RuntimeConfig.from_env(), state_dir=tmp_path / "state",
+    config = RuntimeConfig.from_env()
+    # Every runtime-writable root (harness cache/inbox/outbox, state, config)
+    # moves into tmp_path; the config template is copied along so the runtime
+    # keeps the production defaults while the repo stays read-only.
+    harness_root = tmp_path / "harness"
+    template = config.harness_root / "state" / "openclaw.example.json"
+    target = harness_root / "state" / "openclaw.example.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+    config = replace(config, harness_root=harness_root, state_dir=tmp_path / "state",
                      config_path=tmp_path / "state/openclaw.json", openclaw_mode="local")
     monkeypatch.setenv("SAM_EMPLOYEE_FACT_BRIEF_TIMEOUT", "720")
     calls = []

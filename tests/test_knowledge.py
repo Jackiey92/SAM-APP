@@ -1,12 +1,9 @@
-"""Knowledge UI/API are scoped read projections, never a promotion path."""
+"""Knowledge API is a scoped read projection; the shell shows FactsTree + original files only."""
 from __future__ import annotations
 
 import json
 import base64
 import sqlite3
-import shutil
-import subprocess
-from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 
 import pytest
@@ -154,9 +151,21 @@ def test_knowledge_empty_page_api_and_read_only_methods(knowledge_env):
         "working_memory": {"items": [], "warnings": []},
     }
     html = client.get("/knowledge").get_data(as_text=True)
-    assert '<div class="screen" id="knowledge">' in html
-    assert 'data-go="knowledge"' in html
-    for text in ("暂无原始证据", "暂无确认事实", "暂无已存股权事件链", "暂无当前公司", "只读"):
+    assert html == client.get("/").get_data(as_text=True)
+    # 新设计契约：事实库在主页壳内展示完整 FactsTree；文件柜只作为原始文件入口。
+    assert '<div class="screen" id="facts">' in html and 'data-go="facts"' in html
+    assert '<div class="screen" id="drive">' in html and 'data-go="drive"' in html
+    assert 'id="facts-tree"' in html
+    # 旧“知识库”平铺页面与旧事实/股权/工作记忆平铺区块已移除，不得作为新版证据。
+    assert 'id="knowledge"' not in html and 'data-go="knowledge"' not in html
+    for legacy in ('id="knowledgeFacts"', 'id="knowledgeEquity"', 'id="knowledgeRuntime"',
+                   'id="confirmed-facts"', 'id="working-memory"',
+                   "暂无确认事实", "暂无已存股权事件链", "暂无当前公司"):
+        assert legacy not in html
+    # 文件柜无映射入口：无“查看映射”、映射正文/页片段浏览或映射状态缺失提示。
+    for mapping_ui in ("查看映射", "尚无解析映射", "尚无可读取的 L2 原文", "原文页码"):
+        assert mapping_ui not in html
+    for text in ("暂无原始证据", "只读"):
         assert text in html
     assert "data-upload-open" not in html and 'id="upload-modal"' not in html
     assert "data-todo-action" not in html and "data-file-confirm" not in html
@@ -165,7 +174,7 @@ def test_knowledge_empty_page_api_and_read_only_methods(knowledge_env):
     assert snapshot(db, memory) == before
 
 
-def test_knowledge_three_layers_coordinates_and_links(knowledge_env, tmp_path):
+def test_knowledge_three_layers_coordinates_and_links(knowledge_env):
     from app.knowledge import KnowledgeService
 
     client, db, objects, memory = knowledge_env
@@ -214,31 +223,18 @@ def test_knowledge_three_layers_coordinates_and_links(knowledge_env, tmp_path):
     assert runtime["runtime"]["goal"] == "acc 目标"
     assert runtime["runtime"]["open_loops"] == [{"id": "open", "text": "acc 未闭环"}]
     assert runtime["runtime"]["working_notes"][0]["confidence"] == 0.73
-    # Execute the actual shell renderer against the real API projection, not a
-    # second template or hand-written serialization of the expected fields.
-    node = shutil.which("node")
-    if node:
-        payload = tmp_path / "knowledge.json"
-        payload.write_text(json.dumps(data), encoding="utf-8")
-        ran = subprocess.run([node, str(Path(__file__).parent / "js/home_shell.cjs"),
-                              "ui-knowledge-payload", str(payload)], capture_output=True,
-                             text=True, timeout=15)
-        assert ran.returncode == 0, ran.stdout + ran.stderr
-        rendered = json.loads(ran.stdout)
-        # The redacted payload keeps page coordinates but carries no mapping text.
-        assert "原文页码：2" in rendered["mapping"]
-        assert "尚无可读取" in rendered["mapping"]
-        assert "Sheet1!B3" not in rendered["mapping"]
-        for text in ("acc-entity", "acc 属性", "17", "2026", "page=2"):
-            assert text in rendered["facts"]
-        assert "已发行总股数：100" in rendered["equity"]
-        for text in ("acc 目标", "acc 已闭环", "acc 未闭环", "acc 待核验结论", "0.73"):
-            assert text in rendered["runtime"]
-        assert "<script>alert(1)</script>" not in json.dumps(rendered)
     assert any(event["type"] == "open_loop_remove" for event in runtime["events"])
+    # 旧平铺渲染器（ui-knowledge-payload）已随旧知识页移除；壳内页面契约由
+    # tests/js/home_shell.cjs 的 ui-facts-library/ui-drive 用例承担。这里核对
+    # /knowledge 仍只服务主页壳：事实库 FactsTree 容器在，旧平铺区块与映射入口不在。
     html = client.get("/knowledge").get_data(as_text=True)
     assert html == client.get("/").get_data(as_text=True)
-    assert 'id="knowledgeRuntime"' in html
+    assert '<div class="screen" id="facts">' in html and 'id="facts-tree"' in html
+    assert '<div class="screen" id="drive">' in html
+    assert 'id="knowledgeRuntime"' not in html and 'data-go="knowledge"' not in html
+    for mapping_ui in ("查看映射", "尚无解析映射", "尚无可读取的 L2 原文", "原文页码"):
+        assert mapping_ui not in html
+    assert "<script>alert(1)</script>" not in html
     assert snapshot(db, memory) == before
 
 
@@ -281,7 +277,7 @@ def test_knowledge_missing_summaries_and_unclassified_facts_are_explicit(knowled
     assert data["evidence"]["files"][0]["l0"]["content"] is None
     assert data["facts"]["groups"][0]["category"] is None
     assert data["facts"]["groups"][0]["label"] is None
-    # Missing-data wording and empty categories are exercised by ui-knowledge-partial.
+    # Missing-data wording and empty categories are exercised by ui-drive-partial.
     assert client.get("/knowledge").get_data(as_text=True) == client.get("/").get_data(as_text=True)
     assert client.get(f"/knowledge/sources/{stored.file_hash}").status_code == 200
 
@@ -302,7 +298,11 @@ def test_knowledge_catalog_includes_unparsed_jobs_without_classification(knowled
     assert "mapping" not in data["evidence"]["files"][0]["l2"]
     internal = KnowledgeService(db, memory, objects_path=objects).read(company_id=COMPANY)
     assert internal["evidence"]["files"][0]["l2"]["mapping"] is None
-    assert "尚无可读取的 L2 原文" in client.get("/knowledge").get_data(as_text=True)
+    # 未解析文件在文件柜只呈现原件行与真实状态；前端不再有映射状态缺失提示。
+    html = client.get("/knowledge").get_data(as_text=True)
+    assert html == client.get("/").get_data(as_text=True)
+    assert "尚无可读取的 L2 原文" not in html and "尚无解析映射" not in html
+    assert "查看映射" not in html
 
 
 def test_knowledge_uses_persisted_category_names_not_business_mappings(knowledge_env):
@@ -385,9 +385,15 @@ def test_knowledge_preserves_source_map_corrections_and_missing_coordinates(know
     internal = KnowledgeService(db, memory, objects_path=objects).read(company_id=COMPANY)
     assert "acc 校正原文" in internal["evidence"]["files"][0]["l2"]["mapping"]
     ref = data["facts"]["groups"][0]["facts"][0]["source_ref"]
-    assert ref["page"] is None and ref["locator"] is None
-    assert "原文定位字段未提供" in client.get("/knowledge").get_data(as_text=True)
-    assert client.get(ref["url"]).status_code == 200
+    assert ref["page"] is None and ref["locator"] is None  # 缺失坐标在 API 投影中保持显式空值
+    # 出处回查URL仍只服务主页壳；壳内不渲染映射正文，旧平铺的缺失坐标提示随旧页移除。
+    source = client.get(ref["url"])
+    assert source.status_code == 200
+    source_html = source.get_data(as_text=True)
+    assert source_html == client.get("/").get_data(as_text=True)
+    assert "acc 校正原文" not in source_html and "原文定位字段未提供" not in source_html
+    for mapping_ui in ("查看映射", "尚无解析映射", "尚无可读取的 L2 原文", "原文页码"):
+        assert mapping_ui not in source_html
 
 
 def test_knowledge_json_unchanged_with_persisted_mapping(knowledge_env):
