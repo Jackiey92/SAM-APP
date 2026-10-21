@@ -16,16 +16,21 @@ from typing import Any
 
 from .memory_paths import MEMORY_ROOT
 from .memory.paths import facts_uri, original_uri, parse, identifier
-from .memory.taxonomy import projection_module, MODULES, TODO_DIRECTORY, UNCLASSIFIED
+from .memory.taxonomy import MODULES, TODO_DIRECTORY, UNCLASSIFIED
 from .memory.company_facts.paths import company_uri, brief_md_uri, guide_md_uri
+from .facts_tree.tree_read import TreeReadError, TreeReadService
 from .facts_tree.uris import tree_prefix
 from . import settings
+from .ports import MemoryUnavailable
 from .storage.mapping_store import SourceMapService
-from .db.database import connect
 
 ROOT = MEMORY_ROOT
 MAP_ROOT = ROOT
 MAP_LIMIT = 12_000
+
+# Canonical FactsTree leaf file names carry their strict L-<trunk>-<NN> code;
+# both address families below are written only by leaf publish.
+_TREE_LEAF_NAME = re.compile(r"^(L-[A-Za-z0-9-]+-[0-9]{2})-.+\.md$")
 
 
 def _safe(value: str) -> str:
@@ -153,6 +158,85 @@ class MemoryMapTools:
             raise PermissionError("memory URI is outside scope")
         return uri
 
+    def _tree_leaf_claim(self, uri):
+        """The leaf code when a URI claims a current-tree leaf address, else None.
+
+        Both canonical address families (the pack/version namespace and the
+        frozen generic pack's legacy directory) are exclusive to leaf publish,
+        so a markdown file directly under them is always a leaf claim: an
+        unparseable name returns "" and must fail closed, never fall back to
+        legacy memory content. The company always comes from the injected
+        host scope; a claim is only recognized inside it.
+        """
+        if self.global_read_only:
+            return None
+        versioned = tree_prefix(self.company_id)
+        if uri.startswith(versioned):
+            parts = uri[len(versioned):].split("/")
+            if len(parts) != 4 or not parts[1].isdigit() or parts[2] != "leaves":
+                return None
+            name = parts[3]
+        else:
+            base = company_uri(self.company_id) + "/"
+            if not uri.startswith(base):
+                return None
+            parts = uri[len(base):].split("/")
+            if len(parts) != 3 or parts[1] != "leaves":
+                return None
+            name = parts[2]
+        if not name.endswith(".md"):
+            return None
+        match = _TREE_LEAF_NAME.match(name)
+        return match.group(1) if match else ""
+
+    def _read_tree_leaf(self, uri, code):
+        """Serve a claimed tree leaf only through the read-only TreeReadService.
+
+        The service re-verifies the gate, binding, pack/version, revision,
+        projection, fact identity and unique placement inside one read-only
+        SQLite snapshot; only an exact canonical-URI match in state 'ready'
+        with string content is returned verbatim. Every other outcome fails
+        closed under the existing memory_read error contract — no fallback to
+        legacy or vector content, and nothing is written or repaired.
+        """
+        if not code or self.db_path is None:
+            raise FileNotFoundError("leaf unavailable")
+        try:
+            with TreeReadService(self.db_path, self.memory, company_id=self.company_id) as service:
+                leaf = service.read_leaf(self.company_id, code)
+        except TreeReadError as exc:
+            raise FileNotFoundError("leaf unavailable") from exc
+        if leaf["state"] != "ready" or not isinstance(leaf["content"], str) \
+                or not leaf["content"] or leaf["uri"] != uri:
+            raise FileNotFoundError("leaf unavailable")
+        return leaf["content"] + self._ledger_note(leaf["facts"])
+
+    @staticmethod
+    def _ledger_note(facts):
+        """Fact status/source metadata appended after the verbatim leaf body.
+
+        Decision 13-A: the employee sees each formally referenced fact's
+        status and source locator, clearly labeled as dynamic ledger metadata
+        that is not part of the leaf text. Values come only from the verified
+        read result; a missing locator is reported as such, never fabricated.
+        """
+        lines = ['## 系统读取信息（动态账本元数据，不属于叶正文）', '']
+        if not facts:
+            lines.append('- 本叶当前无正式引用的事实。')
+        for fact in facts:
+            source = fact.get('source') or {}
+            handle = source.get('original_name') or source.get('file_hash') or '无来源记录'
+            value = f"值：{fact['value']}" + (f" {fact['unit']}" if fact.get('unit') else '')
+            parts = [f"F{fact['fact_id']} 状态：{fact['status']}",
+                     f"主体：{fact['entity']}", f"属性：{fact['attribute']}",
+                     f"期间：{fact['period']}", value, f"来源：{handle}"]
+            if source.get('page') is not None:
+                parts.append(f"页码：{source['page']}")
+            if source.get('span'):
+                parts.append(f"坐标：{source['span']}")
+            lines.append('- ' + '；'.join(parts))
+        return '\n\n---\n\n' + '\n'.join(lines) + '\n'
+
     def memory_read(self, uri):
         uri = self._check_uri(uri)
         self.navigation.append(uri)
@@ -161,29 +245,78 @@ class MemoryMapTools:
                 raise FileNotFoundError("source map unavailable")
             owner, digest = self._sources[uri]
             return self.source_maps.read_map(file_hash=digest, company_id=owner)
+        code = self._tree_leaf_claim(uri)
+        if code is not None:
+            return self._read_tree_leaf(uri, code)
         # L1 exposes exact SQLite L2 handles, so drill-down never requires an
         # memory mirror of source originals or business keyword lookup.
         address = parse(uri)
         name = address.parts[-1]
         if re.fullmatch(r"F[1-9][0-9]*\.md", name):
-            if self.db_path is None:
-                raise FileNotFoundError("fact unavailable")
-            with connect(self.db_path) as conn:
-                row = conn.execute("""SELECT * FROM facts WHERE id=? AND company_id=? AND status='verified'
-                    AND superseded_by IS NULL AND valid_to IS NULL""",
-                    (int(name[1:-3]), address.company_id)).fetchone()
-            if row is None or projection_module(row['module_key']) != address.module_key:
-                raise FileNotFoundError("fact unavailable")
-            return json.dumps(dict(row), ensure_ascii=False, sort_keys=True)
+            return self._read_fact_card(address, name)
         return self.memory.read(uri)
+
+    def _read_fact_card(self, address, name):
+        """Serve an F<ID>.md claim only through the verified tree read (13-A).
+
+        TreeReadService.read_fact re-verifies the gate, the injected company
+        scope, the current binding, the fact's readability (claimed/verified,
+        not superseded or expired), its identity and current revision, the
+        unique current leaf placement and the leaf's formal reference — all
+        inside one read-only snapshot. The legacy facts.module_key hint is
+        never consulted: the URI's module segment does not decide ownership.
+        Company selection and cross-company reads stay refused; the global
+        read-only exception remains isolated from this single-company
+        verification. Every failure is FileNotFoundError — never a fallback
+        to plain memory content.
+        """
+        if (self.global_read_only or self.db_path is None or not settings.SAM_FACTS_TREE
+                or address.company_id != self.company_id):
+            raise FileNotFoundError("fact unavailable")
+        try:
+            with TreeReadService(self.db_path, self.memory, company_id=self.company_id) as service:
+                result = service.read_fact(self.company_id, int(name[1:-3]))
+        except TreeReadError as exc:
+            raise FileNotFoundError("fact unavailable") from exc
+        return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+    def _search_tree_leaves(self, query, *, filters=None):
+        """Employee leaf search only through the read-only TreeReadService.
+
+        DEC-091 option A with decision 13-A: the service re-verifies the
+        gate, binding, filters and every candidate leaf inside one read-only
+        snapshot and returns formal leaf URIs of the current bound pack only.
+        Invalid filters surface as ValueError, storage/gate conflicts as
+        MemoryUnavailable and every other verified refusal as
+        FileNotFoundError — never a fallback to legacy namespace or planted
+        memory content.
+        """
+        if self.db_path is None:
+            raise FileNotFoundError("leaf search unavailable")
+        try:
+            with TreeReadService(self.db_path, self.memory, company_id=self.company_id) as service:
+                return service.search_leaves(self.company_id, query, filters=filters)
+        except TreeReadError as exc:
+            if exc.status == 400:
+                raise ValueError(str(exc)) from exc
+            if exc.status == 503:
+                raise MemoryUnavailable(str(exc)) from exc
+            raise FileNotFoundError(str(exc)) from exc
 
     def memory_search(self, query, *, filters=None):
         if isinstance(filters, dict) and 'company_id' in filters:
             if self.global_read_only or filters['company_id'] != self.company_id:
                 raise ValueError("filter company differs from injected scope")
             filters = {k: v for k, v in filters.items() if k != 'company_id'}
-        # memory searches only the current 2B namespaces. External source map
-        # bodies remain available by explicit catalog handles, not memory indexes.
+        if settings.SAM_FACTS_TREE and not self.global_read_only:
+            # Employee search of the current single company is the verified
+            # tree read: only formal leaf URIs of the exact current binding.
+            uris = self._search_tree_leaves(query, filters=filters)
+            self.navigation.extend(uris)
+            return uris
+        # The closed gate and the isolated global read-only exception keep
+        # the existing prefix search over the current 2B namespaces. External
+        # source map bodies remain available by explicit catalog handles.
         companies = sorted({owner for owner, _ in self.source_catalog}) if self.global_read_only else [self.company_id]
         prefixes = tuple(prefix for company in companies
                          for prefix in ((company_uri(company) + "/", tree_prefix(company))

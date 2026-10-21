@@ -3,6 +3,11 @@
    lines ([^ref]: ...) become a read-only "来源回查" list; clicking a ref asks
    GET /api/facts/tree/source?leaf_code=<code>&ref=<exact ref> and renders
    original name/location/line range/availability into that item only.
+   Decision 13-A: a ready leaf's formal fact references (the `facts` array)
+   get a "事实状态与来源" block — per-fact id, verbatim status, entity,
+   attribute, period, value/unit and source name/hash, page, span. Status is
+   never inferred and missing source fields are stated as 未记录, never
+   fabricated. Responses without the array (legacy) simply skip the block.
    All server content is rendered via textContent/DOM nodes only — never
    innerHTML — so Markdown bodies stay plain text. Read-only: no editing,
    no company selection; the host injects the company scope server-side. */
@@ -186,6 +191,75 @@
     return section;
   };
 
+  // Decision 13-A: status is shown verbatim by this fixed mapping — claimed
+  // is "recorded, pending verification", never "verified"; any other server
+  // status renders as the raw string, never guessed.
+  const FACT_STATUS_LABELS = {
+    claimed: '已记录，待核验',
+    verified: '已核验',
+  };
+  const factStatusLabel = status => (FACT_STATUS_LABELS[status] !== undefined
+    ? FACT_STATUS_LABELS[status] : String(status));
+
+  const present = value => value !== undefined && value !== null && value !== '';
+  const orMissing = value => (present(value) ? value : '（未记录）');
+
+  const factItem = fact => {
+    const item = node('li', 'facts-tree-fact');
+    const head = node('p', 'facts-tree-fact-head');
+    head.append(node('span', 'facts-tree-fact-id', `事实 #${orMissing(fact.fact_id)}`));
+    const known = FACT_STATUS_LABELS[fact.status] !== undefined;
+    head.append(node('span',
+      `facts-tree-fact-status${known ? ` facts-tree-fact-status-${fact.status}` : ''}`,
+      factStatusLabel(fact.status)));
+    item.append(head);
+    const source = fact.source && typeof fact.source === 'object' ? fact.source : null;
+    let sourceText = '未记录';
+    let pageText = '未记录';
+    let spanText = '未记录';
+    if (source) {
+      if (present(source.original_name)) sourceText = source.original_name;
+      else if (present(source.file_hash)) sourceText = `哈希 ${source.file_hash}`;
+      if (present(source.page)) pageText = String(source.page);
+      if (present(source.span)) spanText = source.span;
+    }
+    const valueText = present(fact.value)
+      ? `${fact.value}${present(fact.unit) ? ` ${fact.unit}` : ''}`
+      : '（未记录）';
+    const rows = [
+      ['主体', orMissing(fact.entity)],
+      ['属性', orMissing(fact.attribute)],
+      ['期间', orMissing(fact.period)],
+      ['值', valueText],
+      ['来源', sourceText],
+      ['页码', pageText],
+      ['坐标', spanText],
+    ];
+    const detail = node('dl', 'facts-tree-fact-detail');
+    for (const [label, value] of rows) {
+      detail.append(node('dt', '', label));
+      detail.append(node('dd', '', value));
+    }
+    item.append(detail);
+    return item;
+  };
+
+  // A legacy ready response has no `facts` array: the block is skipped
+  // entirely. An empty array means the leaf currently cites no formal facts.
+  const factsSection = facts => {
+    if (!Array.isArray(facts)) return null;
+    const section = node('section', 'facts-tree-section facts-tree-facts');
+    section.append(node('h3', 'facts-tree-section-title', '事实状态与来源'));
+    if (!facts.length) {
+      section.append(node('p', 'facts-tree-empty', '该叶当前无正式引用事实。'));
+      return section;
+    }
+    const list = node('ul', 'facts-tree-fact-list');
+    for (const fact of facts) list.append(factItem(fact || {}));
+    section.append(list);
+    return section;
+  };
+
   const bindingLine = binding => {
     if (!binding) return null;
     const line = node('p', 'facts-tree-binding');
@@ -243,6 +317,8 @@
         parts.push(section);
       }
       parts.push(textBlock('正文', data.content || '', 'facts-tree-leaf-content'));
+      const facts = factsSection(data.facts);
+      if (facts) parts.push(facts);
       const sources = sourcesSection(data.code, data.content);
       if (sources) parts.push(sources);
     }

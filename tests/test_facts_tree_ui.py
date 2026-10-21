@@ -1,9 +1,9 @@
-"""Facts-tree UI script contracts (F-004 P03 slice D, F-004 API-002).
+"""Facts-tree UI script contracts (F-004 P03 slice D, F-004 API-002, 13-A).
 
 The real ``webapp/static/js/facts-tree.js`` runs inside a Node ``vm`` with
 minimal DOM doubles: these tests assert event wiring, state/error rendering,
-footnote source-lookup interaction and the no-``company_id`` request
-contract, not pixels.
+footnote source-lookup interaction, the Decision 13-A fact status/source
+block and the no-``company_id`` request contract, not pixels.
 """
 from pathlib import Path
 import shutil
@@ -156,6 +156,27 @@ const SOURCE_B = {
 };
 const refOf = url => decodeURIComponent((url.split('ref=')[1] || '').split('&')[0]);
 
+// Decision 13-A fixtures: a ready leaf's formal fact references. Fact 11 is
+// claimed with a full source; 12 is verified with no source at all; 13 is
+// claimed with only a hash (no original name, page or span).
+const LEAF_FACTS = {
+  ...LEAF, code: 'L-0104',
+  leaf: { code: 'L-0104', trunk: 'T-01', title: '叶四标题', shape: 'prose', scope: 'company' },
+  facts: [
+    { fact_id: 11, status: 'claimed', entity: '甲公司', attribute: '营业收入',
+      period: '2026Q3', value: '1200', value_type: 'number', unit: '万元',
+      source: { file_hash: 'abc123', original_name: '三季报.pdf', page: 4, span: '第2段' } },
+    { fact_id: 12, status: 'verified', entity: '甲公司', attribute: '员工人数',
+      period: '2026Q3', value: '56', value_type: 'number', unit: '人', source: null },
+    { fact_id: 13, status: 'claimed', entity: '甲公司', attribute: '毛利率',
+      period: '2026Q3', value: '32%', value_type: 'text', unit: null,
+      source: { file_hash: 'deadbeefcafe', original_name: null, page: null, span: null } },
+  ],
+};
+const TRUNK_FACTS = { ...TRUNK, leaves: [...TRUNK.leaves,
+  { code: 'L-0104', trunk: 'T-01', title: '叶四标题', shape: 'prose', scope: 'company',
+    state: 'active', version: 1 }] };
+
 const run = async () => { vm.runInContext(script, context); await flush(); };
 
 const readyFlow = async () => {
@@ -190,6 +211,21 @@ const sourceFlow = async (sourceImpl, leafBody) => {
   findAll(el => el.tagName === 'button' && el.dataset.code === 'L-0103')[0].click();
   await flush();
 };
+// Navigate tree → trunk → the fact-bearing leaf L-0104.
+const factsFlow = async leafBody => {
+  fetchImpl = url => {
+    if (url === '/api/facts/tree') return ok(tree('ready'));
+    if (url === '/api/facts/tree?node=trunk&code=T-01') return ok(TRUNK_FACTS);
+    if (url === '/api/facts/tree?node=leaf&code=L-0104') return ok(leafBody || LEAF_FACTS);
+    throw new Error('unexpected url: ' + url);
+  };
+  await run();
+  nav().children[0].click();
+  await flush();
+  findAll(el => el.tagName === 'button' && el.dataset.code === 'L-0104')[0].click();
+  await flush();
+};
+const factItems = () => findAll(el => hasClass(el, 'facts-tree-fact'));
 const noSourceCall = () => { throw new Error('unexpected source lookup'); };
 const sourceResults = () => findAll(el => hasClass(el, 'facts-tree-source-result'));
 const clickRef = async ref => {
@@ -382,6 +418,78 @@ const main = async () => {
     assert.match(results[0].textContent, /甲文件\.pdf/);
     assert.match(results[0].textContent, /L1–L9/);
     assert.match(results[1].textContent, /乙文件\.pdf/);
+  } else if (caseName === 'facts-listed') {
+    // 13-A: claimed and verified render as distinct verbatim labels; full,
+    // missing and hash-only sources are each stated as-is.
+    await factsFlow();
+    assert.match(detail(), /事实状态与来源/);
+    const items = factItems();
+    assert.equal(items.length, 3);
+    assert.match(items[0].textContent, /事实 #11/);
+    assert.match(items[0].textContent, /已记录，待核验/);
+    assert.ok(!items[0].textContent.includes('已核验'));
+    assert.match(items[1].textContent, /事实 #12/);
+    assert.match(items[1].textContent, /已核验/);
+    assert.ok(!items[1].textContent.includes('已记录，待核验'));
+    const badges = findAll(el => hasClass(el, 'facts-tree-fact-status'));
+    assert.deepEqual(badges.map(el => el.textContent),
+      ['已记录，待核验', '已核验', '已记录，待核验']);
+    assert.ok(hasClass(badges[0], 'facts-tree-fact-status-claimed'));
+    assert.ok(hasClass(badges[1], 'facts-tree-fact-status-verified'));
+    // Full source: name, page and span shown.
+    assert.match(items[0].textContent, /三季报\.pdf/);
+    assert.match(items[0].textContent, /页码4/);
+    assert.match(items[0].textContent, /坐标第2段/);
+    assert.match(items[0].textContent, /值1200 万元/);
+    // Null source: every locator field is stated as 未记录, none fabricated.
+    assert.match(items[1].textContent, /来源未记录/);
+    assert.match(items[1].textContent, /页码未记录/);
+    assert.match(items[1].textContent, /坐标未记录/);
+    // Hash-only source: the stable hash stands in for the missing name.
+    assert.match(items[2].textContent, /来源哈希 deadbeefcafe/);
+    assert.match(items[2].textContent, /页码未记录/);
+    assert.match(items[2].textContent, /值32%/);
+    // The leaf body stays untouched.
+    assert.match(detail(), /# 标题/);
+    assert.match(status(), /叶子 L-0104 · 已生成/);
+  } else if (caseName === 'facts-empty') {
+    // An empty array means the leaf currently cites no formal facts.
+    await factsFlow({ ...LEAF_FACTS, facts: [] });
+    assert.match(detail(), /事实状态与来源/);
+    assert.match(detail(), /该叶当前无正式引用事实/);
+    assert.equal(factItems().length, 0);
+    assert.match(detail(), /# 标题/);
+  } else if (caseName === 'facts-legacy') {
+    // A ready response without the facts array (legacy) skips the block.
+    const legacy = { ...LEAF_FACTS };
+    delete legacy.facts;
+    await factsFlow(legacy);
+    assert.ok(!detail().includes('事实状态与来源'));
+    assert.equal(factItems().length, 0);
+    assert.match(detail(), /# 标题/);
+  } else if (caseName === 'facts-malicious') {
+    // Hostile fields stay plain text; an unknown status renders raw and is
+    // never mapped onto a known label.
+    const evil = { ...LEAF_FACTS, facts: [
+      { fact_id: 21, status: '<b>verified</b>',
+        entity: '<img src=x onerror=alert(1)>甲',
+        attribute: '营业收入<script>alert(2)</script>', period: '2026Q3',
+        value: '<b>1200</b>', value_type: 'text', unit: null,
+        source: { file_hash: 'abc', original_name: '<img src=y onerror=alert(3)>报表.pdf',
+                  page: '<b>4</b>', span: '<script>alert(4)</script>' } },
+    ] };
+    await factsFlow(evil);
+    assert.equal(findAll(el => el.tagName === 'img').length, 0);
+    assert.equal(findAll(el => el.tagName === 'b').length, 0);
+    assert.equal(findAll(el => el.tagName === 'script').length, 0);
+    const items = factItems();
+    assert.equal(items.length, 1);
+    assert.match(items[0].textContent, /<img src=x onerror=alert\(1\)>甲/);
+    assert.match(items[0].textContent, /<b>verified<\/b>/);
+    assert.ok(!items[0].textContent.includes('已核验'));
+    assert.ok(!items[0].textContent.includes('已记录，待核验'));
+    assert.match(items[0].textContent, /<img src=y onerror=alert\(3\)>报表\.pdf/);
+    assert.match(items[0].textContent, /<script>alert\(4\)<\/script>/);
   } else {
     throw new Error('unknown case: ' + caseName);
   }
@@ -397,6 +505,7 @@ main().catch(error => { console.error(error); process.exit(1); });
     "sources-listed", "leaf-no-sources", "source-available", "source-ref-encoding",
     "source-unavailable", "source-no-lines", "source-http-error", "source-network-error",
     "source-malicious", "source-parallel",
+    "facts-listed", "facts-empty", "facts-legacy", "facts-malicious",
 ])
 def test_facts_tree_ui_script(tmp_path, case):
     node = shutil.which("node")

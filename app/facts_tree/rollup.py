@@ -1,10 +1,39 @@
 """Gated mechanical rollups. No trigger, employee call or semantic inference."""
 import hashlib
+import json
 
 from ..memory.company_facts.l1_brief import projection_lock, publish_pair, read_optional
 from ..memory.company_facts import numeric_guard as numbers
 from .leaf_store import LeafRejected, enabled, parse_markdown, prose, FOOTNOTE, DEFINITION, numeric_tokens, table_rows
 from .uris import tree_doc_uri, trunk_doc_uri
+
+
+def _safe(text):
+    """Single-line display text: stored coordinates are shown, never re-guessed."""
+    return ' '.join(str(text).split())
+
+
+def _span_text(span):
+    """Stable locator/ranges of a structured span, else the raw stored text."""
+    if span is None:
+        return ''
+    if not isinstance(span, str):
+        return _safe(span)
+    try:
+        parsed = json.loads(span)
+    except ValueError:
+        return _safe(span)
+    if not isinstance(parsed, dict):
+        return _safe(span)
+    parts = []
+    locator = parsed.get('source_loc')
+    if isinstance(locator, str) and locator.strip():
+        parts.append(_safe(locator))
+    ranges = parsed.get('ranges')
+    if (isinstance(ranges, list) and ranges and all(
+            isinstance(r, list) and len(r) == 2 and all(type(i) is int for i in r) for r in ranges)):
+        parts.append('lines ' + ','.join(f'{r[0]}-{r[1]}' for r in ranges))
+    return ' '.join(parts) if parts else _safe(span)
 
 
 def validate_rollup(markdown, leaves):
@@ -85,20 +114,77 @@ class FactsTreeRollup:
             excerpt += '\n\n' + '\n'.join(definitions)
         return FOOTNOTE.sub(lambda m: f'[^{code}-{m.group(1)}]', excerpt)
 
+    def _fact_annotations(self, company, code):
+        """Decision 13A status/source footnotes of one leaf's formal fact refs.
+
+        The latest revision's fact_ids are re-read from the ledger at
+        projection time. A reference that no longer resolves to a current
+        claimed/verified fact of this company (missing, superseded, expired
+        or any other status), or whose source file is gone, fails the whole
+        projection closed instead of being summarized as a normal fact.
+        Statuses are copied verbatim; claimed is never shown as verified.
+        """
+        revision = self.store.db.execute('SELECT fact_ids FROM leaf_revisions WHERE company_id=? AND leaf_code=? '
+                                         'ORDER BY version DESC LIMIT 1', (company, code)).fetchone()
+        if revision is None:
+            raise LeafRejected('active leaf has no revision')
+        try:
+            refs = json.loads(revision['fact_ids'])
+        except ValueError as exc:
+            raise LeafRejected('leaf revision fact references are damaged') from exc
+        if not isinstance(refs, list) or any(type(ref) is not int or ref < 1 for ref in refs):
+            raise LeafRejected('leaf revision fact references are damaged')
+        lines = []
+        for ref in sorted(set(refs)):
+            fact = self.store.db.execute('SELECT company_id,status,superseded_by,valid_to,source_file,source_page,'
+                                         'source_span FROM facts WHERE id=?', (ref,)).fetchone()
+            if (fact is None or fact['company_id'] != company or fact['status'] not in ('claimed', 'verified')
+                    or fact['superseded_by'] is not None or fact['valid_to'] is not None):
+                raise LeafRejected('referenced fact is not a current claimed/verified fact')
+            source = self.store.db.execute('SELECT original_name FROM source_files WHERE file_hash=?',
+                                           (fact['source_file'],)).fetchone() if fact['source_file'] else None
+            if source is None:
+                raise LeafRejected('referenced fact source is missing')
+            parts = [f'F{ref} 状态：' + fact['status'], '来源：' + _safe(source['original_name'])]
+            if fact['source_page'] is not None:
+                parts.append(f"第{fact['source_page']}页")
+            span = _span_text(fact['source_span'])
+            if span:
+                parts.append('坐标：' + span)
+            lines.append(f'[^{code}-f{ref}]: ' + '；'.join(parts))
+        return lines
+
+    @staticmethod
+    def _annotated(excerpt, notes):
+        """Append status/source footnotes directly under their own leaf entry.
+
+        Definition lines sit outside the prose the numeric guard scans, so
+        stored page/span coordinates are shown verbatim, never rewritten to
+        pass it. A label already present in the excerpt collides with a leaf
+        footnote and fails closed rather than silently redefining it.
+        """
+        if not notes:
+            return excerpt
+        for line in notes:
+            if line.split(']:', 1)[0] + ']' in excerpt:
+                raise LeafRejected('fact annotation label collides with a leaf footnote')
+        return excerpt + '\n\n' + '\n'.join(notes)
+
     def _render_trunk(self, leaves):
         briefs, guides = [], []
         for uri, content, meta, sections in leaves:
+            notes = self._fact_annotations(meta['company_id'], meta['leaf_code'])
             if meta.get('schema_version') == 2:
                 brief = f"# {meta['title']}\n\n{sections['内容']}"
                 guide = f"[{meta['title']}]({uri})"
-                briefs.append(self._excerpt(content, brief, meta['leaf_code']))
-                guides.append(guide)
+                briefs.append(self._annotated(self._excerpt(content, brief, meta['leaf_code']), notes))
+                guides.append(self._annotated(guide, notes))
                 continue
             brief = f"# {meta['title']}\n\n{sections['概览']}\n\n{sections['正文']}"
             guide = (f"[{meta['title']}]({uri})\n\n"
                      f"{sections['概览'].splitlines()[0] if sections['概览'] else ''}\n\n{meta['latest_period']}")
-            briefs.append(self._excerpt(content, brief, meta['leaf_code']))
-            guides.append(self._excerpt(content, guide, meta['leaf_code']))
+            briefs.append(self._annotated(self._excerpt(content, brief, meta['leaf_code']), notes))
+            guides.append(self._annotated(self._excerpt(content, guide, meta['leaf_code']), notes))
         return ('\n\n'.join(briefs) + '\n', '\n\n'.join(guides) + '\n') if leaves else (None, None)
 
     def consume_notifications(self, *, company_id, fence=None):

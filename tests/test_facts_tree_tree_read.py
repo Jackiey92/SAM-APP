@@ -6,13 +6,17 @@ import sqlite3
 import pytest
 
 from app import settings
+from app.db.database import init_db
 from app.facts_tree.company_binding import CompanyBindingStore
 from app.facts_tree.fact_identity import FactIdentityStore
 from app.facts_tree.fact_placements import FactPlacementStore
+from app.facts_tree.leaf_store import LeafPublishService
 from app.facts_tree.rollup import FactsTreeRollup
 from app.facts_tree.template_packs import load_pack
 from app.facts_tree.tree_read import TreeReadError, TreeReadService
+from app.facts_tree.uris import leaf_uri
 from app.memory import paths
+from app.memory.provider import LocalVectorMemoryProvider
 from app.module_tree import MODULES
 from tests.test_facts_tree_leaves import kernel, artifact, publish, COMPANY, SHA
 
@@ -480,3 +484,370 @@ def test_empty_reference_leaf_unaffected_by_out_of_scope_damage(kernel, monkeypa
         # The citation-carrying tree/trunk reads still fail closed on the damage.
         expect_consistency(service, lambda: service.read_tree(COMPANY),
                            lambda: service.read_trunk(COMPANY, 'bizov'))
+
+
+# -- DEC-091 option A slice A: search_leaves, one same-file read snapshot --
+
+class SearchEmbedding:
+    dim, embedder, model_version = 2, 'synthetic', 'v1'
+    def embed_texts(self, texts): return [[1., 1.] for _ in texts]
+    def embed_query(self, text): return [1., 1.]
+
+
+@pytest.fixture
+def vector_kernel(tmp_path, monkeypatch):
+    """FactsTree fixture whose memory port shares the ledger's SQLite file.
+
+    search_leaves serves m1_documents/m1_chunks through the read service's own
+    connection, so the synthetic memory here is a LocalVectorMemoryProvider on
+    the very same file the LeafPublishService ledger uses.
+    """
+    monkeypatch.setattr(settings, 'SAM_FACTS_TREE', True)
+    database = tmp_path / 'ledger.db'
+    init_db(database, embedding=SearchEmbedding())
+    memory = LocalVectorMemoryProvider(database, embedding=SearchEmbedding(), company_id=COMPANY)
+    service = LeafPublishService(database, memory, company_id=COMPANY)
+    service.binding.register(COMPANY, '临时测试公司')
+    service.db.execute('INSERT INTO source_files(file_hash,original_name,size_bytes,storage_path,uploaded_at) VALUES(?,?,?,?,?)',
+                       (SHA, 'sample.docx', 1, '/unused', '2026-10-14'))
+    service.db.execute('''INSERT INTO facts(company_id,entity,attribute,period,value,unit,source_file,module_key,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?)''', (COMPANY, '临时主体', '测试指标', '2025-01', '9', '个', SHA, 'bizov', '2026-10-14'))
+    service.db.commit()
+    yield service
+    service.close()
+    memory.close()
+
+
+def indexed(kernel):
+    """Publish the current L-bizov-08 leaf and place its cited fact there."""
+    publish(kernel)
+    attribute(kernel)
+    return kernel.db.execute('SELECT uri FROM facts_tree_leaf_index WHERE leaf_code=?',
+                             ('L-bizov-08',)).fetchone()['uri']
+
+
+def test_search_leaves_finds_current_leaf(vector_kernel):
+    uri = indexed(vector_kernel)
+    with reader(vector_kernel) as service:
+        assert service.search_leaves(COMPANY, '测试') == [uri]
+        assert service.search_leaves(COMPANY, '   ') == [uri]  # no vector step, sorted URIs
+        assert service.search_leaves(COMPANY, '测试', top_k=1) == [uri]
+
+
+def test_search_leaves_fact_fields_exact_match(vector_kernel):
+    uri = indexed(vector_kernel)
+    exact = {'period': '2025-01', 'entity': '临时主体', 'attribute': '测试指标', 'unit': '个'}
+    with reader(vector_kernel) as service:
+        assert service.search_leaves(COMPANY, '测试', filters=exact) == [uri]
+        for key in exact:  # one mismatched value empties the whole result
+            assert service.search_leaves(COMPANY, '测试', filters={**exact, key: '不匹配'}) == []
+
+
+@pytest.mark.parametrize('filters,found', [
+    ({'trunk_code': 'bizov'}, True),
+    ({'trunk_code': 'hr'}, False),
+    ({'leaf_code': 'L-bizov-08'}, True),
+    ({'leaf_code': 'L-hr-01'}, False),
+])
+def test_search_leaves_trunk_leaf_filters(vector_kernel, filters, found):
+    uri = indexed(vector_kernel)
+    with reader(vector_kernel) as service:
+        result = service.search_leaves(COMPANY, '测试', filters=filters)
+        assert result == ([uri] if found else [])
+
+
+@pytest.mark.parametrize('filters,category,status', [
+    ({'trunk_code': 'hr', 'leaf_code': 'L-bizov-08'}, 'invalid_filter', 400),  # wrong pair
+    ({'trunk_code': 'nope'}, 'unknown_trunk', 404),
+    ({'leaf_code': 'L-bizov-99'}, 'unknown_leaf', 404),
+    ({'module_key': 'bizov'}, 'invalid_filter', 400),  # legacy field
+    ({'company_id': COMPANY}, 'invalid_filter', 400),  # client company scope
+    ({'unknown': 'x'}, 'invalid_filter', 400),
+    ({'entity': ''}, 'invalid_filter', 400),
+    ({'entity': '   '}, 'invalid_filter', 400),
+    ({'entity': 1}, 'invalid_filter', 400),
+    ({'entity': 'x' * 513}, 'invalid_filter', 400),
+    (['entity'], 'invalid_filter', 400),  # not a mapping at all
+])
+def test_search_leaves_rejects_bad_filters(vector_kernel, filters, category, status):
+    indexed(vector_kernel)
+    with reader(vector_kernel) as service:
+        with pytest.raises(TreeReadError) as error:
+            service.search_leaves(COMPANY, '测试', filters=filters)
+        assert (error.value.category, error.value.status) == (category, status)
+
+
+@pytest.mark.parametrize('code', ['L-bizov-07', 'L-hr-01'])  # wrong leaf; wrong trunk
+def test_search_leaves_wrong_placement_fails_closed(vector_kernel, code):
+    publish(vector_kernel)
+    attribute(vector_kernel, code=code)  # placed elsewhere, cited by L-bizov-08
+    with reader(vector_kernel) as service:
+        with pytest.raises(TreeReadError) as error:  # whole call fails, no partial URIs
+            service.search_leaves(COMPANY, '测试')
+        assert (error.value.category, error.value.status) == ('consistency_failed', 409)
+
+
+def test_search_leaves_unbound_fails_closed(vector_kernel):
+    with reader(vector_kernel) as service:
+        with pytest.raises(TreeReadError) as error:
+            service.search_leaves('acc-unbound', '测试')
+        assert (error.value.category, error.value.status) == ('unbound_company', 404)
+
+
+def test_search_leaves_disabled_gate_fails_closed(vector_kernel, monkeypatch):
+    monkeypatch.setattr(settings, 'SAM_FACTS_TREE', False)
+    with pytest.raises(TreeReadError) as error:
+        reader(vector_kernel)
+    assert (error.value.category, error.value.status) == ('facts_tree_disabled', 503)
+
+
+def test_search_leaves_requires_joined_memory_store(kernel):
+    """The DocumentPort fixture keeps documents outside the ledger database:
+    search_leaves reports the conflict and refuses any cross-store read."""
+    indexed(kernel)
+    with reader(kernel) as service:
+        with pytest.raises(TreeReadError) as error:
+            service.search_leaves(COMPANY, '测试')
+        assert (error.value.category, error.value.status) == ('storage_conflict', 503)
+
+
+def test_search_leaves_never_writes(vector_kernel):
+    indexed(vector_kernel)
+    tables = {r[0] for r in vector_kernel.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    revisions = vector_kernel.db.execute('SELECT count(*) FROM leaf_revisions').fetchone()[0]
+    documents = [tuple(r) for r in vector_kernel.db.execute('SELECT * FROM m1_documents ORDER BY uri')]
+    chunks = [tuple(r) for r in vector_kernel.db.execute('SELECT * FROM m1_chunks ORDER BY chunk_id')]
+    with reader(vector_kernel) as service:
+        assert service.search_leaves(COMPANY, '测试')
+        assert service.search_leaves(COMPANY, '', filters={'trunk_code': 'bizov'})
+        with pytest.raises(sqlite3.OperationalError, match='readonly'):
+            service.db.execute('CREATE TABLE forbidden (id INTEGER)')
+    assert vector_kernel.db.execute('SELECT count(*) FROM leaf_revisions').fetchone()[0] == revisions
+    assert [tuple(r) for r in vector_kernel.db.execute('SELECT * FROM m1_documents ORDER BY uri')] == documents
+    assert [tuple(r) for r in vector_kernel.db.execute('SELECT * FROM m1_chunks ORDER BY chunk_id')] == chunks
+    assert {r[0] for r in vector_kernel.db.execute("SELECT name FROM sqlite_master WHERE type='table'")} == tables
+
+
+# -- 决策13-A: leaf reads carry per-fact status and source-location metadata --
+
+def test_leaf_read_returns_fact_status_and_source(kernel):
+    publish(kernel)
+    attribute(kernel)
+    kernel.db.execute("UPDATE facts SET source_page=7, source_span='docx:body/77/paragraph' WHERE id=1")
+    kernel.db.commit()
+    with reader(kernel) as service:
+        leaf = service.read_leaf(COMPANY, 'L-bizov-08')
+    assert [fact['fact_id'] for fact in leaf['facts']] == [1]
+    fact = leaf['facts'][0]
+    assert fact['status'] == 'verified'
+    assert (fact['entity'], fact['attribute'], fact['period']) == ('临时主体', '测试指标', '2025-01')
+    assert (fact['value'], fact['unit']) == ('9', '个')
+    source = fact['source']
+    assert source['file_hash'] == SHA and source['original_name'] == 'sample.docx'
+    assert source['page'] == 7 and source['span'] == 'docx:body/77/paragraph'
+
+
+def test_leaf_read_serves_claimed_fact_status(kernel):
+    publish(kernel)
+    attribute(kernel)
+    kernel.db.execute("UPDATE facts SET status='claimed' WHERE id=1")
+    kernel.db.commit()
+    with reader(kernel) as service:
+        fact = service.read_leaf(COMPANY, 'L-bizov-08')['facts'][0]
+        assert fact['status'] == 'claimed'
+
+
+@pytest.mark.parametrize('damage', [
+    "UPDATE facts SET status='inferred' WHERE id=1",
+    "UPDATE facts SET valid_to='2025-12' WHERE id=1",
+    "UPDATE facts SET superseded_by=1 WHERE id=1",
+])
+def test_unreadable_formal_fact_fails_closed(kernel, damage):
+    publish(kernel)
+    attribute(kernel)
+    kernel.db.execute(damage)
+    kernel.db.commit()
+    with reader(kernel) as service:
+        expect_consistency(service, lambda: service.read_leaf(COMPANY, 'L-bizov-08'))
+
+
+def test_fact_without_source_locator_is_never_fabricated(kernel):
+    publish(kernel)
+    attribute(kernel)
+    kernel.db.execute("UPDATE facts SET source_file=NULL, source_page=NULL, source_span=NULL WHERE id=1")
+    kernel.db.commit()
+    with reader(kernel) as service:
+        assert service.read_leaf(COMPANY, 'L-bizov-08')['facts'][0]['source'] is None
+
+
+# -- 决策13-A: read_fact, the verified single-fact read seam (F-001方案A) --
+
+def test_read_fact_returns_status_source_and_leaf(kernel):
+    publish(kernel)
+    attribute(kernel)
+    kernel.db.execute("UPDATE facts SET source_page=3, source_span='text/0' WHERE id=1")
+    kernel.db.commit()
+    with reader(kernel) as service:
+        result = service.read_fact(COMPANY, 1)
+    assert result['node'] == 'fact' and result['code'] == 'F1'
+    assert result['company_id'] == COMPANY and result['binding']['template_pack'] == 'generic'
+    fact = result['fact']
+    assert fact['fact_id'] == 1 and fact['status'] == 'verified'
+    assert (fact['entity'], fact['attribute'], fact['period'], fact['value'], fact['unit']) == \
+        ('临时主体', '测试指标', '2025-01', '9', '个')
+    assert fact['source']['file_hash'] == SHA and fact['source']['original_name'] == 'sample.docx'
+    assert fact['source']['page'] == 3 and fact['source']['span'] == 'text/0'
+    leaf = result['leaf']
+    assert (leaf['trunk'], leaf['code']) == ('bizov', 'L-bizov-08')
+    assert leaf['uri'] == leaf_uri(COMPANY, GENERIC, GENERIC.leaf_for('L-bizov-08'))
+
+
+def test_read_fact_allows_claimed(kernel):
+    publish(kernel)
+    attribute(kernel)
+    kernel.db.execute("UPDATE facts SET status='claimed' WHERE id=1")
+    kernel.db.commit()
+    with reader(kernel) as service:
+        assert service.read_fact(COMPANY, 1)['fact']['status'] == 'claimed'
+
+
+@pytest.mark.parametrize('damage', [
+    "UPDATE facts SET status='inferred' WHERE id=1",
+    "UPDATE facts SET valid_to='2025-12' WHERE id=1",
+    "UPDATE facts SET superseded_by=1 WHERE id=1",
+])
+def test_read_fact_unreadable_rows_fail_closed(kernel, damage):
+    publish(kernel)
+    attribute(kernel)
+    kernel.db.execute(damage)
+    kernel.db.commit()
+    with reader(kernel) as service:
+        expect_consistency(service, lambda: service.read_fact(COMPANY, 1))
+
+
+def test_read_fact_unknown_foreign_and_out_of_scope(kernel):
+    publish(kernel)
+    attribute(kernel)
+    binding = CompanyBindingStore(db_path(kernel))
+    binding.register('acc-other', '其他公司')
+    binding.close()
+    with reader(kernel) as service:
+        with pytest.raises(TreeReadError) as error:
+            service.read_fact(COMPANY, 99)
+        assert (error.value.category, error.value.status) == ('unknown_fact', 404)
+        with pytest.raises(TreeReadError) as error:  # fact 1 belongs to COMPANY
+            service.read_fact('acc-other', 1)
+        assert (error.value.category, error.value.status) == ('unknown_fact', 404)
+    with reader(kernel, company=COMPANY) as service:
+        with pytest.raises(TreeReadError) as error:  # company choice is refused
+            service.read_fact('acc-other', 1)
+        assert (error.value.category, error.value.status) == ('company_scope_violation', 400)
+
+
+def test_read_fact_unbound_fails_closed(kernel):
+    with reader(kernel) as service:
+        with pytest.raises(TreeReadError) as error:
+            service.read_fact('acc-unbound', 1)
+        assert (error.value.category, error.value.status) == ('unbound_company', 404)
+
+
+def test_read_fact_requires_identity_and_placement(kernel):
+    with reader(kernel) as service:  # fact 1 has no identity at all
+        expect_consistency(service, lambda: service.read_fact(COMPANY, 1))
+    FactIdentityStore(kernel.db).register_initial(COMPANY, 1, '归属测试', '身份登记')
+    with reader(kernel) as service:  # active identity, but no placement at all
+        expect_consistency(service, lambda: service.read_fact(COMPANY, 1))
+
+
+@pytest.mark.parametrize('code', ['L-bizov-07', 'L-hr-01'])  # wrong leaf; wrong trunk
+def test_read_fact_placement_without_formal_reference_fails_closed(kernel, code):
+    publish(kernel)
+    attribute(kernel, code=code)  # placed elsewhere; no leaf revision cites fact 1
+    with reader(kernel) as service:
+        expect_consistency(service, lambda: service.read_fact(COMPANY, 1))
+
+
+def test_read_fact_requires_current_leaf_formal_reference(kernel):
+    attribute(kernel)  # placed on L-bizov-08, but the leaf was never published
+    with reader(kernel) as service:
+        expect_consistency(service, lambda: service.read_fact(COMPANY, 1))
+    publish(kernel)
+    kernel.db.execute("UPDATE leaf_revisions SET fact_ids='[]'")
+    kernel.db.commit()
+    with reader(kernel) as service:  # the current revision no longer cites it
+        expect_consistency(service, lambda: service.read_fact(COMPANY, 1))
+
+
+def test_read_fact_stale_binding_fails_closed(kernel):
+    publish(kernel)
+    attribute(kernel)  # placement recorded under binding revision 1
+    meta = kernel.db.execute('SELECT * FROM company_tree_meta WHERE company_id=?', (COMPANY,)).fetchone()
+    kernel.db.execute('INSERT INTO company_template_binding_history VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                      (COMPANY, 2, meta['template_pack'], meta['pack_version'], meta['pack_digest'],
+                       meta['template_pack'], meta['pack_version'], meta['pack_digest'],
+                       '2026-10-20', '归属测试', '合成换绑', None, None, 'rebind'))
+    kernel.db.execute('UPDATE company_tree_meta SET binding_revision=2 WHERE company_id=?', (COMPANY,))
+    projection = json.loads(kernel.db.execute(
+        'SELECT content FROM company_tree_meta_projection WHERE company_id=?', (COMPANY,)).fetchone()[0])
+    projection['binding_revision'] = 2
+    kernel.db.execute('UPDATE company_tree_meta_projection SET content=? WHERE company_id=?',
+                      (json.dumps(projection, ensure_ascii=False, sort_keys=True), COMPANY))
+    kernel.db.commit()
+    with reader(kernel) as service:  # placement binding revision 1 is no longer current
+        expect_consistency(service, lambda: service.read_fact(COMPANY, 1))
+
+
+def test_read_fact_never_writes(kernel):
+    publish(kernel)
+    attribute(kernel)
+    ledger = Path(db_path(kernel)).read_bytes()
+    writes = kernel.memory.writes
+    with reader(kernel) as service:
+        assert service.read_fact(COMPANY, 1)['fact']['fact_id'] == 1
+        with pytest.raises(sqlite3.OperationalError, match='readonly'):
+            service.db.execute('CREATE TABLE forbidden (id INTEGER)')
+    assert kernel.memory.writes == writes
+    assert Path(db_path(kernel)).read_bytes() == ledger
+
+
+# -- 决策13-A: fact-field filters match claimed and verified, exclude the rest --
+
+def test_search_leaves_fact_filters_match_claimed(vector_kernel):
+    uri = indexed(vector_kernel)
+    vector_kernel.db.execute("UPDATE facts SET status='claimed' WHERE id=1")
+    vector_kernel.db.commit()
+    with reader(vector_kernel) as service:
+        assert service.search_leaves(COMPANY, '测试', filters={'entity': '临时主体'}) == [uri]
+
+
+@pytest.mark.parametrize('damage', [
+    "UPDATE facts SET status='inferred' WHERE id=1",
+    "UPDATE facts SET valid_to='2025-12' WHERE id=1",
+    "UPDATE facts SET superseded_by=1 WHERE id=1",
+])
+def test_search_leaves_fact_filters_exclude_unreadable(vector_kernel, damage):
+    indexed(vector_kernel)
+    vector_kernel.db.execute(damage)
+    vector_kernel.db.commit()
+    with reader(vector_kernel) as service:
+        assert service.search_leaves(COMPANY, '测试', filters={'entity': '临时主体'}) == []
+
+
+@pytest.mark.parametrize('damage', [
+    "UPDATE facts SET valid_to='2025-12' WHERE id=1",
+    "UPDATE facts SET superseded_by=1 WHERE id=1",
+])
+def test_search_leaves_stale_formal_reference_fails_closed(vector_kernel, damage):
+    indexed(vector_kernel)  # the cited row is no longer the current revision
+    vector_kernel.db.execute(damage)
+    vector_kernel.db.commit()
+    with reader(vector_kernel) as service:
+        expect_consistency(service, lambda: service.search_leaves(COMPANY, '测试'))
+
+
+def test_search_leaves_unfiltered_read_tolerates_inferred_status(vector_kernel):
+    uri = indexed(vector_kernel)  # inferred status breaks no identity/placement check;
+    vector_kernel.db.execute("UPDATE facts SET status='inferred' WHERE id=1")
+    vector_kernel.db.commit()
+    with reader(vector_kernel) as service:  # only fact-field filters exclude it
+        assert service.search_leaves(COMPANY, '测试') == [uri]

@@ -1,4 +1,6 @@
 """Mechanical rollups are opt-in and tested with temporary documents only."""
+import json
+
 import pytest
 
 from app import settings
@@ -188,6 +190,101 @@ def test_conflict_table_references_and_sources(kernel):
     for invalid in (text.replace('| F1 |', '| F2 |'), text.replace('| 9 |', '| 10 |'), text.replace('| [^one] |', '| 无 |')):
         with pytest.raises(LeafRejected): kernel.publish_conflict(markdown=invalid.replace('version: 1', 'version: 2'), **kwargs)
     assert kernel.db.execute('SELECT count(*) FROM leaf_revisions').fetchone()[0] == 1
+
+
+def test_rollup_marks_claimed_and_verified_with_source_next_to_leaf(kernel):
+    kernel.db.execute("UPDATE facts SET status='claimed', source_page=3, source_span='docx:body/77/paragraph' WHERE id=1")
+    kernel.db.execute("INSERT INTO facts(company_id,entity,attribute,period,value,unit,source_file,module_key,created_at) "
+                      "VALUES(?,?,?,?,?,?,?,?,?)", (COMPANY, '临时主体', '另一指标', '2025-01', '9', '个', SHA, 'bizov', '2026-10-14'))
+    kernel.db.commit()
+    publish(kernel)  # L-bizov-08 cites fact 1 (claimed)
+    publish(kernel, artifact(code='L-bizov-07', data=False), leaf_code='L-bizov-07', fact_ids=[2])  # cites fact 2 (verified)
+    rollup = FactsTreeRollup(kernel)
+    assert rollup.rollup_trunk(company_id=COMPANY, trunk='bizov')['changed']
+    assert rollup.rollup_tree(company_id=COMPANY)['changed']
+    brief = kernel.memory.read(paths.trunk_doc_uri(COMPANY, MODULES[1].directory, 'trunk-brief.md'))
+    guide = kernel.memory.read(paths.trunk_doc_uri(COMPANY, MODULES[1].directory, 'trunk-guide.md'))
+    claimed = '[^L-bizov-08-f1]: F1 状态：claimed；来源：sample.docx；第3页；坐标：docx:body/77/paragraph'
+    verified = '[^L-bizov-07-f2]: F2 状态：verified；来源：sample.docx'
+    for text in (brief, guide):
+        assert claimed in text and verified in text
+    # Each marker sits directly under its own leaf entry: L-bizov-07's marker
+    # precedes the next leaf heading; L-bizov-08's ends the document.
+    assert verified + '\n\n# 测试叶子' in brief
+    assert brief.endswith(claimed + '\n')
+    # The tree brief inherits the markers; claimed is never shown as verified.
+    assert kernel.memory.read(paths.tree_brief_uri(COMPANY)) == brief
+    assert 'F1 状态：verified' not in brief
+    assert '有9个。[^L-bizov-08-one]' in brief  # leaf prose untouched
+
+
+def test_rollup_claimed_only_fact_is_not_upgraded(kernel):
+    kernel.db.execute("UPDATE facts SET status='claimed' WHERE id=1")
+    kernel.db.commit()
+    publish(kernel)
+    rollup = FactsTreeRollup(kernel)
+    assert rollup.rollup_trunk(company_id=COMPANY, trunk='bizov')['changed']
+    assert rollup.rollup_tree(company_id=COMPANY)['changed']
+    brief = kernel.memory.read(paths.tree_brief_uri(COMPANY))
+    assert '[^L-bizov-08-f1]: F1 状态：claimed；来源：sample.docx' in brief
+    assert 'verified' not in brief
+
+
+def test_rollup_structured_span_shows_stable_locator_and_ranges(kernel):
+    uri = paths.trunk_doc_uri(COMPANY, MODULES[1].directory, 'trunk-brief.md')
+    span = json.dumps({'source_loc': 'docx:body/9/paragraph', 'quote': '有9个。', 'ranges': [[3, 5], [8, 9]]}, ensure_ascii=False)
+    kernel.db.execute("UPDATE facts SET source_span=? WHERE id=1", (span,))
+    kernel.db.commit()
+    publish(kernel)
+    rollup = FactsTreeRollup(kernel)
+    assert rollup.rollup_trunk(company_id=COMPANY, trunk='bizov')['changed']
+    brief = kernel.memory.read(uri)
+    assert '坐标：docx:body/9/paragraph lines 3-5,8-9' in brief
+    assert 'quote' not in brief  # witness payloads never leak into coordinates
+    # A structured span without stable locator/ranges falls back to raw text.
+    kernel.db.execute("UPDATE facts SET source_span=? WHERE id=1", ('{"quote":"注册资本100万"}',))
+    kernel.db.commit()
+    assert rollup.rollup_trunk(company_id=COMPANY, trunk='bizov')['changed']
+    assert '坐标：{"quote":"注册资本100万"}' in kernel.memory.read(uri)
+
+
+def test_rollup_coordinates_do_not_weaken_numeric_guard(kernel):
+    kernel.db.execute("UPDATE facts SET source_page=987654 WHERE id=1")  # absent from leaf text
+    kernel.db.commit()
+    publish(kernel)
+    rollup = FactsTreeRollup(kernel)
+    assert rollup.rollup_trunk(company_id=COMPANY, trunk='bizov')['changed']
+    uri = paths.trunk_doc_uri(COMPANY, MODULES[1].directory, 'trunk-brief.md')
+    brief = kernel.memory.read(uri)
+    assert '第987654页' in brief  # stored coordinate verbatim, never rewritten
+    validate_rollup(brief, [artifact()])  # footnote lines stay outside guarded prose
+    with pytest.raises(LeafRejected):
+        validate_rollup(brief + '\n有987654个。', [artifact()])
+
+
+@pytest.mark.parametrize('case', ['superseded', 'expired', 'inferred', 'missing-fact', 'missing-source'])
+def test_rollup_rejects_unusable_fact_references(kernel, case):
+    publish(kernel)
+    rollup = FactsTreeRollup(kernel)
+    rollup.rollup_trunk(company_id=COMPANY, trunk='bizov')
+    rollup.rollup_tree(company_id=COMPANY)
+    uri = paths.trunk_doc_uri(COMPANY, MODULES[1].directory, 'trunk-brief.md')
+    before = kernel.memory.read(uri)
+    if case == 'superseded':
+        kernel.db.execute("UPDATE facts SET superseded_by=id WHERE id=1")
+    elif case == 'expired':
+        kernel.db.execute("UPDATE facts SET valid_to='2026-01-01' WHERE id=1")
+    elif case == 'inferred':
+        kernel.db.execute("UPDATE facts SET status='inferred' WHERE id=1")
+    elif case == 'missing-fact':
+        kernel.db.execute("DELETE FROM facts WHERE id=1")
+    else:
+        kernel.db.execute("UPDATE facts SET source_file=NULL WHERE id=1")
+    kernel.db.commit()
+    with pytest.raises(LeafRejected): rollup.rollup_trunk(company_id=COMPANY, trunk='bizov')
+    with pytest.raises(LeafRejected): rollup.rollup_tree(company_id=COMPANY)
+    # Failed closed without a half product: the last good projection is untouched.
+    assert kernel.memory.read(uri) == before
 
 
 def test_conflict_address_collision_never_overwrites_previous(kernel):

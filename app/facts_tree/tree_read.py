@@ -17,14 +17,15 @@ import sqlite3
 
 from .. import settings
 from ..memory.company_facts.l1_brief import read_optional
-from ..memory.paths import identifier
+from ..memory.paths import FACTS_ROOT, Address, identifier
+from ..memory.projection import VectorProjection
 from ..storage.archive_paths import hash_relpath
 from .fact_placements import FactPlacementStore
 from .leaf_store import (DEFINITION, LeafPublishService, LeafRejected, parse_markdown,
                          prose, table_rows)
 from .rollup import FactsTreeRollup
 from .template_packs import load_pack
-from .uris import tree_doc_uri, trunk_doc_uri
+from .uris import leaf_uri, tree_doc_uri, trunk_doc_uri
 
 
 class TreeReadError(Exception):
@@ -107,6 +108,21 @@ def _binding_view(binding):
 def _leaf_view(leaf):
     return {'code': leaf.code, 'trunk': leaf.trunk, 'title': leaf.title,
             'shape': leaf.shape, 'scope': leaf.scope}
+
+
+# search_leaves accepts only these exact filter fields. Legacy module_key,
+# client company_id and every other key are rejected, never silently dropped
+# (a dropped filter would silently widen the search). Fact fields match the
+# current readable facts rows of a leaf's formal references exactly — never
+# full text, module_key or stale vector metadata.
+_SEARCH_FACT_FIELDS = ('period', 'entity', 'attribute', 'unit')
+_SEARCH_FILTER_FIELDS = frozenset({'trunk_code', 'leaf_code', *_SEARCH_FACT_FIELDS})
+_MAX_FILTER_VALUE = 512
+
+# Decision 13-A: employee-facing reads serve claimed and verified facts only.
+# inferred rows, superseded versions and expired facts are refused, and a
+# formal leaf reference to one of them fails the whole read closed.
+_READABLE_FACT_STATUS = ('claimed', 'verified')
 
 
 # FactsTree cloud snapshot placement contract (DEC-020 option A, CHG-038).
@@ -270,8 +286,15 @@ class TreeReadService:
             raise _consistency(f'leaf {code!r} index fact references are damaged')
         return set(refs)
 
-    def _verified_leaves(self, company, pack):
-        """Indexed template leaves cross-checked against revisions and content."""
+    def _verified_leaves(self, company, pack, *, read_content=None):
+        """Indexed template leaves cross-checked against revisions and content.
+
+        ``read_content`` defaults to the injected memory port; search_leaves
+        injects a reader of the same SQLite file's m1_documents through
+        self.db so the whole read stays inside the request's one snapshot.
+        """
+        read = read_content if read_content is not None else \
+            lambda uri: read_optional(self.memory, uri)
         rows = self.db.execute(
             'SELECT leaf_code,uri FROM facts_tree_leaf_index WHERE company_id=? ORDER BY leaf_code',
             (company,)).fetchall()
@@ -289,7 +312,7 @@ class TreeReadService:
                 'ORDER BY version DESC LIMIT 1', (company, code)).fetchone()
             if revision is None:
                 raise _consistency(f'indexed leaf {code!r} has no revision')
-            content = read_optional(self.memory, row['uri'])
+            content = read(row['uri'])
             if content is None:
                 raise _consistency(f'leaf {code!r} projection is missing')
             if hashlib.sha256(content.encode()).hexdigest() != revision['content_sha']:
@@ -313,7 +336,11 @@ class TreeReadService:
 
         A stored document that disagrees with (or outlives) the active leaves
         fails closed. A missing document while active leaves await the rollup
-        is reported as not generated; content is never fabricated here.
+        is reported as not generated; content is never fabricated here. A
+        re-derivation the rollup refuses (Decision 13-A: a formal reference
+        no longer resolves to a current claimed/verified fact) maps to the
+        same consistency failure — the whole read fails closed, never a
+        partial result with the offending fact silently skipped.
         """
         rollup = FactsTreeRollup(self.store)
         active = [(l['uri'], l['content'], l['meta'], l['sections']) for l in leaves if l['active']]
@@ -321,7 +348,12 @@ class TreeReadService:
         briefs, guides = [], []
         for trunk in pack.trunks:
             code = trunk['code']
-            brief, guide = rollup._render_trunk([l for l in active if l[2]['trunk'] == code])
+            try:
+                brief, guide = rollup._render_trunk([l for l in active if l[2]['trunk'] == code])
+            except LeafRejected as exc:
+                raise _consistency(
+                    f"trunk {code!r} projections of company {company!r} cannot be "
+                    f'rebuilt from the current facts: {exc}') from exc
             expected[trunk_doc_uri(company, pack, code, 'trunk-brief.md')] = brief
             expected[trunk_doc_uri(company, pack, code, 'trunk-guide.md')] = guide
             if brief:
@@ -447,6 +479,47 @@ class TreeReadService:
         return {'company_id': company, 'binding': None, 'node': node, 'code': code,
                 'state': 'unbound'}
 
+    def _fact_view(self, row):
+        """Employee-facing metadata of one currently readable fact row (13-A).
+
+        Status and content fields come straight from the ledger row; the
+        source locator is the row's own source_file/source_page/source_span
+        with the declared original name looked up in source_files. A damaged
+        or unresolvable locator stays None — coordinates are never fabricated
+        or repaired here.
+        """
+        where = f"fact {row['id']}"
+        if row['status'] not in _READABLE_FACT_STATUS:
+            raise _consistency(
+                f"{where} has status {row['status']!r}; only claimed/verified "
+                'facts are employee-readable')
+        if row['superseded_by'] is not None:
+            raise _consistency(f'{where} is superseded; stale fact rows are never served')
+        if row['valid_to'] is not None:
+            raise _consistency(f'{where} is expired; expired facts are never served')
+        source = None
+        if row['source_file'] is not None:
+            name = self.db.execute('SELECT original_name FROM source_files WHERE file_hash=?',
+                                   (row['source_file'],)).fetchone()
+            source = {'file_hash': row['source_file'],
+                      'original_name': None if name is None else name['original_name'],
+                      'page': row['source_page'], 'span': row['source_span']}
+        return {'fact_id': row['id'], 'status': row['status'], 'entity': row['entity'],
+                'attribute': row['attribute'], 'period': row['period'], 'value': row['value'],
+                'value_type': row['value_type'], 'unit': row['unit'], 'source': source}
+
+    def _leaf_facts(self, company, code, fact_ids):
+        """Per-fact metadata of one ready leaf's current formal references."""
+        if not fact_ids:
+            return []
+        marks = ','.join('?' * len(fact_ids))
+        rows = self.db.execute(
+            f'SELECT * FROM facts WHERE company_id=? AND id IN ({marks}) ORDER BY id',
+            (company, *sorted(fact_ids))).fetchall()
+        if len(rows) != len(fact_ids):
+            raise _consistency(f"leaf {code!r} formally references a missing fact row")
+        return [self._fact_view(row) for row in rows]
+
     def read_tree(self, company_id):
         with self._read_snapshot():
             return self._read_tree(company_id)
@@ -534,7 +607,8 @@ class TreeReadService:
         if row is None:
             return {'company_id': company, 'binding': _binding_view(binding), 'node': 'leaf',
                     'code': code, 'state': 'not_generated', 'leaf': _leaf_view(leaf),
-                    'uri': None, 'version': None, 'leaf_state': None, 'index': None, 'content': None}
+                    'uri': None, 'version': None, 'leaf_state': None, 'index': None,
+                    'content': None, 'facts': []}
         revision = self.db.execute(
             'SELECT version,content_sha,fact_ids FROM leaf_revisions '
             'WHERE company_id=? AND leaf_code=? '
@@ -553,11 +627,12 @@ class TreeReadService:
         if (meta['leaf_code'] != code or meta['trunk'] != leaf.trunk
                 or meta['company_id'] != company or meta['version'] != revision['version']):
             raise _consistency(f'leaf {code!r} projection metadata differs from the ledger')
+        fact_ids = self._fact_refs(code, revision['fact_ids'])
         self._verify_placements(
             company, binding,
-            [{'code': code, 'trunk': leaf.trunk,
-              'fact_ids': self._fact_refs(code, revision['fact_ids'])}],
+            [{'code': code, 'trunk': leaf.trunk, 'fact_ids': fact_ids}],
             lambda: self._company_fact_refs(company))
+        facts = self._leaf_facts(company, code, fact_ids)
         index = {field: str(meta[field]) for field in ('latest_period', 'created_at', 'updated_at')}
         index.update({'leaf_code': meta['leaf_code'], 'trunk': meta['trunk'], 'title': meta['title'],
                       'company_id': meta['company_id'], 'status': meta['status'],
@@ -566,7 +641,238 @@ class TreeReadService:
         return {'company_id': company, 'binding': _binding_view(binding), 'node': 'leaf',
                 'code': code, 'state': 'ready', 'leaf': _leaf_view(leaf), 'uri': row['uri'],
                 'version': revision['version'], 'leaf_state': meta['status'],
-                'index': index, 'content': content}
+                'index': index, 'content': content, 'facts': facts}
+
+    def read_fact(self, company_id, fact_id):
+        with self._read_snapshot():
+            return self._read_fact(company_id, fact_id)
+
+    def _read_fact(self, company_id, fact_id):
+        """Decision 13-A: one employee-readable fact through the verified tree seam.
+
+        The fact must belong to the injected company scope, be currently
+        readable (claimed/verified, not superseded, not expired), resolve to
+        the current revision of its own identity, hold a unique current
+        placement under the company's exact current binding, and be formally
+        referenced by that placement leaf's latest revision. The legacy
+        facts.module_key hint is never consulted: ownership comes from the
+        identity/placement ledgers only. Any identity, version or placement
+        mismatch fails the whole read closed; nothing is guessed, written or
+        repaired.
+        """
+        if type(fact_id) is not int or fact_id < 1:
+            raise TreeReadError('invalid_query', 400, 'fact id must be a positive integer')
+        company, bound = self._bound(company_id)
+        if bound is None:
+            raise TreeReadError('unbound_company', 404,
+                                'company has no verified template binding')
+        binding, pack = bound
+        where = f'fact {fact_id}'
+        row = self.db.execute('SELECT * FROM facts WHERE id=?', (fact_id,)).fetchone()
+        if row is None or row['company_id'] != company:
+            raise TreeReadError('unknown_fact', 404,
+                                f'fact {fact_id} is not in the company ledger')
+        view = self._fact_view(row)
+        mapping = self.db.execute(
+            'SELECT company_id,fact_uid FROM fact_revisions WHERE fact_row_id=?',
+            (fact_id,)).fetchone()
+        if mapping is None:
+            raise _consistency(f'{where} has no fact identity')
+        if mapping['company_id'] != company:
+            raise _consistency(f'{where} identity belongs to a different company')
+        if self._placements is None:  # missing ledger structure fails closed
+            raise _consistency(
+                f'placement ledger cannot be verified: {self._placements_error}')
+        try:
+            resolved = self._placements.resolve_current_identity(company, mapping['fact_uid'])
+        except ValueError as exc:
+            raise _consistency(
+                f'{where}: attribution ledger verification failed: {exc}') from exc
+        if resolved is None:
+            raise _consistency(
+                f'{where} resolves to an unknown identity; the ledger is inconsistent')
+        if resolved['fact_row_id'] != fact_id:
+            raise _consistency(
+                f'{where} is not the current revision of its identity; '
+                'stale fact references are never served')
+        placement = resolved['placement']
+        if placement is None:
+            raise _consistency(f'{where} has no current leaf placement')
+        leaf = pack.leaf_for(placement['leaf_code'])
+        if leaf is None or leaf.trunk != placement['trunk_code']:
+            raise _consistency(f'{where} is placed outside the current bound pack')
+        placed = (placement['pack_id'], placement['pack_version'],
+                  placement['manifest_sha256'], placement['binding_revision'])
+        if placed != (binding['template_pack'], binding['pack_version'],
+                      binding['pack_digest'], binding['binding_revision']):
+            raise _consistency(
+                f'{where} placement binding differs from the current company binding')
+        revision = self.db.execute(
+            'SELECT fact_ids FROM leaf_revisions WHERE company_id=? AND leaf_code=? '
+            'ORDER BY version DESC LIMIT 1', (company, leaf.code)).fetchone()
+        if revision is None:
+            raise _consistency(f"leaf {leaf.code!r} has no revision")
+        if fact_id not in self._fact_refs(leaf.code, revision['fact_ids']):
+            raise _consistency(f'{where} is not formally referenced by its current leaf')
+        return {'company_id': company, 'binding': _binding_view(binding), 'node': 'fact',
+                'code': f'F{fact_id}', 'fact': view,
+                'leaf': {'code': leaf.code, 'trunk': leaf.trunk, 'title': leaf.title,
+                         'uri': leaf_uri(company, pack, leaf)}}
+
+    def _require_joined_memory(self):
+        """search_leaves serves m1 content/vectors through its own connection.
+
+        Leaf content and vector candidates must join the request's one
+        read-only snapshot, so they are read from m1_documents/m1_chunks of
+        the same SQLite file through self.db — never self.memory.read() or
+        LocalVectorMemoryProvider.search(), which use other connections. A
+        memory port not backed by this exact file (or missing the projection
+        tables) is a hard conflict: reported and refused, never approximated
+        across connections.
+        """
+        database = getattr(self.memory, 'database', None)
+        embedding = getattr(self.memory, 'embedding', None)
+        files = {row[1]: row[2] for row in self.db.execute('PRAGMA database_list')}
+        main = files.get('main')
+        if (database is None or embedding is None or not main
+                or Path(database).resolve() != Path(main).resolve()):
+            raise TreeReadError(
+                'storage_conflict', 503,
+                'leaf search requires the memory store and the tree ledger in one '
+                'SQLite file readable through the service connection')
+        tables = {row[0] for row in self.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('m1_documents','m1_chunks')")}
+        if tables != {'m1_documents', 'm1_chunks'}:
+            raise TreeReadError(
+                'storage_conflict', 503,
+                'm1_documents/m1_chunks are not readable through the service connection')
+
+    @staticmethod
+    def _search_filters(pack, filters):
+        """Strict search filter validation against the verified bound pack."""
+        if filters is None:
+            return {}
+        if not isinstance(filters, dict):
+            raise TreeReadError('invalid_filter', 400, 'filters must be a mapping')
+        unknown = set(filters) - _SEARCH_FILTER_FIELDS
+        if unknown:
+            raise TreeReadError(
+                'invalid_filter', 400,
+                'unsupported leaf search filter: ' + ', '.join(sorted(map(repr, unknown))))
+        cleaned = {}
+        for key, value in filters.items():
+            if not isinstance(value, str) or not value.strip() or len(value) > _MAX_FILTER_VALUE:
+                raise TreeReadError('invalid_filter', 400,
+                                    f'filter {key!r} must be nonempty text of at most '
+                                    f'{_MAX_FILTER_VALUE} characters')
+            cleaned[key] = value
+        trunk, code = cleaned.get('trunk_code'), cleaned.get('leaf_code')
+        if trunk is not None and pack.trunk_for(trunk) is None:
+            raise TreeReadError('unknown_trunk', 404, f'trunk {trunk!r} is not in the bound pack')
+        if code is not None:
+            leaf = pack.leaf_for(code)
+            if leaf is None:
+                raise TreeReadError('unknown_leaf', 404, f'leaf {code!r} is not in the bound pack')
+            if trunk is not None and leaf.trunk != trunk:
+                raise TreeReadError('invalid_filter', 400,
+                                    f'leaf {code!r} does not belong to trunk {trunk!r}')
+        return cleaned
+
+    def _leaf_matches_facts(self, company, fact_ids, filters):
+        """Exact fact-field match on the leaf's current-revision fact rows.
+
+        The leaf qualifies when at least one of its formally referenced facts
+        is currently readable (claimed or verified, not superseded, not
+        expired) and matches every given fact field exactly. inferred,
+        superseded and expired rows never qualify a leaf.
+        """
+        fields = {key: filters[key] for key in _SEARCH_FACT_FIELDS if key in filters}
+        if not fields:
+            return True
+        if not fact_ids:
+            return False
+        marks = ','.join('?' * len(fact_ids))
+        clauses = ''.join(f' AND {key}=?' for key in fields)
+        row = self.db.execute(
+            f'SELECT 1 FROM facts WHERE company_id=? AND id IN ({marks})'
+            " AND status IN ('claimed','verified')"
+            ' AND superseded_by IS NULL AND valid_to IS NULL'
+            f'{clauses} LIMIT 1',
+            (company, *sorted(fact_ids), *fields.values())).fetchone()
+        return row is not None
+
+    def search_leaves(self, company_id, query, *, filters=None, top_k=20):
+        """Ranked formal leaf URIs of the bound pack, in one read snapshot.
+
+        DEC-091 option A core read: only formal leaves of the company's exact
+        current binding/pack, each verified end to end (latest revision,
+        content hash, frontmatter, formal pack URI, fact identity and unique
+        current placement) inside this service's single read-only SQLite
+        snapshot. A blank query skips vector retrieval and returns the
+        filtered URIs sorted; otherwise vector candidates come from
+        VectorProjection(self.db, self.memory.embedding) over the filtered
+        leaf documents and are deduplicated per URI by best score, tie-broken
+        by URI. Any inconsistency fails the whole call: no partial results,
+        no fallback pack, and nothing is written, backfilled or repaired.
+        """
+        with self._read_snapshot():
+            return self._search_leaves(company_id, query, filters=filters, top_k=top_k)
+
+    def _search_leaves(self, company_id, query, *, filters, top_k):
+        self._require_joined_memory()
+        company, bound = self._bound(company_id)
+        if bound is None:
+            raise TreeReadError('unbound_company', 404,
+                                'company has no verified template binding')
+        binding, pack = bound
+        filters = self._search_filters(pack, filters)
+        if not isinstance(query, str) or len(query) > 8192:
+            raise TreeReadError('invalid_query', 400,
+                                'query must be text of at most 8192 characters')
+        if type(top_k) is not int or not 1 <= top_k <= 100:
+            raise TreeReadError('invalid_query', 400, 'top_k must be between 1 and 100')
+
+        def m1_content(uri):
+            row = self.db.execute(
+                'SELECT content FROM m1_documents '
+                'WHERE company_id=? AND uri=? AND fact_json IS NULL',
+                (company, uri)).fetchone()
+            return None if row is None else row['content']
+
+        leaves = self._verified_leaves(company, pack, read_content=m1_content)
+        for entry in leaves:  # the indexed URI must be the pack's formal leaf URI
+            if entry['uri'] != leaf_uri(company, pack, entry['leaf']):
+                raise _consistency(
+                    f"leaf {entry['code']!r} index URI is not its formal pack URI")
+        trunk, code = filters.get('trunk_code'), filters.get('leaf_code')
+        scoped = [entry for entry in leaves
+                  if (trunk is None or entry['leaf'].trunk == trunk)
+                  and (code is None or entry['code'] == code)]
+        matched = [entry for entry in scoped
+                   if self._leaf_matches_facts(company, entry['fact_ids'], filters)]
+        self._verify_placements(
+            company, binding,
+            [{'code': entry['code'], 'trunk': entry['leaf'].trunk,
+              'fact_ids': entry['fact_ids']} for entry in matched],
+            lambda: {entry['code']: entry['fact_ids'] for entry in leaves})
+        uris = sorted(entry['uri'] for entry in matched)
+        if not query.strip() or not uris:
+            return uris[:top_k]
+        try:
+            projection = VectorProjection(self.db, self.memory.embedding)
+        except ValueError as exc:
+            raise TreeReadError(
+                'storage_conflict', 503,
+                f'vector projection cannot join the read snapshot: {exc}') from exc
+        address = Address(FACTS_ROOT.removesuffix('/'), 'facts', company, '', ())
+        rows = projection.search(address, query, top_k=top_k, document_uris=uris)
+        best = {}
+        for row in rows:
+            if row['uri'] not in best or row['score'] > best[row['uri']]:
+                best[row['uri']] = row['score']
+        ranked = sorted(best.items(), key=lambda item: (-item[1], item[0]))
+        return [uri for uri, _ in ranked[:top_k]]
 
     def _original_state(self, company, file_hash, objects_path, storage_paths):
         """Company-scoped availability of one cited original; never its bytes.
