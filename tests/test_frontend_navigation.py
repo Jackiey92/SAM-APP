@@ -27,15 +27,25 @@ def test_navigation_keeps_legacy_pages_and_owned_home(tmp_path: Path, monkeypatc
     assert page.status_code == 200
     html = page.get_data(as_text=True)
     assert 'class="nav-groups"' in html
-    assert html.count("nav-primary") == 6
+    assert html.count("nav-primary") == 5
     assert "业务概览" in html and "文件柜" in html
+    assert 'href="/facts"' in html and "事实库" in html
     assert 'href="/chat"' in html
-    assert 'href="/knowledge"' in html
+    # DEC-011: the legacy "知识库" nav entry is gone; /knowledge stays a compat route.
+    assert "知识库" not in html
+    assert 'href="/knowledge"' not in html
     assert 'class="nav-primary nav-disabled"' in html
     assert "日程" in html and "云盘" in html and "即将开放" in html
 
     # Existing screens remain reachable under their grouped links.
     for path in ("/overview", "/inbox", "/todos", "/facts", "/files", "/chat"):
+        assert client.get(path + "?company_id=empty").status_code == 200, path
+
+    # /knowledge compat routes still land on the app-owned home shell.
+    for path in ("/knowledge", "/knowledge/sources/abc123"):
+        compat = client.get(path + "?company_id=empty")
+        assert compat.status_code == 200, path
+        assert '<div class="screen active" id="overview">' in compat.get_data(as_text=True), path
         assert client.get(path + "?company_id=empty").status_code == 200, path
 
 
