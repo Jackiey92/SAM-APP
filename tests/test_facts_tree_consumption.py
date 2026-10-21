@@ -190,9 +190,23 @@ def test_upload_requires_explicit_bounded_totals(limits):
     with pytest.raises(ValueError):phase_limits({} if limits is None else {'SAM_MD_PHASE_LIMITS':json.dumps(limits)})
 
 
+def webapp_module():
+    from app import providers
+    real=providers.memory_provider
+    # Import-time stand-in: importing the Flask app must not load the local
+    # BGE vector model; the tests below inject their own memory explicitly.
+    providers.memory_provider=providers.LazyMemoryProvider
+    try:
+        from webapp import app as web
+    finally:
+        providers.memory_provider=real
+    web.memory_provider=real
+    return web
+
+
 @pytest.mark.parametrize('mapping_changes',[False,True])
 def test_actual_upload_gate_order_resume_subset_commit_not_full_legacy(mapped,tmp_path,monkeypatch,mapping_changes):
-    from webapp import app as web
+    web=webapp_module()
     import app.document_read.service as service
     store,d=mapped;register_job(store);cfg=configured(store,tmp_path)
     data=manifest(d);data.update(parse_summary=dict(status='parsed'),pages=[])
@@ -237,7 +251,7 @@ def test_actual_upload_gate_order_resume_subset_commit_not_full_legacy(mapped,tm
 
 
 def test_actual_md_todos_api_host_scope_no_numeric_resolve_and_snapshot(mapped,tmp_path,monkeypatch):
-    from webapp import app as web
+    web=webapp_module()
     from app import cloud_export
     store,d=mapped;pub,grants=setup(mapped);old=block(grants['0'])
     submit(pub,grants,[old],op='initial')
