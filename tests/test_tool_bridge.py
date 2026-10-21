@@ -101,6 +101,13 @@ if (!/exactly sam_memory_map\\(\\{\\}\\)/i.test(specs.sam_memory_map.description
 if (!/never pass limit/i.test(specs.sam_memory_search.description)) process.exit(8);
 if (specs.sam_memory_map.parameters.additionalProperties !== false || specs.sam_memory_search.parameters.additionalProperties !== false) process.exit(9);
 if (specs.sam_document_ingest.parameters.properties.file_hash.pattern !== '^[0-9a-f]{64}$') process.exit(10);
+const searchFilters = specs.sam_memory_search.parameters.properties.filters;
+if (searchFilters.additionalProperties !== false) process.exit(11);
+const filterKeys = Object.keys(searchFilters.properties);
+for (const key of ['period', 'entity', 'attribute', 'unit', 'trunk_code', 'leaf_code']) {
+  if (!filterKeys.includes(key) || searchFilters.properties[key].type !== 'string') process.exit(12);
+}
+if (filterKeys.includes('module_key') || filterKeys.includes('company_id')) process.exit(13);
 const got = p._private.extractParams(['call-id', {query:'q'}, {ctxOnly:true}, () => {}]);
 if (got.query !== 'q') process.exit(4);
 const fallback = p._private.extractParams(['call-id', {ctxOnly:true}, () => {}]);

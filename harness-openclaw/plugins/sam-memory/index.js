@@ -17,7 +17,7 @@ const TOOL_NAMES = [
 
 const schemas = {
   sam_memory_read: { type: "object", description: "Exactly one argument: uri. Scope is injected; never send company_id, thread_id, project, or scope.", additionalProperties: false, required: ["uri"], properties: { uri: { type: "string", pattern: "^sam://(facts|original)/", description: "A sam:// URI returned by sam_memory_map or sam_memory_search." } } },
-  sam_memory_search: { type: "object", description: "Search query with optional exact employee fact fields; omit uncertain filters. Company scope is injected.", additionalProperties: false, required: ["query"], properties: { query: { type: "string", minLength: 1 }, filters: { type: "object", additionalProperties: false, properties: Object.fromEntries(["period", "entity", "attribute", "unit", "module_key"].map(key => [key, { type: "string" }])) } } },
+  sam_memory_search: { type: "object", description: "Search query with optional exact employee fact filters (period, entity, attribute, unit, trunk_code, leaf_code); omit uncertain filters. Company scope is injected; never send company_id or module_key.", additionalProperties: false, required: ["query"], properties: { query: { type: "string", minLength: 1 }, filters: { type: "object", additionalProperties: false, properties: Object.fromEntries(["period", "entity", "attribute", "unit", "trunk_code", "leaf_code"].map(key => [key, { type: "string" }])) } } },
   sam_file_get: { type: "object", description: "Exactly one argument: file_hash. Scope is injected; do not send project or scope.", additionalProperties: false, required: ["file_hash"], properties: { file_hash: { type: "string", pattern: "^[0-9a-f]{64}$" } } },
   sam_memory_map: { type: "object", description: "Call with an empty object {}. It accepts no uri, project, scope, company_id, or thread_id; the current company map is injected by SAM.", additionalProperties: false, properties: {} },
   sam_conversation_read: { type: "object", additionalProperties: false, properties: { start: { type: "string" }, end: { type: "string" } } },
@@ -29,7 +29,7 @@ const schemas = {
 
 const TOOL_DESCRIPTIONS = {
   sam_memory_read: "Read one discovered SAM URI. Input must be exactly {uri}; scope is injected.",
-  sam_memory_search: "Search current-company memory. Input must be exactly {query}; never pass limit/project/scope.",
+  sam_memory_search: "Search current-company memory. Input must be exactly {query}; never pass limit/project/scope. Optional filters accept only period/entity/attribute/unit/trunk_code/leaf_code; never company_id or module_key.",
   sam_file_get: "Read metadata for one manifest-discovered file. Input must be exactly {file_hash}.",
   sam_memory_map: "Read the current-company navigation map. Call exactly sam_memory_map({}); no arguments are accepted.",
   sam_conversation_read: "Read current-thread conversation range. Optional input only {start,end}; scope is injected.",
