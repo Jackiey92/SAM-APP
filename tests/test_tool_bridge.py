@@ -2,6 +2,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from app.memory_map import ROOT
 from app.ports import LocalMemoryProvider
 from app.tool_bridge import ToolBridge, handle_request, serve
@@ -79,6 +81,36 @@ def test_manager_bridge_is_global_read_only_and_never_promotes(tmp_path):
     assert read == {"id": 1, "ok": True, "result": "other revenue 3.26"}
     denied = handle_request(bridge, {"id": 2, "method": "sam_promote", "params": {"fact_key": "x", "fact": {"status": "verified"}}})
     assert denied["ok"] is False and denied["error"]["code"] == "denied"
+
+
+class CountingMemory:
+    """Delegates to the real provider while recording search invocations."""
+
+    def __init__(self, delegate):
+        self._delegate = delegate
+        self.search_calls = 0
+
+    def search(self, *args, **kwargs):
+        self.search_calls += 1
+        return self._delegate.search(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)
+
+
+@pytest.mark.parametrize("filters", [{"trunk_code": "T-HR"}, {"leaf_code": "L-HR-01"}])
+def test_tree_filter_search_fails_closed_over_bridge(tmp_path, monkeypatch, filters):
+    monkeypatch.setattr("app.settings.SAM_FACTS_TREE", False)
+    memory = CountingMemory(LocalMemoryProvider(tmp_path / "memory"))
+    memory.put(f"{ROOT}/acme/guide.md", "summary")
+    bridge = ToolBridge(memory, Files("a" * 64), company_id="acme", thread_id="t1")
+    response = handle_request(bridge, {"id": 1, "method": "sam_memory_search", "params": {
+        "query": "guide", "filters": filters,
+    }})
+    assert response["ok"] is False
+    assert response["error"]["code"] == "unavailable"
+    assert memory.search_calls == 0
+    assert bridge.map_tools.navigation == []
 
 
 def test_plugin_syntax_and_registration_shape():
