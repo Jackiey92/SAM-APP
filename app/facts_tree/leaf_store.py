@@ -254,7 +254,11 @@ class LeafPublishService:
         by_code = {l.code: l for l in pack.leaves}
         for ref in sorted(set(fact_ids)):
             row = self.db.execute('SELECT * FROM facts WHERE id=?', (ref,)).fetchone()
-            if (row is None or row['company_id'] != company or row['status'] != 'verified'
+            # Decision 13A: claimed and verified facts both publish; conflict,
+            # inferred and any other status stay rejected. The note->fact gate
+            # (verified notes only) is a separate axis in notes_publish.
+            if (row is None or row['company_id'] != company
+                    or row['status'] not in ('claimed', 'verified')
                     or row['superseded_by'] is not None or row['valid_to'] is not None
                     or row['module_key'] != leaf.trunk):
                 raise LeafRejected('invalid or cross-trunk fact reference')

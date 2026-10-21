@@ -670,13 +670,17 @@ class NotesPublishService:
             mapped_fingerprint=top['mapped_fingerprint'], reading_protocol=PUBLISH_PROTOCOL,
             field_evidence=top['field_evidence'], sources=witnesses)
         now = datetime.now(timezone.utc).isoformat()
+        # Decision 13A: a V4 fact enters its unique leaf as 'claimed'. Source
+        # links stay supports/active on their own axis, and confirm_mode='auto'
+        # only records automatic processing; source count, mechanical quote or
+        # number checks and automatic handling never upgrade it to 'verified'.
         cursor = db.execute(
             '''INSERT INTO facts(company_id,entity,attribute,period,value,value_type,unit,
                 source_file,source_page,source_span,valid_from,confidence,status,confirm_mode,created_at,module_key)
                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             (company, fields['entity'], fields['attribute'], fields['period'], fields['value'],
              fields['value_type'], fields['unit'], self.dossier.file_hash, None,
-             json.dumps(span, ensure_ascii=False), now, 1.0, 'verified', 'auto', now, trunk))
+             json.dumps(span, ensure_ascii=False), now, 1.0, 'claimed', 'auto', now, trunk))
         fact_id = int(cursor.lastrowid)
         registry.register_file_source(file_hash=self.dossier.file_hash,
                                       original_name=self.original_name, task_id=job_id)

@@ -226,7 +226,9 @@ def test_happy_path_publish_lands_facts_sources_leaves_and_replay_zero_call(v4_j
     assert len(facts) == 3  # seed + two published
     for fact_id in new_ids:
         row = facts[fact_id]
-        assert row['module_key'] == 'bizov' and row['status'] == 'verified'
+        # 决策13A：V4单来源事实以 claimed 入账；confirm_mode='auto' 只表示
+        # 自动处理，绝不等于业务核验，事实状态与来源关系是两条独立的轴。
+        assert row['module_key'] == 'bizov' and row['status'] == 'claimed'
         assert row['confirm_mode'] == 'auto' and row['source_file'] == SHA
         span = json.loads(row['source_span'])
         assert span['reading_protocol'] == 4 and len(span['sources']) == 1
@@ -409,7 +411,7 @@ def test_generic_v2_v4_publish_placement(v4_job_generic_v2, monkeypatch):
     assert len(facts) == 3  # seed + two published
     for fact_id in new_ids:
         assert facts[fact_id]['module_key'] == 'finance'
-        assert facts[fact_id]['status'] == 'verified'
+        assert facts[fact_id]['status'] == 'claimed'
     by_note = {r['note_id']: r for r in store.db.execute(
         'SELECT * FROM md_note_publications WHERE company_id=? AND job_id=?', (COMPANY, JOB)).fetchall()}
     assert sorted(by_note) == ['n-0001', 'n-0002']
@@ -481,6 +483,9 @@ def test_merged_same_fact_group_one_fact_all_witnesses(v4_job):
     span = json.loads(store.db.execute('SELECT source_span FROM facts WHERE id=?', (fact_id,)).fetchone()[0])
     assert [w['note_id'] for w in span['sources']] == ['n-0001', 'n-0002']
     assert {w['source_loc'] for w in span['sources']} == {LOC0, MERGE_LOC1}
+    # 决策13A：两名见证人/两个来源片段也不机械升级为 verified。
+    fact = store.db.execute('SELECT status,confirm_mode FROM facts WHERE id=?', (fact_id,)).fetchone()
+    assert fact['status'] == 'claimed' and fact['confirm_mode'] == 'auto'
     # Both member witnesses landed as evidence with active supports links.
     registry = SourceRegistry(store.memory.database, company_id=COMPANY)
     try:

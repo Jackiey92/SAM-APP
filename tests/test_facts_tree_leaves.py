@@ -131,7 +131,7 @@ def test_versions_append_only_unique_and_noop(kernel):
     'version', 'boolean-version', 'sources', 'count', 'status', 'section', 'order', 'duplicate-section',
     'gap-heading', 's-no-data', 'dangling', 'duplicate-footnote', 'unused-footnote', 'paragraph',
     'fake-sha', 'fake-definition', 'undeclared-fact', 'missing-fact', 'cross-company', 'cross-trunk',
-    'unverified', 'superseded', 'expired', 'bad-leaf-assignment', 'wrong-leaf-trunk',
+    'fact-conflict', 'fact-inferred', 'superseded', 'expired', 'bad-leaf-assignment', 'wrong-leaf-trunk',
     'body-number', 'body-unit', 'table-number', 'table-period', 'row-source', 'history',
     'sources-type', 'refs-type', 'source-foreign', 'quote-other-paragraph',
 ])
@@ -170,9 +170,10 @@ def test_invalid_artifacts_no_files_no_revisions(kernel, case):
         kernel.db.execute('INSERT INTO fact_leaf_links(company_id,fact_id,trunk,leaf_code,source_file,created_at) VALUES(?,?,?,?,?,?)',
                           (COMPANY, 1, 'bizov', code, SHA, 'now'))
         kernel.db.commit()
-    elif case in ('cross-company', 'cross-trunk', 'unverified', 'superseded', 'expired'):
+    elif case in ('cross-company', 'cross-trunk', 'fact-conflict', 'fact-inferred', 'superseded', 'expired'):
         column, value = {'cross-company': ('company_id', 'acc-other'), 'cross-trunk': ('module_key', 'hr'),
-            'unverified': ('status', 'claimed'), 'superseded': ('superseded_by', 1), 'expired': ('valid_to', 'now')}[case]
+            'fact-conflict': ('status', 'conflict'), 'fact-inferred': ('status', 'inferred'),
+            'superseded': ('superseded_by', 1), 'expired': ('valid_to', 'now')}[case]
         kernel.db.execute(f'UPDATE facts SET {column}=? WHERE id=1', (value,)); kernel.db.commit()
     elif case == 'body-number': text = artifact(body='有10个。[^one]')
     elif case == 'body-unit': text = artifact(body='有9元。[^one]')
@@ -239,9 +240,20 @@ def test_off_gate_no_side_effects(kernel, monkeypatch):
     clean(kernel)
 
 
+def test_claimed_fact_publishes_and_verified_path_retained(kernel):
+    # Decision 13A: a claimed fact passes leaf publication under the same
+    # company/trunk/source/coordinate guards; the verified path is unchanged.
+    kernel.db.execute("UPDATE facts SET status='claimed' WHERE id=1"); kernel.db.commit()
+    first = publish(kernel)
+    assert first['changed']
+    kernel.db.execute("UPDATE facts SET status='verified' WHERE id=1"); kernel.db.commit()
+    assert publish(kernel, artifact(version=2))['version'] == 2
+    assert kernel.db.execute('SELECT count(*) FROM leaf_revisions').fetchone()[0] == 2
+
+
 def test_noop_revalidates_fact_authority(kernel):
     first = publish(kernel)
-    kernel.db.execute("UPDATE facts SET status='claimed'"); kernel.db.commit()
+    kernel.db.execute("UPDATE facts SET status='inferred'"); kernel.db.commit()
     with pytest.raises(LeafRejected): publish(kernel)
     assert kernel.memory.read(first['uri']) == artifact()
     assert kernel.db.execute('SELECT count(*) FROM leaf_revisions').fetchone()[0] == 1
