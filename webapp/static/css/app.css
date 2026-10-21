@@ -61,6 +61,32 @@
 .facts-tree-leaf-content{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;line-height:1.7;color:var(--t2);margin:10px 0}
 .facts-tree-section{margin-top:14px;border-top:1px solid var(--border);padding-top:12px}
 .facts-tree-section h3{font-size:13px;margin:0 0 8px;color:var(--t1)}
+/* Auxiliary blocks and API-002 source lookup controls share the shell theme. */
+.facts-tree-binding{margin:0 0 12px;color:var(--t3);font-size:12px;overflow-wrap:anywhere}
+.facts-tree-empty{margin:8px 0;color:var(--t3);font-size:13px;overflow-wrap:anywhere}
+.facts-tree-text{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;line-height:1.7;color:var(--t2);margin:10px 0;font:inherit}
+.facts-tree-leaf-head{margin:0 0 4px}
+.facts-tree-index{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;margin:0;font-size:13px}
+.facts-tree-index dt{color:var(--t3);white-space:nowrap}
+.facts-tree-index dd{margin:0;color:var(--t2);overflow-wrap:anywhere;word-break:break-word}
+.facts-tree-trunk-title{flex:1;min-width:0;overflow-wrap:anywhere}
+.facts-tree-trunk-state{margin-left:auto;color:var(--t3);font-weight:400;font-size:12px;white-space:nowrap}
+.facts-tree-leaf-list{list-style:none;margin:0;padding:0;display:grid;gap:4px}
+.facts-tree-leaf-item{min-width:0}
+.facts-tree-source-list{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.facts-tree-source-item{border:1px solid var(--border);border-radius:8px;padding:10px 12px;min-width:0}
+.facts-tree-source-ref{min-height:28px;border:1px solid var(--border);border-radius:6px;background:#fff;padding:1px 8px;font:inherit;font-size:12px;font-weight:600;color:var(--primary);cursor:pointer}
+.facts-tree-source-ref:hover{border-color:#b9c2ff;background:#eef1ff}
+.facts-tree-source-text{margin-left:8px;color:var(--t2);font-size:13px;overflow-wrap:anywhere;word-break:break-word}
+.facts-tree-source-result:empty{display:none}
+.facts-tree-source-result{margin-top:8px;border-top:1px solid var(--border);padding-top:8px}
+.facts-tree-source-detail{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;margin:0;font-size:13px}
+.facts-tree-source-detail dt{color:var(--t3);white-space:nowrap}
+.facts-tree-source-detail dd{margin:0;color:var(--t2);overflow-wrap:anywhere;word-break:break-word}
+.facts-tree-source-state{margin:0;color:var(--t3);font-size:12px;overflow-wrap:anywhere}
+.facts-tree-source-state.facts-tree-error{color:var(--red)}
+.facts-tree-source-download{display:inline-block;margin-top:8px;min-height:34px;line-height:32px;border:1px solid var(--border);border-radius:8px;background:#fff;padding:0 10px;font-size:12px;font-weight:600;color:var(--primary);text-decoration:none}
+.facts-tree-source-download:hover{border-color:#b9c2ff;background:#eef1ff}
 /* Decision 13-A: per-fact status/source block inside the leaf detail. */
 .facts-tree-fact-list{list-style:none;margin:0;padding:0;display:grid;gap:10px}
 .facts-tree-fact{border:1px solid var(--border);border-radius:8px;padding:10px 12px;min-width:0}

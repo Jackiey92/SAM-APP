@@ -255,9 +255,25 @@ const main = async () => {
     assert.match(status(), /叶子 L-0101 · 已生成/);
     assert.match(detail(), /# 标题/);
     assert.match(detail(), /<em>标签<\/em> 都应按原文显示/);
-    assert.match(detail(), /版本 v3 · 状态 active/);
+    assert.match(detail(), /版本 v3 · 状态 已发布/);
     assert.match(detail(), /2026Q3/);
     assert.match(detail(), /acc-a\.pdf/);
+  } else if (caseName === 'leaf-state-unknown') {
+    // stateLabel(): known states map to Chinese; an unknown leaf_state value
+    // stays raw, never guessed or blanked.
+    await readyFlow();
+    nav().children[0].click();
+    await flush();
+    fetchImpl = url => {
+      if (url === '/api/facts/tree?node=leaf&code=L-0101') {
+        return ok({ ...LEAF, leaf_state: 'pending_review' });
+      }
+      throw new Error('unexpected url: ' + url);
+    };
+    elements.get('facts-tree-detail').querySelectorAll('button[data-code]')[0].click();
+    await flush();
+    assert.match(detail(), /版本 v3 · 状态 pending_review/);
+    assert.ok(!detail().includes('状态 已发布'));
   } else if (caseName === 'leaf-not-generated') {
     await readyFlow();
     nav().children[0].click();
@@ -296,6 +312,15 @@ const main = async () => {
     await run();
     assert.match(status(), /读取失败（storage_unavailable）/);
     assert.ok(!status().includes('<script>'));
+  } else if (caseName === 'consistency-failed') {
+    // The confirmed consistency_failed error shows a brief Chinese retry hint;
+    // the raw code never reaches the user.
+    fetchImpl = () => bad(409, { error: 'consistency_failed', message: 'digest mismatch' });
+    await run();
+    assert.match(status(), /暂未通过一致性校验，请稍后重试/);
+    assert.ok(!status().includes('consistency_failed'));
+    assert.ok(!status().includes('digest mismatch'));
+    assert.match(detail(), /暂未通过一致性校验/);
   } else if (caseName === 'network') {
     fetchImpl = async () => { throw new Error('socket hang up'); };
     await run();
@@ -373,6 +398,18 @@ const main = async () => {
     await sourceFlow(() => bad(404, { error: 'source_not_found', message: 'no such ref' }));
     await clickRef('a1');
     assert.match(sourceResults()[0].textContent, /来源回查失败（source_not_found）/);
+    assert.match(detail(), /正文引用\[\^a1\]/);
+    assert.match(status(), /叶子 L-0103 · 已生成/);
+  } else if (caseName === 'source-consistency-failed') {
+    // The source endpoint can return consistency_failed (409) too; it gets the
+    // same treatment: a brief Chinese hint, no raw code, other items untouched.
+    await sourceFlow(() => bad(409, { error: 'consistency_failed', message: 'digest mismatch' }));
+    await clickRef('a1');
+    const results = sourceResults();
+    assert.match(results[0].textContent, /来源数据暂未通过一致性校验，请稍后重试/);
+    assert.ok(!results[0].textContent.includes('consistency_failed'));
+    assert.ok(!results[0].textContent.includes('digest mismatch'));
+    assert.equal(results[1].textContent, '');
     assert.match(detail(), /正文引用\[\^a1\]/);
     assert.match(status(), /叶子 L-0103 · 已生成/);
   } else if (caseName === 'source-network-error') {
@@ -500,10 +537,12 @@ main().catch(error => { console.error(error); process.exit(1); });
 
 
 @pytest.mark.parametrize("case", [
-    "tree-ready", "leaf-not-generated", "tree-unbound", "tree-empty", "tree-not-generated",
-    "disabled", "unavailable", "http-error", "network", "no-company-param",
+    "tree-ready", "leaf-state-unknown", "leaf-not-generated", "tree-unbound", "tree-empty",
+    "tree-not-generated",
+    "disabled", "unavailable", "http-error", "consistency-failed", "network", "no-company-param",
     "sources-listed", "leaf-no-sources", "source-available", "source-ref-encoding",
-    "source-unavailable", "source-no-lines", "source-http-error", "source-network-error",
+    "source-unavailable", "source-no-lines", "source-http-error", "source-consistency-failed",
+    "source-network-error",
     "source-malicious", "source-parallel",
     "facts-listed", "facts-empty", "facts-legacy", "facts-malicious",
 ])

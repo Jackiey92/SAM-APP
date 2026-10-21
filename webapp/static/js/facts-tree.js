@@ -67,6 +67,7 @@
     if (failure.kind === 'network') return '网络异常，事实树读取失败，请稍后重试。';
     if (failure.error === 'facts_tree_disabled') return '事实树功能当前已关闭。';
     if (failure.error === 'facts_tree_unavailable') return '暂无同步数据。';
+    if (failure.error === 'consistency_failed') return '事实数据暂未通过一致性校验，请稍后重试。';
     const reason = failure.error || `HTTP ${failure.status}`;
     return `事实树读取失败（${reason}），请稍后重试。`;
   };
@@ -114,6 +115,7 @@
 
   const sourceFailureText = failure => {
     if (failure.kind === 'network') return '网络异常，来源回查失败，请稍后重试。';
+    if (failure.error === 'consistency_failed') return '来源数据暂未通过一致性校验，请稍后重试。';
     const reason = failure.error || `HTTP ${failure.status}`;
     return `来源回查失败（${reason}），请稍后重试。`;
   };
@@ -292,7 +294,8 @@
       parts.push(head);
     } else {
       const version = node('p', 'facts-tree-meta');
-      version.textContent = `版本 v${data.version} · 状态 ${data.leaf_state || '-'}`;
+      version.textContent = `版本 v${data.version} · 状态 `
+        + (data.leaf_state ? stateLabel(data.leaf_state) : '-');
       head.append(version);
       parts.push(head);
       const index = data.index || {};
