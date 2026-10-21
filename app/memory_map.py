@@ -314,6 +314,14 @@ class MemoryMapTools:
             uris = self._search_tree_leaves(query, filters=filters)
             self.navigation.extend(uris)
             return uris
+        if not self.global_read_only and isinstance(filters, dict) \
+                and ('trunk_code' in filters or 'leaf_code' in filters):
+            # trunk_code/leaf_code exist only on the verified tree search.
+            # With the gate closed there is no tree read, so refuse
+            # explicitly — the same unavailable outcome the open-gate path
+            # maps from status 503 — instead of silently dropping the filter
+            # and widening the legacy prefix search below.
+            raise MemoryUnavailable("trunk/leaf filters require the FactsTree gate")
         # The closed gate and the isolated global read-only exception keep
         # the existing prefix search over the current 2B namespaces. External
         # source map bodies remain available by explicit catalog handles.

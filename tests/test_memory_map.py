@@ -373,6 +373,32 @@ def test_employee_search_filters_are_exact_and_unknown_rejected(vector_kernel):
         tools.memory_search('测试', filters={'company_id': 'acc-other'})
 
 
+@pytest.mark.parametrize('code_filter', [{'trunk_code': 'bizov'}, {'leaf_code': 'L-bizov-08'}])
+def test_employee_search_filters_tree_codes_refused_when_gate_closed(tmp_path, monkeypatch, code_filter):
+    monkeypatch.setattr(settings, 'SAM_FACTS_TREE', False)
+    memory, files, _, catalog = source_setup(tmp_path)
+    calls = []
+    real_search = memory.search
+
+    def spied(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_search(*args, **kwargs)
+
+    monkeypatch.setattr(memory, 'search', spied)
+    tools = MemoryMapTools(memory, files, "acme", source_catalog=catalog)
+    with pytest.raises(MemoryUnavailable):  # explicit refusal, never a wider legacy search
+        tools.memory_search('report', filters=code_filter)
+    assert calls == []  # the closed gate never falls back to plain memory.search
+    assert tools.navigation == []
+
+
+def test_employee_search_filters_absent_keeps_legacy_search_when_gate_closed(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, 'SAM_FACTS_TREE', False)
+    memory, files, _, catalog = source_setup(tmp_path)
+    tools = MemoryMapTools(memory, files, "acme", source_catalog=catalog)
+    assert tools.memory_search('report') == [f"{ROOT}/acme/brief.md"]
+
+
 def test_employee_search_fact_filters_match_claimed_and_exclude_expired(vector_kernel):
     uri = indexed(vector_kernel)
     vector_kernel.db.execute("UPDATE facts SET status='claimed' WHERE id=1")
