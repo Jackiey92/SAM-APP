@@ -178,7 +178,7 @@ def test_publish_failure_rolls_back(kernel, monkeypatch, stage):
     else:
         original = kernel.publish_leaf
         def revoked(**kwargs):
-            kernel.db.execute("UPDATE facts SET status='claimed'"); kernel.db.commit()
+            kernel.db.execute("UPDATE facts SET status='inferred'"); kernel.db.commit()
             return original(**kwargs)
         monkeypatch.setattr(kernel, 'publish_leaf', revoked)
         error = LeafRejected
@@ -245,7 +245,9 @@ def test_data_table_coordinate_is_checked_even_without_prose_use(kernel):
 
 def test_noop_revalidates_authority(kernel):
     build(kernel)
-    kernel.db.execute("UPDATE facts SET status='claimed'"); kernel.db.commit()
+    # Decision 13-A: claimed publishes; the revoked-authority gate is still
+    # exercised with inferred, which stays unreadable/unpublishable.
+    kernel.db.execute("UPDATE facts SET status='inferred'"); kernel.db.commit()
     with pytest.raises(LeafRejected): build(kernel)
     assert kernel.db.execute('SELECT count(*) FROM leaf_revisions').fetchone()[0] == 1
 
