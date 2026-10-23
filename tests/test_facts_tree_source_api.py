@@ -7,15 +7,22 @@ guards rightly refuse to create them.
 """
 import hashlib
 import json
+import runpy
 from pathlib import Path
 
 import pytest
 import yaml
 
 from app import settings
+from app.db.database import init_db
+from app.facts_tree.company_binding import CompanyBindingStore
+from app.facts_tree.fact_identity import FactIdentityStore
+from app.facts_tree.fact_placements import FactPlacementStore
+from app.facts_tree.leaf_store import LeafPublishService
+from app.facts_tree.template_packs import available_packs, load_pack, load_released_pack
 from app.facts_tree.uris import leaf_uri as pack_leaf_uri
 from app.storage.archive_paths import hash_relpath
-from tests.test_facts_tree_leaves import kernel, artifact, publish, COMPANY, SHA
+from tests.test_facts_tree_leaves import kernel, artifact, publish, DocumentPort, COMPANY, SHA
 from tests.test_facts_tree_tree_read import attribute, db_path
 
 
@@ -33,12 +40,13 @@ def source_web(kernel, monkeypatch, tmp_path):
     return web
 
 
-def seed_file(kernel, *, content=b'acc-original-bytes', name='real.docx', company=COMPANY):
+def seed_file(kernel, *, content=b'acc-original-bytes', name='real.docx', company=COMPANY,
+              module_key='bizov'):
     real = hashlib.sha256(content).hexdigest()
     kernel.db.execute('INSERT INTO source_files(file_hash,original_name,size_bytes,storage_path,uploaded_at) VALUES(?,?,?,?,?)',
                       (real, name, len(content), str(hash_relpath(real)), '2026-10-14'))
     kernel.db.execute('''INSERT INTO facts(company_id,entity,attribute,period,value,unit,source_file,module_key,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?)''', (company, '临时主体', '测试指标', '2025-01', '9', '个', real, 'bizov', '2026-10-14'))
+        VALUES(?,?,?,?,?,?,?,?,?)''', (company, '临时主体', '测试指标', '2025-01', '9', '个', real, module_key, '2026-10-14'))
     kernel.db.commit()
     return real
 
@@ -55,11 +63,11 @@ def publish_v1(kernel, *, foot, sources):
     return publish(kernel, markdown=markdown, source_files=list(sources), fact_ids=[1])
 
 
-def v2_artifact(*, code='L-bizov-08', ref='a', name='real.docx', sha, sources=None,
-                loc='docx:body/77/paragraph', start=77, end=78, block='b1'):
+def v2_artifact(*, code='L-bizov-08', trunk='bizov', company=COMPANY, ref='a', name='real.docx',
+                sha, sources=None, loc='docx:body/77/paragraph', start=77, end=78, block='b1'):
     sources = sources or [sha]
-    meta = dict(schema_version=2, blocks_sha='b' * 64, leaf_code=code, trunk='bizov',
-                title='测试叶子', company_id=COMPANY, status='active', latest_period='2025-01',
+    meta = dict(schema_version=2, blocks_sha='b' * 64, leaf_code=code, trunk=trunk,
+                title='测试叶子', company_id=company, status='active', latest_period='2025-01',
                 sources=sources, source_file_count=len(sources), version=1,
                 created_at='2026-10-14', updated_at='2026-10-14', owner_skill='fact-leaf')
     line = (f'[^{ref}]: {name} → {loc} (lines {start}-{end}; block {block}; sha {sha}; facts 1)')
@@ -67,15 +75,15 @@ def v2_artifact(*, code='L-bizov-08', ref='a', name='real.docx', sha, sources=No
             f'## 内容\n<!-- block:{block} -->\n有9个[^{ref}]。\n\n## 索引\n{line}\n')
 
 
-def plant_leaf(kernel, markdown, *, code='L-bizov-08', sources, fact_ids=(1,)):
+def plant_leaf(kernel, markdown, *, code='L-bizov-08', sources, fact_ids=(1,), company=COMPANY):
     """Direct ledger/projection planting for states the publish guards reject."""
-    leaf, pack = kernel._leaf(COMPANY, code)
-    uri = pack_leaf_uri(COMPANY, pack, leaf)
+    leaf, pack = kernel._leaf(company, code)
+    uri = pack_leaf_uri(company, pack, leaf)
     sha = hashlib.sha256(markdown.encode()).hexdigest()
-    kernel.db.execute('INSERT INTO facts_tree_leaf_index VALUES(?,?,?)', (COMPANY, code, uri))
+    kernel.db.execute('INSERT INTO facts_tree_leaf_index VALUES(?,?,?)', (company, code, uri))
     kernel.db.execute('''INSERT INTO leaf_revisions(company_id,leaf_code,version,content_sha,
         source_files,fact_ids,owner_skill,change_note,created_at) VALUES(?,?,?,?,?,?,?,?,?)''',
-        (COMPANY, code, 1, sha, json.dumps(sorted(sources)), json.dumps(sorted(fact_ids)),
+        (company, code, 1, sha, json.dumps(sorted(sources)), json.dumps(sorted(fact_ids)),
          'fact-leaf', 'planted', '2026-10-14'))
     kernel.db.commit()
     kernel.memory.put(uri, markdown, metadata={})
@@ -258,6 +266,104 @@ def test_response_carries_no_paths_or_mapping_internals(source_web):
     text = result.get_data(as_text=True)
     for forbidden in ('storage_path', 'manifest', 'mapping', str(source_web._objects)):
         assert forbidden not in text
+
+
+# ---------------------------------------------------------------------------
+# Unreleased generic-v2 draft pack: isolated draft-bound company, then the
+# unchanged API-002 route. Same test-scoped binding seam as the generic-v2
+# V4 publish tests: the formal gate is patched for the single register call
+# and restored immediately; no production guard or default is changed.
+# ---------------------------------------------------------------------------
+
+V2_COMPANY = 'acc-v2-draft'
+
+
+@pytest.fixture
+def generic_v2_web(tmp_path, monkeypatch):
+    """Isolated ledger/company bound to the generic-v2 draft pack, wired into
+    the local web app exactly like source_web. Everything lives in tmp_path."""
+    monkeypatch.setattr(settings, 'SAM_FACTS_TREE', True)
+    database = tmp_path / 'ledger-v2.db'
+    init_db(database)
+    root = tmp_path / 'docs-v2'
+    root.mkdir()
+    kernel = LeafPublishService(database, DocumentPort(root), company_id=V2_COMPANY)
+    formal_pack = CompanyBindingStore._pack
+
+    def draft_pack(name):
+        return load_pack(name) if name == 'generic-v2' else formal_pack(name)
+
+    monkeypatch.setattr(CompanyBindingStore, '_pack', staticmethod(draft_pack))
+    kernel.binding.register(V2_COMPANY, '临时草稿绑定公司', pack='generic-v2')
+    monkeypatch.setattr(CompanyBindingStore, '_pack', staticmethod(formal_pack))
+    from webapp import app as web
+    monkeypatch.setattr(web, 'MAIN_DB', db_path(kernel))
+    monkeypatch.setitem(web.app.extensions, 'sam_memory_provider', kernel.memory)
+    objects = tmp_path / 'objects'
+    objects.mkdir()
+    monkeypatch.setattr(web, 'OBJECTS_DIR', objects)
+    monkeypatch.setenv('SAM_COMPANY_ID', V2_COMPANY)
+    monkeypatch.setattr(web, '_kernel', kernel, raising=False)
+    monkeypatch.setattr(web, '_objects', objects, raising=False)
+    yield web
+    kernel.close()
+
+
+def test_generic_v2_finance_leaf_source_and_download_roundtrip(generic_v2_web, monkeypatch):
+    """generic-v2 current finance leaf resolves its citation through the
+    existing API-002 route and the cabinet serves the same synthetic bytes.
+
+    The original is generated in test scope, hashed live and written only to
+    the pytest-temporary objects directory; the fixture has already closed
+    the draft binding seam before this body runs."""
+    web = generic_v2_web
+    kernel = web._kernel
+    pack = load_pack('generic-v2')
+    content = ('acc-v2 合成财务原件：2025-01 收入 9 个。\n' * 8).encode('utf-8')
+    real = seed_file(kernel, content=content, name='v2-finance.docx', company=V2_COMPANY,
+                     module_key='finance')  # DEC-018: module_key matches the target leaf trunk
+    write_blob(web, real, content)
+    fact_id = kernel.db.execute('SELECT id FROM facts WHERE company_id=? AND source_file=?',
+                                (V2_COMPANY, real)).fetchone()['id']
+    plant_leaf(kernel, v2_artifact(code='L-finance-01', trunk='finance', company=V2_COMPANY,
+                                   sha=real, name='v2-finance.docx'),
+               code='L-finance-01', sources=[real], fact_ids=(fact_id,), company=V2_COMPANY)
+    leaf = pack.leaf_for('L-finance-01')
+    FactIdentityStore(kernel.db).register_initial(V2_COMPANY, fact_id, '归属测试', '身份登记')
+    FactPlacementStore(kernel.db, company_id=V2_COMPANY).place_initial(
+        V2_COMPANY, fact_id, leaf.trunk, leaf.code, '归属测试', '首次归属')
+
+    client = web.app.test_client()
+    result = client.get('/api/facts/tree/source?leaf_code=L-finance-01&ref=a')
+    assert result.status_code == 200, result.data
+    body = result.get_json()
+    assert body['company_id'] == V2_COMPANY
+    assert body['leaf'] == {'code': 'L-finance-01', 'trunk': 'finance', 'title': leaf.title,
+                            'version': 1, 'state': 'active'}
+    assert body['source'] == {'ref': 'a', 'file_hash': real, 'original_name': 'v2-finance.docx',
+                              'locator': 'docx:body/77/paragraph', 'lines': [77, 78]}
+    assert body['original'] == {'state': 'available',
+                                'download_url': f'/api/knowledge/sources/{real}/original'}
+    # Following the cabinet URL returns the identical synthetic bytes, whose
+    # live SHA-256 equals the reported file_hash — no placeholder digests.
+    download = client.get(body['original']['download_url'])
+    assert download.status_code == 200
+    assert download.data == content
+    assert hashlib.sha256(download.data).hexdigest() == body['source']['file_hash'] == real
+
+    # The draft pack stays hidden and every restored production guard refuses
+    # it again; the injected draft binding itself and the default gate are
+    # untouched.
+    assert 'generic-v2' not in available_packs()
+    with pytest.raises(ValueError, match='supports only generic'):
+        kernel.binding.register(V2_COMPANY, '草稿门核验公司', pack='generic-v2')
+    with pytest.raises(ValueError, match='supports only generic'):
+        kernel.binding.bind_pack(V2_COMPANY, 'generic-v2')
+    with pytest.raises(ValueError, match='not released'):
+        load_released_pack('generic-v2')
+    assert kernel.binding.get(V2_COMPANY)['template_pack'] == 'generic-v2'
+    monkeypatch.delenv('SAM_FACTS_TREE', raising=False)
+    assert runpy.run_path(settings.__file__)['SAM_FACTS_TREE'] is False
 
 
 def test_source_lookup_and_download_are_read_only(source_web):
