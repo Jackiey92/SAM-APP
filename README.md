@@ -1,5 +1,7 @@
 # SAM-APP · Startup AI Manager
 
+> 目录导航修订：2026-10-22T22:38+08:00（Asia/Shanghai）。
+
 > 代码仓库标识：SAM-APP；产品文档权威仓库：SAM-DOCS。
 
 > 面向初创公司的 **Agent-Native 经营 Harness**：一个由 AI Agent 主动维护的「活的公司状态面」，把 **外部信号 × 公司上下文 × 建议行动** 三者耦合，完成过去需要公司几个部门联合才能做的判断。
@@ -73,26 +75,28 @@ Startup AI Manager 不是在传统 ERP 上加一个聊天框，也不是又一�
 
 ```
 .
-├── README.md
-├── LICENSE                     # MIT
+├── README.md、LICENSE          # 项目入口与许可证
 ├── app/                        # 后端主包
-│   ├── guidance/               # 导入引导与后台单飞任务
-│   ├── facts/                  # 2b schema、派生与 cap-table replay
-│   ├── memory/                 # 2a 提取记忆服务
-│   ├── storage/                # 内容寻址原件存储
-│   ├── harness/runtime/        # OpenClawAdapter 与运行时接缝
-│   ├── classifier/、db/        # 归类与 SQLite 基础设施
-│   └── runtime_config.py       # manifest/profile/环境注入
-├── webapp/                     # Flask 服务（app.py、templates、markdown_render）
-├── skills/document-ingest/     # 文档解析 Skill 与本地 bridge
-├── harness-openclaw/           # Agent workspace、插件与 OpenClaw 配置模板
-├── scripts/                    # prepare-openclaw-runtime.py 等启动/维护脚本
-├── profiles/                   # local/cloud 配置覆盖
-├── sam-manifest.yaml           # 运行时、技能、模型与记忆的声明
-├── schemas/                    # 事实、对话与凭证 Schema
-├── tests/                      # 18 个以上 Python 回归测试文件（非占位）
-├── docs/                       # 产品、架构与调研文档
-└── prototype/                  # 唯一前端原型模板（startup-ai-manager.html），后续前端打磨以此为准
+│   ├── facts_tree/             # 公司事实树、版本与发布
+│   ├── document_read/          # 文件阅读与笔记处理
+│   ├── document_quality/       # 文档质量检查
+│   ├── employees/、harness/    # 员工执行与运行时适配
+│   ├── memory/、storage/      # 本地记忆与原件存储
+│   └── dashboard/、entities/、db/ 等基础模块
+├── webapp/                     # Flask 服务、页面与静态资源
+├── skills/                     # 员工技能与文档处理约定
+├── harness-openclaw/           # Agent workspace、插件与配置模板
+├── scripts/                    # 启动、维护与开发验证脚本
+├── tools/                      # 隔离环境构建和启动工具
+├── profiles/、schemas/        # 环境配置与数据 Schema
+├── sam、sam-manifest.yaml      # 命令入口与运行声明
+├── requirements*.txt           # 应用、云端及质检依赖
+├── tests/                      # 回归测试与夹具
+├── data/                       # 运行数据与受版本管理的样例
+├── docs/                       # 代码运行说明与历史资料，见 docs/README.md
+├── poc/                        # 历史验证原型
+├── prototype/                  # startup-ai-manager.html 前端原型
+└── index.html                  # 在线原型跳转入口
 ```
 
 ## 已验收的原型能力
@@ -132,6 +136,13 @@ export SAM_TOOL_BRIDGE_PYTHON="$PWD/.sam-isolated/venv/bin/python"
 旧版 `.doc` 与 `.ppt` 需要本机 LibreOffice 进行**本地**无头转换（不会上传原件）：Ubuntu/WSL 安装 `libreoffice-core libreoffice-writer libreoffice-impress`，可选用 `SAM_SOFFICE_BIN` 指向 `soffice` 可执行文件。缺少该依赖时，旧格式上传会返回部署依赖错误，不会伪装为解析成功。
 
 ## 文档
+
+现行产品设计以独立的 **SAM-DOCS** 仓库为准。这里保留代码运行说明与历史设计、研究和施工证据。
+
+- [文档导航与归档说明](./docs/README.md)
+- [M5历史施工汇报（原根目录report.md）](./docs/handoffs/2026-10-13-m5-delivery-history.md)
+
+以下为仓库内历史设计与研究入口：
 
 - [产品整体思路](./docs/product/01-overall-thinking.md)
 - [产品形态论：对话之后](./docs/product/02-beyond-chat.md)
