@@ -63,13 +63,15 @@ const suggestion = new Element(); suggestion.dataset.q = '测试建议';
 const skill = new Element(); skill.dataset.q = '测试技能';
 const factsNav = new Element(); factsNav.dataset.go = 'facts';
 const driveNav = elements.get('importNavBtn'); driveNav.dataset.go = 'drive';
+const overviewNav = new Element(); overviewNav.dataset.go = 'overview';
+const mktNav = new Element(); mktNav.dataset.go = 'mkt';
 const document = {
   body: new Element(), hidden: false, events: {},
   addEventListener(name, handler) {(this.events[name] ||= []).push(handler);},
   createElement: () => new Element(),
   getElementById(id) {if (id.startsWith('source-') && !elements.has(id)) return null; assert.ok(elements.has(id), 'missing element: ' + id); return elements.get(id);},
   querySelectorAll(selector) {
-    if (selector === '[data-go]') return [factsNav, driveNav];
+    if (selector === '[data-go]') return [factsNav, driveNav, overviewNav, mktNav];
     if (selector === '.screen') return screens;
     if (selector === '.sugg-card') return [suggestion];
     if (selector === '.skill') return [skill];
@@ -80,7 +82,7 @@ const context = vm.createContext({window, document, console, setInterval() {},
   setTimeout(fn, delay) {assert.equal(delay, 1800); const id = ++timerId; timers.set(id, fn); return id;},
   clearTimeout(id) {timers.delete(id);},
   URLSearchParams, FormData: class {append() {}}, getComputedStyle: () => ({background: ''})});
-if (!caseName.startsWith('ui-drive-') && !caseName.startsWith('ui-facts-') && !caseName.startsWith('ui-company-title')) vm.runInContext(caseName.startsWith('ui-') ? script : foundation, context);
+if (!caseName.startsWith('ui-drive-') && !caseName.startsWith('ui-facts-') && !caseName.startsWith('ui-company-title') && !caseName.startsWith('ui-activity-') && !caseName.startsWith('ui-market-')) vm.runInContext(caseName.startsWith('ui-') ? script : foundation, context);
 const SAM = window.SAM;
 if (SAM) SAM.demo.probe = [{id: 'demo'}];
 const load = options => SAM.data.load('probe', {url: '/api/probe', ...options});
@@ -194,7 +196,7 @@ async function cabinetCase(name) {
     pendingList.resolve(ok({jobs: [job]})); await flush();
     assert.equal(timers.size, 1);
     pendingUpload.resolve(ok({...job, size: 8})); await flush();
-    assert.equal(timers.size, 1);
+    assert.equal(timers.size, 2); // 上传成功后员工动态小卡重新读取到活动任务，加入有限轮询
     assert.equal((el('importFiles').innerHTML.match(/class="import-file /g) || []).length, 1);
     assert.match(el('importFiles').innerHTML, /排队中/); return;
   }
@@ -459,12 +461,13 @@ async function factsTreeCase(name) {
   if (name === 'ui-facts-ready') {
     fetchImpl = async url => {
       if (url === '/api/entity-roster') return ok({entities: [{...self, entity_name: 'acc-事实树公司'}]});
+      if (url === '/api/parse-jobs') return ok({jobs: []});
       assert.equal(url, '/api/facts/tree'); return ok(factsTreeBody('ready', {brief: '# acc 树摘要\n<img src=x onerror=alert(1)> 摘要第二行'}));
     };
     vm.runInContext(script, context); await flush();
     assert.equal(el('overview').classList.contains('active'), true);
     assert.equal(calls.filter(call => call[0] === '/api/facts/tree').length, 1); // 首次进入事实树只读取一次
-    assert.equal(calls.length, 2); // 另有一次同源登记公司名读取
+    assert.equal(calls.length, 3); // 另有同源登记公司名与员工动态任务各一次读取
     assert.equal((calls[0][1].method || 'GET'), 'GET');
     assert.equal(calls[0][1].credentials, 'same-origin');
     assert.equal(el('homeCompanyName').textContent, 'acc-事实树公司');
@@ -729,11 +732,269 @@ async function companyTitleCase(name) {
   throw new Error('Unknown contract: ' + name);
 }
 
+async function activityCase(name) {
+  // 员工动态小卡结构契约：卡片嵌在公司综合主页，只读真实持久任务状态，静态壳不含预置任务或样例进度。
+  const overviewHtml = html.split('id="overview">')[1].split('id="facts">')[0];
+  assert.match(overviewHtml, /<div class="card" id="activityBoard">/);
+  assert.match(overviewHtml, /<span class="sub" id="activitySub">正在读取任务状态…<\/span>/);
+  assert.match(overviewHtml, /<button class="drive-btn" id="activityRetryBtn" type="button" hidden>重试<\/button>/);
+  assert.match(overviewHtml, /<button class="drive-btn" id="activityDetailBtn" type="button">任务详情<\/button>/);
+  assert.match(overviewHtml, /<div class="activity-list" id="activityList" aria-live="polite"><\/div>/);
+  assert.ok(overviewHtml.indexOf('id="activityBoard"') > overviewHtml.indexOf('id="factsBoard"'));
+  const activityHtml = overviewHtml.split('id="activityBoard">')[1].split('id="marketNotice"')[0];
+  assert.doesNotMatch(activityHtml, /排队中|解析中|已完成|需处理/); // 壳内不预置任何任务状态样例
+  const xssName = '<img src=x onerror=alert(1)>.pdf';
+  const listCalls = () => calls.filter(call => call[0] === '/api/parse-jobs');
+  const assertNoCompanyParam = () => {
+    assert.ok(calls.every(call => !String(call[0]).includes('company_id')), 'no request may carry company_id');
+    assert.ok(listCalls().every(call => ((call[1] || {}).method || 'GET') === 'GET'), 'activity card reads must be GET');
+  };
+  let jobs = [];
+  if (name === 'ui-activity-active') jobs = [
+    {job_id: 'acc-job-1', file_hash: 'acc-h1', original_name: xssName, status: 'queued', stage: 'queued'},
+    {job_id: 'acc-job-2', file_hash: 'acc-h2', original_name: 'acc-年报.pdf', status: 'parsing', stage: 'parsing', progress_current: 2, progress_total: 5}];
+  if (name === 'ui-activity-terminal') jobs = [
+    {job_id: 'acc-j1', file_hash: 'acc-h1', original_name: 'acc-失败.pdf', status: 'failed', stage: 'failed', message: '<后端解析错误>', finished_at: '2026-10-22T09:00:00+00:00'},
+    {job_id: 'acc-j2', file_hash: 'acc-h2', original_name: 'acc-待确认.pdf', status: 'needs_human', stage: 'needs_human'},
+    {job_id: 'acc-j3', file_hash: 'acc-h3', original_name: 'acc-部分.pdf', status: 'partial', stage: 'partial'},
+    {job_id: 'acc-j4', file_hash: 'acc-h4', original_name: 'acc-完成.pdf', status: 'done', stage: 'done', finished_at: '2026-10-22T08:00:00+00:00'},
+    {job_id: 'acc-j5', file_hash: 'acc-h5', original_name: 'acc-取消.pdf', status: 'canceled', stage: 'canceled'}];
+  if (name === 'ui-activity-recent') jobs = [
+    {job_id: 'acc-j1', file_hash: 'acc-h1', status: 'parsing'},
+    {job_id: 'acc-j2', file_hash: 'acc-h2', original_name: 'acc-完成.pdf', status: 'done'},
+    {job_id: 'acc-j3', file_hash: 'acc-h3', original_name: 'acc-取消.pdf', status: 'canceled'}];
+  if (name === 'ui-activity-detail') jobs = [
+    {job_id: 'acc-j1', file_hash: 'acc-h1', original_name: 'acc-完成.pdf', status: 'done', stage: 'done'},
+    {job_id: 'acc-j2', file_hash: 'acc-h2', original_name: 'acc-取消.pdf', status: 'canceled', stage: 'canceled'},
+    {job_id: 'acc-j3', file_hash: 'acc-h3', original_name: 'acc-失败.pdf', status: 'failed', stage: 'failed', message: 'acc-失败原因'}];
+  if (name === 'ui-activity-limit') jobs = [
+    {job_id: 'acc-j1', file_hash: 'acc-h1', original_name: 'acc-排队.pdf', status: 'queued', stage: 'queued'},
+    {job_id: 'acc-j2', file_hash: 'acc-h2', original_name: 'acc-解析.pdf', status: 'parsing', stage: 'parsing', progress_current: 1, progress_total: 4},
+    {job_id: 'acc-j3', file_hash: 'acc-h3', original_name: 'acc-失败.pdf', status: 'failed', stage: 'failed'},
+    {job_id: 'acc-j4', file_hash: 'acc-h4', original_name: 'acc-部分.pdf', status: 'partial', stage: 'partial'},
+    {job_id: 'acc-j5', file_hash: 'acc-h5', original_name: 'acc-完成.pdf', status: 'done', stage: 'done'},
+    {job_id: 'acc-j6', file_hash: 'acc-h6', original_name: 'acc-取消.pdf', status: 'canceled', stage: 'canceled'}];
+  if (name === 'ui-activity-done-order') jobs = [
+    {job_id: 'acc-j1', file_hash: 'acc-h1', original_name: 'acc-处理中.pdf', status: 'parsing', stage: 'parsing'},
+    {job_id: 'acc-j2', file_hash: 'acc-h2', original_name: 'acc-待处理.pdf', status: 'failed', stage: 'failed'},
+    {job_id: 'acc-j3', file_hash: 'acc-h3', original_name: 'acc-较早完成.pdf', status: 'done', stage: 'done', finished_at: '2026-10-22T06:00:00+00:00'},
+    {job_id: 'acc-j4', file_hash: 'acc-h4', original_name: 'acc-较晚完成.pdf', status: 'done', stage: 'done', finished_at: '2026-10-22T07:30:00+00:00'},
+    {job_id: 'acc-j5', file_hash: 'acc-h5', original_name: 'acc-取消.pdf', status: 'canceled', stage: 'canceled'}];
+  if (name === 'ui-activity-readonly') jobs = [
+    {job_id: 'acc-j1', file_hash: 'acc-h1', original_name: 'acc-只读.pdf', status: 'queued', stage: 'queued'}];
+  let failMode = name === 'ui-activity-error' ? 'invalid' : null;
+  fetchImpl = async url => {
+    if (url === '/api/parse-jobs') {
+      if (failMode === 'invalid') return ok({company_id: 'acc-shell'});
+      if (failMode === 'down') throw new Error('network down');
+      return ok({jobs});
+    }
+    if (url === '/api/entity-roster') return ok({entities: [selfNamed]});
+    if (url === '/api/facts/tree') return ok(factsTreeBody('empty'));
+    if (url === '/api/knowledge') return ok({});
+    if (url === '/api/import-guide') return ok({guide: {message: '建议', completeness: {}}});
+    throw new Error('Unexpected URL ' + url);
+  };
+  vm.runInContext(script, context); await flush();
+  assert.equal(el('overview').classList.contains('active'), true);
+  if (name === 'ui-activity-empty') {
+    assert.equal(el('activitySub').textContent, '当前没有上传任务');
+    assert.match(el('activityList').innerHTML, /暂无处理中的资料任务/);
+    assert.equal(el('activityRetryBtn').hidden, true);
+    assert.equal(timers.size, 0); // 没有活动任务时不轮询
+    assertNoCompanyParam();
+    return;
+  }
+  if (name === 'ui-activity-error') {
+    assert.equal(el('activitySub').textContent, '任务状态暂不可用');
+    assert.match(el('activityList').innerHTML, /任务状态返回无效/);
+    assert.match(el('activityList').innerHTML, /未回退到演示数据/);
+    assert.equal(el('activityRetryBtn').hidden, false);
+    failMode = 'down'; el('activityRetryBtn').click(); await flush();
+    assert.match(el('activityList').innerHTML, /network down/);
+    assert.equal(el('activityRetryBtn').hidden, false);
+    failMode = null; jobs = [{job_id: 'acc-j1', file_hash: 'acc-h1', original_name: 'acc-任务.pdf', status: 'done'}];
+    el('activityRetryBtn').click(); await flush();
+    assert.equal(el('activitySub').textContent, '1 项最近记录');
+    assert.match(el('activityList').innerHTML, /acc-任务\.pdf/);
+    assert.match(el('activityList').innerHTML, /已完成/);
+    assert.equal(el('activityRetryBtn').hidden, true);
+    assert.equal(listCalls().length, 3);
+    assertNoCompanyParam();
+    return;
+  }
+  if (name === 'ui-activity-active') {
+    assert.equal(el('activitySub').textContent, '2 项处理中');
+    assert.match(el('activityList').innerHTML, /排队中/);
+    assert.match(el('activityList').innerHTML, /解析中 · parsing · 40%/);
+    assert.match(el('activityList').innerHTML, /&lt;img/);
+    assert.doesNotMatch(el('activityList').innerHTML, /<img/);
+    assert.equal(listCalls().length, 1);
+    assertNoCompanyParam();
+    assert.equal(timers.size, 1); // 存在活动任务时在主页可见期间有限轮询
+    await tick();
+    assert.equal(listCalls().length, 2);
+    assert.equal(timers.size, 1);
+    // 离开公司综合主页：停止轮询；期间恢复可见也不读取
+    driveNav.click(); await flush();
+    assert.equal(el('overview').classList.contains('active'), false);
+    assert.equal(timers.size, 0);
+    document.hidden = true; document.events.visibilitychange.forEach(fn => fn());
+    document.hidden = false; document.events.visibilitychange.forEach(fn => fn()); await flush();
+    assert.equal(listCalls().length, 2);
+    // 切回公司综合主页：重新读取持久状态并恢复轮询
+    overviewNav.click(); await flush();
+    assert.equal(el('overview').classList.contains('active'), true);
+    assert.equal(listCalls().length, 3);
+    assert.equal(timers.size, 1);
+    // 页面隐藏：停止轮询；重新可见：重新读取持久状态
+    document.hidden = true; document.events.visibilitychange.forEach(fn => fn());
+    assert.equal(timers.size, 0);
+    document.hidden = false; document.events.visibilitychange.forEach(fn => fn()); await flush();
+    assert.equal(listCalls().length, 4);
+    assert.equal(timers.size, 1);
+    // 全部进入终态后停止轮询，最近记录如实展示
+    jobs = jobs.map(job => ({...job, status: 'done', stage: 'done'}));
+    await tick();
+    assert.equal(el('activitySub').textContent, '2 项最近记录');
+    assert.match(el('activityList').innerHTML, /已完成/);
+    assert.equal(timers.size, 0);
+    return;
+  }
+  if (name === 'ui-activity-terminal') {
+    assert.equal(el('activitySub').textContent, '3 项需处理 · 2 项最近记录');
+    assert.match(el('activityList').innerHTML, /失败 · 需处理/);
+    assert.match(el('activityList').innerHTML, /待人工确认 · 需处理/);
+    assert.match(el('activityList').innerHTML, /&lt;后端解析错误&gt;/);
+    assert.doesNotMatch(el('activityList').innerHTML, /<后端解析错误>/);
+    // 存在多条需处理任务时，真实最近完成项仍保底显示一条，不被全部挤出代表行
+    assert.match(el('activityList').innerHTML, /acc-完成\.pdf<\/span><span class="status">已完成 · /);
+    assert.equal((el('activityList').innerHTML.match(/class="activity-item /g) || []).length, 3);
+    assert.match(el('activityList').innerHTML, /另有 2 项任务/); // 其余需处理/已取消计入摘要但超出代表项数量
+    assert.doesNotMatch(el('activityList').innerHTML, /acc-部分\.pdf|acc-取消\.pdf/);
+    assert.equal(timers.size, 0); // 无活动任务不轮询
+    assertNoCompanyParam();
+    return;
+  }
+  if (name === 'ui-activity-recent') {
+    assert.equal(el('activitySub').textContent, '1 项处理中 · 2 项最近记录');
+    // 缺字段不补造：无文件名、无阶段、无进度、无完成时间
+    assert.match(el('activityList').innerHTML, /未提供文件名<\/span><span class="status">解析中<\/span>/);
+    assert.match(el('activityList').innerHTML, /acc-完成\.pdf<\/span><span class="status">已完成<\/span>/);
+    assert.match(el('activityList').innerHTML, /acc-取消\.pdf<\/span><span class="status">已取消<\/span>/);
+    assert.doesNotMatch(el('activityList').innerHTML, /NaN|undefined|%/);
+    assert.equal(timers.size, 1); // 仍有活动任务，继续有限轮询
+    await tick();
+    assert.doesNotMatch(el('activityList').innerHTML, /NaN|undefined|%/);
+    assertNoCompanyParam();
+    return;
+  }
+  if (name === 'ui-activity-limit') {
+    assert.equal(el('activitySub').textContent, '2 项处理中 · 2 项需处理 · 2 项最近记录');
+    // 行数有限时三类代表项各保留一条：活跃、需处理与真实最近完成
+    assert.equal((el('activityList').innerHTML.match(/class="activity-item /g) || []).length, 3);
+    assert.match(el('activityList').innerHTML, /acc-排队\.pdf/);
+    assert.match(el('activityList').innerHTML, /acc-失败\.pdf/);
+    assert.match(el('activityList').innerHTML, /acc-完成\.pdf<\/span><span class="status">已完成<\/span>/);
+    assert.doesNotMatch(el('activityList').innerHTML, /acc-解析\.pdf|acc-部分\.pdf|acc-取消\.pdf/);
+    assert.match(el('activityList').innerHTML, /另有 3 项任务/); // 超出代表行的数量准确提示
+    assertNoCompanyParam();
+    return;
+  }
+  if (name === 'ui-activity-done-order') {
+    assert.equal(el('activitySub').textContent, '1 项处理中 · 1 项需处理 · 3 项最近记录');
+    // 两条完成记录都有可解析 finished_at 时，最近完成代表项取真实最新一条而非API顺序
+    assert.match(el('activityList').innerHTML, /acc-较晚完成\.pdf/);
+    assert.doesNotMatch(el('activityList').innerHTML, /acc-较早完成\.pdf|acc-取消\.pdf/);
+    assert.match(el('activityList').innerHTML, /另有 2 项任务/);
+    assert.equal(timers.size, 1); // 仍有活动任务，继续有限轮询
+    // 完成记录都缺有效时间时不造时间，沿用API顺序取第一条
+    jobs = jobs.map(job => job.status === 'done' ? {...job, finished_at: undefined} : job);
+    await tick();
+    assert.match(el('activityList').innerHTML, /acc-较早完成\.pdf<\/span><span class="status">已完成<\/span>/);
+    assert.doesNotMatch(el('activityList').innerHTML, /acc-较晚完成\.pdf|NaN|undefined/);
+    assert.equal(timers.size, 1);
+    assertNoCompanyParam();
+    return;
+  }
+  if (name === 'ui-activity-detail' || name === 'ui-activity-readonly') {
+    assert.match(el('activityList').innerHTML, name === 'ui-activity-detail' ? /另有 0 项任务|acc-完成\.pdf/ : /acc-只读\.pdf/);
+    el('activityDetailBtn').click(); await flush();
+    // 详情入口复用既有上传/文件柜任务弹窗，不新建任务面板
+    assert.equal(el('importMask').classList.contains('open'), true);
+    assert.equal(el('overview').classList.contains('active'), true);
+    assert.match(el('importFiles').innerHTML, /acc-(取消|只读)\.pdf/);
+    if (name === 'ui-activity-detail') {
+      assert.match(el('importFiles').innerHTML, /已取消/);
+      assert.match(el('importFiles').innerHTML, /失败/);
+      assert.match(el('importFiles').innerHTML, /acc-失败原因/);
+    } else {
+      assert.match(el('importFiles').innerHTML, /排队中/);
+      assert.equal(timers.size > 0, true); // 只读模式下活动任务仍可读轮询
+      await tick();
+    }
+    // 小卡自身只 GET /api/parse-jobs 且不带 company_id；向导既有行为（如完整模式刷新引导）不在小卡契约内
+    assertNoCompanyParam();
+    el('importClose').click(); await flush();
+    assert.equal(el('importMask').classList.contains('open'), false);
+    return;
+  }
+  throw new Error('Unknown contract: ' + name);
+}
+
+async function marketCase(name) {
+  // 市场动态未接入契约：默认首页与市场页只展示未接入状态，不残留本卡涉及的静态内容、
+  // 设置与详情入口；默认看板结构（事实树卡/员工动态卡/上传入口）与市场导航/切页保留。
+  const overviewHtml = html.split('id="overview">')[1].split('id="facts">')[0];
+  assert.match(overviewHtml, /<div class="card" id="marketNotice">/);
+  assert.match(overviewHtml, /市场动态策略尚未接入/);
+  assert.match(overviewHtml, /不展示新闻、政策、研报或市场数字/);
+  assert.ok(overviewHtml.indexOf('id="marketNotice"') > overviewHtml.indexOf('id="activityBoard"'));
+  assert.doesNotMatch(overviewHtml, /news-card|newsTrack|newsViewport|newsFilters|newsSetBtn/);
+  assert.doesNotMatch(overviewHtml, /按关注来源实时汇总|每日按所选来源|点击查看原文/);
+  const mktHtml = html.split('<div class="screen" id="mkt">')[1].split('<div class="screen deferred-screen" id="fin">')[0];
+  assert.match(mktHtml, /<div class="card" id="mktNotice">/);
+  assert.match(mktHtml, /市场动态策略尚未接入/);
+  assert.match(mktHtml, /不展示新闻、政策、研报或市场数字示例/);
+  assert.doesNotMatch(mktHtml, /insight|mkt-tab|mkt-pane|data-pane|src-line|src-tag/);
+  assert.doesNotMatch(mktHtml, /国产化率|竞争对手对比|竞争壁垒|近期重点政策|行业研报观点|行业动态|技术前沿/);
+  assert.doesNotMatch(mktHtml, /中金|中信|新华社|财联社|Nature Materials|arXiv|工信部|企查查/);
+  for (const kept of ['id="factsBoard"', 'id="activityBoard"', 'id="importWizardBtn"', 'hero-ask" data-go="chat"'])
+    assert.ok(html.includes(kept), kept); // 默认看板结构保留
+  // 市场导航与壳内切页入口保留：侧栏三个子项仍指向 mkt 屏，面包屑标题仍在路由表
+  assert.equal((html.match(/data-go="mkt"/g) || []).length, 3);
+  assert.match(script, /mkt:"市场"/);
+  // 消息关注设置/详情弹窗与其脚本一并移除，不残留可打开入口
+  for (const gone of ['id="newsSetMask"', 'id="newsDetailMask"', 'id="newsSetBtn"', 'id="ndMeta"', 'nset-mask', 'nd-mask'])
+    assert.ok(!html.includes(gone), gone);
+  assert.doesNotMatch(script, /var NEWS=|renderNews|renderFilters|newsSetSave|ndAskBtn|openDetail|TYPE_LABEL|LV_LABEL|mkt-tab/);
+  fetchImpl = async url => {
+    if (url === '/api/entity-roster') return ok({entities: [selfNamed]});
+    if (url === '/api/parse-jobs') return ok({jobs: []});
+    if (url === '/api/facts/tree') return ok(factsTreeBody('empty'));
+    throw new Error('Unexpected URL ' + url);
+  };
+  vm.runInContext(script, context); await flush(); // 移除旧 DOM 后初始化无缺失元素错误
+  assert.equal(el('overview').classList.contains('active'), true);
+  assert.equal(el('activitySub').textContent, '当前没有上传任务'); // 员工动态卡读取正常完成
+  assert.deepEqual([...new Set(calls.map(call => call[0]))].sort(),
+    ['/api/entity-roster', '/api/facts/tree', '/api/parse-jobs']); // 看板只有既有读取，无任何市场数据请求
+  mktNav.click(); await flush();
+  assert.equal(el('mkt').classList.contains('active'), true);
+  assert.equal(el('overview').classList.contains('active'), false);
+  assert.equal(el('crumb').textContent, '市场');
+  overviewNav.click(); await flush();
+  assert.equal(el('overview').classList.contains('active'), true);
+  assert.equal(el('mkt').classList.contains('active'), false);
+}
+
 async function main() {
   if (caseName.startsWith('ui-drive-')) {await driveCase(caseName); return;}
   if (caseName.startsWith('ui-facts-library')) {await factsLibraryCase(caseName); return;}
   if (caseName.startsWith('ui-facts-')) {await factsTreeCase(caseName); return;}
   if (caseName.startsWith('ui-company-title')) {await companyTitleCase(caseName); return;}
+  if (caseName.startsWith('ui-activity-')) {await activityCase(caseName); return;}
+  if (caseName.startsWith('ui-market-')) {await marketCase(caseName); return;}
   switch (caseName) {
     case 'api': {
       const result = await load({select: payload => payload.rows});
@@ -820,20 +1081,21 @@ async function main() {
         url === '/api/entity-roster' ? {entities: [selfNamed]} : url === '/api/parse-jobs' ? {jobs: []} :
         {job_id: 'job', file_hash: 'hash', status: 'queued', original_name: 'acc-test.pdf', size: 8}});
       assert.equal(elements.get('overview').classList.contains('active'), true);
-      assert.equal(calls.length, 2); // 首次进入公司主页：事实树一次 + 登记公司名一次
-      assert.equal(calls[0][0], '/api/facts/tree'); assert.equal(calls[1][0], '/api/entity-roster');
+      assert.equal(calls.length, 3); // 首次进入公司主页：事实树一次 + 登记公司名一次 + 员工动态任务一次
+      assert.equal(calls[0][0], '/api/facts/tree'); assert.equal(calls[1][0], '/api/entity-roster'); assert.equal(calls[2][0], '/api/parse-jobs');
       assert.equal((calls[0][1].method || 'GET'), 'GET'); assert.equal(calls[0][1].credentials, 'same-origin');
       assert.equal((calls[1][1].method || 'GET'), 'GET'); assert.equal(calls[1][1].credentials, 'same-origin');
+      assert.equal((calls[2][1].method || 'GET'), 'GET'); assert.equal(calls[2][1].credentials, 'same-origin');
       elements.get('chatInput').value = '测试消息'; elements.get('sendBtn').click();
       await flush();
-      assert.equal(calls[2][0], '/api/chat'); assert.equal(calls[2][1].method, 'POST');
+      assert.equal(calls[3][0], '/api/chat'); assert.equal(calls[3][1].method, 'POST');
       assert.equal(elements.get('chatInner').children[1].querySelector('.bubble').textContent, '测试回复');
       elements.get('driveWizardBtn').click(); await flush();
       assert.equal(elements.get('importMask').classList.contains('open'), true);
       assert.equal(elements.get('importGuideText').textContent, '测试引导');
       elements.get('importFileInput').files = [{name: 'acc-test.pdf'}];
       elements.get('importFileInput').dispatch('change'); await flush();
-      assert.deepEqual(calls.map(call => call[0]), ['/api/facts/tree', '/api/entity-roster', '/api/chat', '/api/entity-roster', '/api/parse-jobs', '/api/import-guide', '/api/upload', '/api/knowledge']);
+      assert.deepEqual(calls.map(call => call[0]), ['/api/facts/tree', '/api/entity-roster', '/api/parse-jobs', '/api/chat', '/api/entity-roster', '/api/parse-jobs', '/api/import-guide', '/api/upload', '/api/knowledge', '/api/parse-jobs']);
       assert.equal(calls.filter(call => call[0] === '/api/upload').length, 1); assert.equal(alerts.length, 0);
       break;
     case 'ui-cabinet-registration':

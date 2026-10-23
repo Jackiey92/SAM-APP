@@ -165,7 +165,11 @@ def test_full_routes_still_work_and_readonly_blocks_before_services(shell_web, m
     "ui-facts-library", "ui-facts-library-legacy",
     "ui-facts-ready", "ui-facts-empty", "ui-facts-unbound", "ui-facts-not-generated",
     "ui-facts-disabled", "ui-facts-scope-missing", "ui-facts-failure", "ui-facts-upload-refresh",
-    "ui-company-title", "ui-company-title-unregistered", "ui-company-title-failure", "ui-company-title-register"])
+    "ui-company-title", "ui-company-title-unregistered", "ui-company-title-failure", "ui-company-title-register",
+    "ui-activity-active", "ui-activity-terminal", "ui-activity-recent", "ui-activity-empty",
+    "ui-activity-error", "ui-activity-detail", "ui-activity-limit", "ui-activity-done-order",
+    "ui-activity-readonly",
+    "ui-market-disabled"])
 def test_javascript_foundation_contracts(case):
     node = shutil.which("node")
     if not node:
@@ -548,6 +552,16 @@ def test_upload_duplicate_of_failed_job_never_auto_retries_but_explicit_retry_wo
         assert calls == [job_id, job_id]
     finally:
         manager.executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_sidebar_omits_unconfigured_identity():
+    source = (ROOT / 'prototype/startup-ai-manager.html').read_text(encoding='utf-8')
+    aside = source.split('<aside ', 1)[1].split('</aside>', 1)[0]
+    for marker in ('张明', '法定代表人', 'side-user'):
+        assert marker not in aside
+    assert 'data-go="facts"' in aside
+    assert 'id="importNavBtn"' in aside
+    assert 'data-go="chat"' in aside
 
 
 def test_knowledge_old_routes_share_shell_without_reading_services(shell_web, monkeypatch):

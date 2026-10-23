@@ -63,11 +63,6 @@ body{font-family:var(--fs);background:var(--bg);color:var(--t1);font-size:14px;-
 .ai-entry button .at small{display:block;font-size:10px;font-weight:500;opacity:.85;margin-top:2px;}
 .ai-entry button .n{margin-left:auto;z-index:1;font-size:10px;background:rgba(255,255,255,.25);border-radius:9px;padding:3px 8px;font-weight:700;}
 
-.side-user{display:flex;align-items:center;gap:9px;padding:11px 16px;border-top:1px solid var(--border-2);flex:none;}
-.av{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,#ffb400,#ff7d00);color:#fff;display:grid;place-items:center;font-size:12px;font-weight:700;flex:none;}
-.side-user .u b{font-size:12.5px;display:block;}
-.side-user .u span{font-size:11px;color:var(--t3);}
-
 /* ============ Main ============ */
 .main{display:flex;flex-direction:column;overflow:hidden;}
 .topbar{height:58px;background:#fff;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:14px;padding:0 24px;flex:none;}
@@ -317,6 +312,19 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
 #factsBoard #factsBrief{max-height:280px;overflow-y:auto;}
 #factsBoard #factsTrunks{margin-top:12px;overflow-x:auto;}
 
+/* 公司看板员工动态小卡：只读真实任务状态，空态/失败态不回退静态样例 */
+#activityBoard .card-h{gap:10px;flex-wrap:wrap;}
+.activity-list{display:flex;flex-direction:column;gap:7px;}
+.activity-item{display:flex;align-items:center;gap:9px;border:1px solid var(--border-2);border-radius:8px;padding:8px 10px;font-size:12px;flex-wrap:wrap;}
+.activity-item .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.activity-item .status{margin-left:auto;color:var(--t3);font-size:11px;white-space:nowrap;}
+.activity-item.ok .status{color:var(--green);}
+.activity-item.warn .status{color:var(--orange);}
+.activity-item.err .status{color:var(--red);}
+.activity-item .message{width:100%;color:var(--t3);overflow-wrap:anywhere;}
+.activity-more{font-size:11px;color:var(--t3);}
+.activity-empty{color:var(--t3);font-size:13px;line-height:1.7;}
+
 /* ===== 事实库：与 webapp/static/css/app.css 中 facts-tree 样式保持一致（变量按本壳适配） ===== */
 .facts-tree{display:grid;gap:14px;min-width:0}
 .facts-tree-readonly{margin:0 0 14px;padding:10px 14px;border:1px solid #c7d2fe;border-radius:10px;background:#f5f7ff;color:var(--t2);font-size:13px}
@@ -512,69 +520,7 @@ td.b,th.b{text-align:right;} td b{color:var(--t1);font-weight:600;}
   .welcome{padding:26px 0 10px;}
   .welcome h2{font-size:21px;}
   .sugg-grid{margin-top:16px;}
-
-  /* 侧栏底部用户区适配刘海 */
-  .side-user{padding-bottom:calc(11px + env(safe-area-inset-bottom));}
 }
-/* ===== 消息关注 ===== */
-.news-card{margin-top:16px;overflow:hidden;}
-.news-head{display:flex;align-items:center;gap:10px;padding:14px 18px 10px;}
-.news-head .nh-live{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:700;color:var(--t1);}
-.news-head .nh-live i{width:7px;height:7px;border-radius:50%;background:var(--red);box-shadow:0 0 0 0 rgba(245,63,63,.5);animation:npulse 1.8s infinite;}
-@keyframes npulse{0%{box-shadow:0 0 0 0 rgba(245,63,63,.45);}70%{box-shadow:0 0 0 7px rgba(245,63,63,0);}100%{box-shadow:0 0 0 0 rgba(245,63,63,0);}}
-.news-head .nh-sub{font-size:12px;color:var(--t3);}
-.news-head .sp{flex:1;}
-.news-head .nh-set{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--t2);background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:5px 10px;cursor:pointer;transition:.15s;}
-.news-head .nh-set:hover{border-color:var(--primary);color:var(--primary);}
-.news-viewport{height:168px;overflow:hidden;position:relative;margin:0 10px 6px;mask-image:linear-gradient(180deg,transparent,#000 16px,#000 calc(100% - 16px),transparent);-webkit-mask-image:linear-gradient(180deg,transparent,#000 16px,#000 calc(100% - 16px),transparent);}
-.news-track{position:absolute;left:0;right:0;top:0;}
-.news-item{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:9px;cursor:pointer;}
-.news-item:hover{background:var(--bg);}
-.news-item .ni-time{font-size:11.5px;color:var(--t3);flex:none;width:62px;font-variant-numeric:tabular-nums;}
-.news-item .ni-title{font-size:13px;color:var(--t1);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.news-item:hover .ni-title{color:var(--primary);}
-.src-tag{flex:none;font-size:10.5px;line-height:1;padding:3px 7px;border-radius:5px;font-weight:600;white-space:nowrap;}
-.src-news{background:#ffece8;color:var(--red);}
-.src-report{background:#e8efff;color:var(--primary);}
-.src-paper{background:#f0ecff;color:var(--purple);}
-.src-frontier{background:#e6fbfa;color:#0aa5a1;}
-.src-gov{background:#fff3e6;color:var(--orange);}
-
-/* ===== 关注设置弹窗 ===== */
-.nset-mask{position:fixed;inset:0;background:rgba(20,22,30,.46);backdrop-filter:blur(3px);display:none;align-items:center;justify-content:center;z-index:80;}
-.nset-mask.show{display:flex;}
-.nset{width:520px;max-width:calc(100vw - 40px);max-height:84vh;overflow-y:auto;background:#fff;border-radius:16px;box-shadow:0 24px 70px rgba(20,22,40,.28);}
-.nset-h{display:flex;align-items:center;padding:18px 22px;border-bottom:1px solid var(--border-2);}
-.nset-h b{font-size:15.5px;}
-.nset-h .sp{flex:1;}
-.nset-h .x{cursor:pointer;color:var(--t3);line-height:0;}
-.nset-b{padding:18px 22px;}
-.nset-g{font-size:12px;font-weight:700;color:var(--t2);margin:2px 0 11px;}
-.src-opts{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:20px;}
-.src-opt{display:flex;align-items:center;gap:10px;border:1px solid var(--border);border-radius:10px;padding:11px 12px;cursor:pointer;transition:.15s;}
-.src-opt:hover{border-color:#c7d0ff;}
-.src-opt.on{border-color:var(--primary);background:#f5f8ff;}
-.src-opt .so-box{width:17px;height:17px;border-radius:5px;border:1.5px solid #c4cad6;flex:none;display:flex;align-items:center;justify-content:center;color:#fff;transition:.15s;}
-.src-opt.on .so-box{background:var(--primary);border-color:var(--primary);}
-.src-opt .so-t{font-size:13px;color:var(--t1);}
-.src-opt .so-t small{display:block;color:var(--t3);font-size:10.5px;margin-top:2px;}
-.kw-input{width:100%;border:1px solid var(--border);border-radius:9px;padding:10px 12px;font-size:13px;resize:none;height:68px;font-family:inherit;color:var(--t1);}
-.kw-input:focus{outline:none;border-color:var(--primary);}
-.kw-hint{font-size:11px;color:var(--t3);margin-top:6px;}
-.nset-f{display:flex;gap:10px;justify-content:flex-end;padding:15px 22px;border-top:1px solid var(--border-2);}
-.nset-f button{border-radius:9px;padding:8px 18px;font-size:13px;cursor:pointer;border:1px solid var(--border);background:#fff;color:var(--t2);}
-.nset-f .save{background:var(--primary);border-color:var(--primary);color:#fff;}
-.nset-f .save:hover{background:var(--primary-d);}
-
-/* ===== 市场栏目来源标注 ===== */
-.src-line{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--t3);margin-top:10px;padding-top:10px;border-top:1px dashed var(--border-2);}
-.src-line b{color:var(--t2);font-weight:600;}
-.mkt-tabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;}
-.mkt-tab{font-size:12.5px;padding:6px 14px;border-radius:8px;border:1px solid var(--border);background:#fff;color:var(--t2);cursor:pointer;}
-.mkt-tab.on{background:var(--primary);border-color:var(--primary);color:#fff;}
-.mkt-pane{display:none;}
-.mkt-pane.on{display:block;}
-
 /* ===== 系统导航项 ===== */
 .sys-item{display:flex;align-items:center;gap:10px;width:100%;padding:8px 11px;border-radius:9px;border:none;background:none;font-family:inherit;font-size:13px;font-weight:500;color:var(--t2);cursor:pointer;text-align:left;margin-bottom:2px;}
 .sys-item:hover{background:#f2f3f5;color:var(--t1);}
@@ -661,44 +607,6 @@ a.sys-item{text-decoration:none;}
 .drive-conn-chip{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;border:1px solid var(--border);border-radius:20px;padding:6px 13px;background:#fff;color:var(--t2);}
 .drive-conn-chip .ok{width:6px;height:6px;border-radius:50%;background:var(--green);}
 
-/* ===== 消息分级 ===== */
-.news-item{border-left:3px solid transparent;padding-left:9px;}
-.news-item.lv-key{border-left-color:var(--red);}
-.news-item.lv-watch{border-left-color:var(--orange);}
-.news-item.lv-normal{border-left-color:#d7d9de;}
-.lv-tag{flex:none;font-size:10.5px;line-height:1;padding:3px 7px;border-radius:5px;font-weight:700;white-space:nowrap;}
-.lv-key .lv-tag,.lv-tag.t-key{background:#ffece8;color:var(--red);}
-.lv-tag.t-watch{background:#fff3e6;color:var(--orange);}
-.lv-tag.t-normal{background:#f2f3f5;color:var(--t3);}
-.news-item.lv-key .ni-title{font-weight:600;}
-.news-item .ni-detail{flex:none;font-size:11px;color:var(--primary);white-space:nowrap;}
-.news-filters{display:flex;gap:7px;padding:0 18px 10px;flex-wrap:wrap;}
-.nf{font-size:11.5px;padding:4px 11px;border-radius:20px;border:1px solid var(--border);background:#fff;color:var(--t2);cursor:pointer;}
-.nf.on{background:var(--t1);border-color:var(--t1);color:#fff;}
-.nf small{opacity:.7;margin-left:2px;}
-
-/* ===== 消息详情弹窗 ===== */
-.nd-mask{position:fixed;inset:0;background:rgba(20,22,30,.46);backdrop-filter:blur(3px);display:none;align-items:center;justify-content:center;z-index:90;}
-.nd-mask.show{display:flex;}
-.nd{width:560px;max-width:calc(100vw - 40px);max-height:86vh;overflow-y:auto;background:#fff;border-radius:16px;box-shadow:0 24px 70px rgba(20,22,40,.28);}
-.nd-h{padding:18px 22px 14px;border-bottom:1px solid var(--border-2);}
-.nd-h .nd-meta{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;}
-.nd-h b{font-size:16px;line-height:1.5;color:var(--t1);display:block;}
-.nd-b{padding:16px 22px 20px;}
-.nd-g{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700;color:var(--t1);margin:16px 0 9px;}
-.nd-g:first-child{margin-top:2px;}
-.nd-g .g-ic{width:19px;height:19px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;}
-.nd-points{list-style:none;margin:0;padding:0;}
-.nd-points li{position:relative;padding:7px 0 7px 20px;font-size:13px;color:var(--t2);line-height:1.55;border-bottom:1px dashed var(--border-2);}
-.nd-points li:last-child{border-bottom:none;}
-.nd-points li::before{content:"";position:absolute;left:2px;top:14px;width:6px;height:6px;border-radius:50%;background:var(--primary);}
-.nd-impact{background:#f5f8ff;border:1px solid #e4ebff;border-radius:10px;padding:12px 14px;}
-.nd-impact .im{display:flex;gap:9px;font-size:13px;color:var(--t2);line-height:1.55;padding:5px 0;}
-.nd-impact .im i{flex:none;width:6px;height:6px;border-radius:50%;background:var(--red);margin-top:8px;}
-.nd-action{display:flex;gap:9px;align-items:flex-start;background:#fff8ec;border:1px solid #ffe4b8;border-radius:10px;padding:11px 14px;font-size:12.5px;color:#8a5a10;line-height:1.55;}
-.nd-f{display:flex;gap:10px;justify-content:flex-end;padding:14px 22px;border-top:1px solid var(--border-2);}
-.nd-f button{border-radius:9px;padding:8px 18px;font-size:13px;cursor:pointer;border:1px solid var(--border);background:#fff;color:var(--t2);}
-.nd-f .ask{background:var(--primary);border-color:var(--primary);color:#fff;}
   /* 扩展开关 */
   .ext-sw{flex:none;position:relative;width:38px;height:22px;display:inline-block;}
   .ext-sw input{opacity:0;width:0;height:0;}
@@ -922,11 +830,6 @@ a.sys-item{text-decoration:none;}
       </button>
 
     </nav>
-
-    <div class="side-user">
-      <span class="av">张</span>
-      <div class="u"><b>张明</b><span>法定代表人</span></div>
-    </div>
   </aside>
 
   <!-- ============ MAIN ============ -->
@@ -975,18 +878,25 @@ a.sys-item{text-decoration:none;}
           <div class="table-wrap" id="factsTrunks" hidden></div>
         </div>
 
-        <!-- 消息关注 -->
-        <div class="card news-card">
-          <div class="news-head">
-            <span class="nh-live"><i></i>消息关注</span>
-            <span class="nh-sub">按关注来源实时汇总 · 点击查看原文</span>
-            <span class="sp"></span>
-            <button class="nh-set" id="newsSetBtn"><svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>关注设置</button>
+        <!-- 员工动态小卡：只读展示持久上传任务的真实状态与进度；详细任务与操作仍在既有上传/文件柜任务弹窗 -->
+        <div class="card" id="activityBoard">
+          <div class="card-h">
+            <h3>员工动态</h3>
+            <span class="sub" id="activitySub">正在读取任务状态…</span>
+            <span style="flex:1"></span>
+            <button class="drive-btn" id="activityRetryBtn" type="button" hidden>重试</button>
+            <button class="drive-btn" id="activityDetailBtn" type="button">任务详情</button>
           </div>
-          <div class="news-filters" id="newsFilters"></div>
-          <div class="news-viewport" id="newsViewport">
-            <div class="news-track" id="newsTrack"></div>
+          <div class="activity-list" id="activityList" aria-live="polite"></div>
+        </div>
+
+        <!-- 市场动态：策略尚未接入，只展示未接入状态，不展示任何静态示例内容、设置或详情入口 -->
+        <div class="card" id="marketNotice">
+          <div class="card-h">
+            <h3>市场动态</h3>
+            <span class="sub">市场动态策略尚未接入</span>
           </div>
+          <p class="knowledge-meta" role="status">市场关注的来源、频率与预算需独立设计批准后才会接入；接入前此处不展示新闻、政策、研报或市场数字。</p>
         </div>
 
       </div>
@@ -1240,86 +1150,10 @@ a.sys-item{text-decoration:none;}
     <!-- ================= 市场 ================= -->
     <div class="screen" id="mkt">
       <div class="board-scroll">
-        <div class="sec-head"><h2>市场</h2><span class="sub">竞争格局 · 政策动态 · 前沿与研报</span></div>
-        <div class="insight"><span class="ai-badge">✦ AI</span><span class="itxt">高端柔性导电材料<b>国产化率仅 34.0%</b>，外资在高端温区占优；公司差异化在 -55~150℃ 耐温性能。</span><span class="ibasis">查看依据</span></div>
-
-        <div class="mkt-tabs">
-          <button class="mkt-tab on" data-pane="comp">竞争格局</button>
-          <button class="mkt-tab" data-pane="policy">政策动态</button>
-          <button class="mkt-tab" data-pane="front">前沿与研报</button>
-        </div>
-
-        <!-- 竞争格局 -->
-        <div class="mkt-pane on" data-pane="comp">
-          <div class="card">
-            <div class="card-h"><h3>竞争对手对比</h3></div>
-            <div class="table-wrap"><table><thead><tr><th>企业</th><th>定位</th><th>耐温性能</th><th>产能</th><th>市占率</th><th>威胁度</th></tr></thead><tbody>
-              <tr><td><b>A 公司（上市）</b></td><td>全系列导电材料</td><td>-40~125℃</td><td>高</td><td class="b">12.0%</td><td><span class="tag t-red">高</span></td></tr>
-              <tr><td>B 公司</td><td>导热基板为主</td><td>-30~105℃</td><td>中</td><td class="b">6.5%</td><td><span class="tag t-orange">中</span></td></tr>
-              <tr><td>C 公司（外资）</td><td>高端耐温材料</td><td>-55~150℃</td><td>中</td><td class="b">8.2%</td><td><span class="tag t-red">高</span></td></tr>
-              <tr><td>本公司</td><td>耐温差异化</td><td>-55~150℃</td><td>低</td><td class="b">0.3%</td><td><span class="tag t-blue">—</span></td></tr>
-            </tbody></table></div>
-            <div class="src-line"><span class="src-tag src-report">研报 · 中金公司</span><span>竞争格局整理自行业研报及企查查工商数据</span></div>
-          </div>
-          <div class="grid g2 mt16">
-            <div class="card"><div class="card-h"><h3>竞争壁垒评估</h3></div>
-              <div class="table-wrap"><table><thead><tr><th>维度</th><th>本公司</th><th>主要竞品均值</th></tr></thead><tbody>
-                <tr><td>工作温区</td><td><b>-55~150℃</b></td><td>-40~125℃</td></tr>
-                <tr><td>量产良率</td><td>96.2%</td><td>97.5%</td></tr>
-                <tr><td>有效专利</td><td>7 项</td><td>22 项</td></tr>
-                <tr><td>头部客户认证</td><td>1 家</td><td>5 家以上</td></tr>
-              </tbody></table></div>
-            </div>
-            <div class="card"><div class="card-h"><h3>差异化切入点</h3></div>
-              <div class="desc-item"><span class="dk">性能差异</span><span class="dv">温区下探 -55℃、上拓 150℃，对标外资高端产品</span></div>
-              <div class="desc-item"><span class="dk">国产替代</span><span class="dv">国产化率仅 34.0%，高端耐温材料进口依赖度高</span></div>
-              <div class="desc-item"><span class="dk">待补短板</span><span class="dv">产能、专利储备与头部客户认证仍需追赶</span></div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 政策动态 -->
-        <div class="mkt-pane" data-pane="policy">
-          <div class="card">
-            <div class="card-h"><h3>近期重点政策</h3></div>
-            <div class="table-wrap"><table><thead><tr><th>时间</th><th>政策 / 通知</th><th>发布主体</th><th>相关性</th></tr></thead><tbody>
-              <tr><td>2026-09-19</td><td>重点新材料首批次应用保险补偿申报通知</td><td>工信部</td><td><span class="tag t-red">高</span></td></tr>
-              <tr><td>2026-09-12</td><td>新材料产业高质量发展行动方案</td><td>工信部</td><td><span class="tag t-red">高</span></td></tr>
-              <tr><td>2026-08-28</td><td>先进制造业集群培育专项实施细则</td><td>江苏省工信厅</td><td><span class="tag t-orange">中</span></td></tr>
-            </tbody></table></div>
-            <div class="src-line"><span class="src-tag src-gov">政策 · 工信部</span><span>来源：工信部官网、江苏省工信厅公告</span></div>
-          </div>
-          <div class="card mt16">
-            <div class="card-h"><h3>对公司的影响</h3></div>
-            <div class="desc-item"><span class="dk">可申报支持</span><span class="dv">柔性导电材料符合首批次保险补偿方向，可降低下游试用风险</span></div>
-            <div class="desc-item"><span class="dk">地方配套</span><span class="dv">某市先进制造集群专项可对接研发与产业化补贴</span></div>
-            <div class="src-line"><span class="src-tag src-news">新闻 · 新华社</span><span>政策方向解读，2026-09-12</span></div>
-          </div>
-        </div>
-
-        <!-- 前沿与研报 -->
-        <div class="mkt-pane" data-pane="front">
-          <div class="grid g2">
-            <div class="card"><div class="card-h"><h3>技术前沿</h3></div>
-              <div class="desc-item"><span class="dk">学术进展</span><span class="dv">高耐温柔性导电复合体系工作温区拓宽至 -55~150℃</span></div>
-              <div class="src-line"><span class="src-tag src-paper">论文 · Nature Materials</span><span>2026-09，可靠性机理方向</span></div>
-              <div class="desc-item" style="margin-top:12px;"><span class="dk">预印本</span><span class="dv">极端温度循环下导电网络稳定性机理研究</span></div>
-              <div class="src-line"><span class="src-tag src-paper">论文 · arXiv</span><span>2026-09-19</span></div>
-            </div>
-            <div class="card"><div class="card-h"><h3>行业研报观点</h3></div>
-              <div class="desc-item"><span class="dk">中金公司</span><span class="dv">差异化耐温性能企业有望切入头部封装供应链</span></div>
-              <div class="src-line"><span class="src-tag src-report">研报 · 中金公司</span><span>2026-08</span></div>
-              <div class="desc-item" style="margin-top:12px;"><span class="dk">中信证券</span><span class="dv">国产高端材料替代加速，关注良率与客户认证进展</span></div>
-              <div class="src-line"><span class="src-tag src-report">研报 · 中信证券</span><span>2026-09-20</span></div>
-            </div>
-          </div>
-          <div class="card mt16">
-            <div class="card-h"><h3>行业动态</h3></div>
-            <div class="table-wrap"><table><thead><tr><th>时间</th><th>动态</th><th>来源</th></tr></thead><tbody>
-              <tr><td>2026-09-21</td><td>2026 柔性电子产业大会：国产耐温材料量产良率提升</td><td><span class="src-tag src-frontier">前沿 · 行业大会</span></td></tr>
-              <tr><td>2026-09-20</td><td>多家封装厂商上调全年材料采购指引</td><td><span class="src-tag src-news">新闻 · 财联社</span></td></tr>
-            </tbody></table></div>
-          </div>
+        <div class="sec-head"><h2>市场</h2><span class="sub">市场动态策略尚未接入</span></div>
+        <div class="card" id="mktNotice">
+          <div class="card-h"><h3>市场动态</h3></div>
+          <p class="knowledge-meta" role="status">市场关注的来源、触发、频率、预算与停止条件需独立设计批准后才会接入；接入前本页不展示新闻、政策、研报或市场数字示例。</p>
         </div>
       </div>
     </div>
@@ -1514,50 +1348,6 @@ a.sys-item{text-decoration:none;}
       </section>
     </div>
 
-    <!-- 消息关注设置弹窗 -->
-    <div class="nset-mask" id="newsSetMask">
-      <div class="nset" role="dialog" aria-modal="true" aria-label="消息关注设置">
-        <div class="nset-h"><b>消息关注设置</b><span class="sp"></span><span class="x" id="newsSetClose"><svg aria-hidden="true" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg></span></div>
-        <div class="nset-b">
-          <div class="nset-g">关注来源（可多选）</div>
-          <div class="src-opts" id="srcOpts">
-            <div class="src-opt on" data-type="news"><span class="so-box"><svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span class="so-t">新闻社 / 财经媒体<small>新华社 · 财联社 · 证券时报等</small></span></div>
-            <div class="src-opt on" data-type="report"><span class="so-box"><svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span class="so-t">券商 / 行业研报<small>中金 · 中信 · 行业研究院</small></span></div>
-            <div class="src-opt on" data-type="paper"><span class="so-box"><svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span class="so-t">学术论文<small>Nature · 期刊 · 知网 / arXiv</small></span></div>
-            <div class="src-opt on" data-type="frontier"><span class="so-box"><svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span class="so-t">行业前沿进展<small>技术动态 · 产业大会 · 新品</small></span></div>
-            <div class="src-opt on" data-type="gov"><span class="so-box"><svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span class="so-t">政策 / 政府公告<small>发改委 · 工信部 · 地方政策</small></span></div>
-          </div>
-          <div class="nset-g">关注关键词 / 主题（每行一个）</div>
-          <textarea class="kw-input" id="kwInput" placeholder="柔性导电材料&#10;柔性电子封装&#10;国产替代"></textarea>
-          <div class="kw-hint">系统将每日按所选来源 + 关键词汇总到「消息关注」，每条标注原始出处。</div>
-        </div>
-        <div class="nset-f">
-          <button id="newsSetCancel">取消</button>
-          <button class="save" id="newsSetSave">保存关注</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- 消息详情弹窗 -->
-    <div class="nd-mask" id="newsDetailMask">
-      <div class="nd" role="dialog" aria-modal="true" aria-label="重点消息详情">
-        <div class="nd-h">
-          <div class="nd-meta" id="ndMeta"></div>
-          <b id="ndTitle"></b>
-        </div>
-        <div class="nd-b">
-          <div class="nd-g"><span class="g-ic" style="background:#e8efff;color:var(--primary)"><svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="M4 6h16M4 12h16M4 18h10"/></svg></span>关键点提炼</div>
-          <ul class="nd-points" id="ndPoints"></ul>
-          <div id="ndImpactWrap"></div>
-          <div id="ndActionWrap"></div>
-        </div>
-        <div class="nd-f">
-          <button id="ndCloseBtn">关闭</button>
-          <button class="ask" id="ndAskBtn">向 AI 追问应对方案</button>
-        </div>
-      </div>
-    </div>
-
     </div><!-- /content -->
   </section>
 </div>
@@ -1651,6 +1441,8 @@ a.sys-item{text-decoration:none;}
     document.querySelectorAll('.ov-item,.sys-item').forEach(function(n){n.classList.toggle('active',n.dataset.go===id);});
     crumb.textContent=TITLES[id]||'';
     topbar.style.display=(id==='chat')?'none':'flex';
+    // 切回公司综合主页重新读取员工动态持久状态；离开主页即停止其有限轮询
+    if(id==='overview')loadActivity();else activityStop();
     if(id==='drive')return loadKnowledge();
   }
   document.querySelectorAll('[data-go]').forEach(function(b){
@@ -1788,15 +1580,6 @@ a.sys-item{text-decoration:none;}
   }
   sendBtn.addEventListener('click',submit);
   input.addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit();}});
-
-  /* ========== 市场标签切换 ========== */
-  document.querySelectorAll('.mkt-tab').forEach(function(tab){
-    tab.addEventListener('click',function(){
-      var k=tab.dataset.pane;
-      document.querySelectorAll('.mkt-tab').forEach(function(t){t.classList.toggle('on',t===tab);});
-      document.querySelectorAll('.mkt-pane').forEach(function(p){p.classList.toggle('on',p.dataset.pane===k);});
-    });
-  });
 
   /* ========== 扩展中心 ========== */
   var EXTS={
@@ -2002,8 +1785,8 @@ a.sys-item{text-decoration:none;}
       var wasDone=entry.job.status==='done',previousStatus=entry.job.status;
       entry.job=body.job;entry.error='';
       if(!wasDone&&entry.job.status==='done'&&window.SAM.config.mode!=='readonly'&&importMask.classList.contains('open'))refreshGuide();
-      // 上传任务进入终态后刷新公司看板的事实树状态
-      if(previousStatus!==entry.job.status&&FACTS_JOB_TERMINAL.indexOf(previousStatus)<0&&FACTS_JOB_TERMINAL.indexOf(entry.job.status)>=0)loadFactsTree();
+      // 上传任务进入终态后刷新公司看板的事实树状态与员工动态小卡
+      if(previousStatus!==entry.job.status&&FACTS_JOB_TERMINAL.indexOf(previousStatus)<0&&FACTS_JOB_TERMINAL.indexOf(entry.job.status)>=0){loadFactsTree();loadActivity();}
     }catch(error){if(version===entry.pollVersion)entry.error='状态读取失败：'+error.message;}
     finally{
       entry.polling=false;renderImportFiles();
@@ -2062,6 +1845,8 @@ a.sys-item{text-decoration:none;}
   }
   function closeImportWizard(){
     ++wizardVersion;importMask.classList.remove('open');importMask.setAttribute('aria-hidden','true');uploadedFiles.forEach(stopPolling);
+    // 弹窗关闭后公司综合主页仍在原地：重新读取一次员工动态持久状态
+    if(activityHomeActive())loadActivity();
   }
   async function uploadImportFile(entry){
     if(!window.SAM.ui.allowWrite()||entry.busy)return;
@@ -2077,7 +1862,7 @@ a.sys-item{text-decoration:none;}
         return true;
       });
       entry.job=res;entry.status='';entry.file=null;entry.pollVersion=0;
-      loadKnowledge();
+      loadKnowledge();loadActivity();
       showGuidePending();scheduleJob(entry);
     }catch(error){
       if(error.status===409&&error.code==='company_not_registered'){
@@ -2134,8 +1919,8 @@ a.sys-item{text-decoration:none;}
       if(!body.job)throw new Error('解析任务返回无效');
       var previousStatus=entry.job.status;
       entry.job=body.job;entry.error='';scheduleJob(entry);
-      // 取消等动作同样让任务进入终态，看板状态随之刷新
-      if(previousStatus!==entry.job.status&&FACTS_JOB_TERMINAL.indexOf(previousStatus)<0&&FACTS_JOB_TERMINAL.indexOf(entry.job.status)>=0)loadFactsTree();
+      // 取消等动作同样让任务进入终态，看板状态与员工动态小卡随之刷新
+      if(previousStatus!==entry.job.status&&FACTS_JOB_TERMINAL.indexOf(previousStatus)<0&&FACTS_JOB_TERMINAL.indexOf(entry.job.status)>=0){loadFactsTree();loadActivity();}
     }catch(error){entry.error=error.message;scheduleJob(entry);}
     finally{entry.busy=false;renderImportFiles();}
   });
@@ -2376,135 +2161,114 @@ a.sys-item{text-decoration:none;}
   loadFactsTree(); // 首次进入公司主页读取一次；之后仅在上传任务终态或手动重试时刷新
   checkRegistration(); // 首次进入即读取宿主登记公司名并同步首页标题；之后随登记状态读取/保存更新
 
-  /* ========== 消息关注 ========== */
-  var NEWS=[
-    {t:'09:12',type:'news',src:'新华社',lv:'key',
-     title:'工信部印发新材料产业高质量发展行动方案，高耐温材料列入重点方向',
-     points:['高耐温材料被列入重点发展方向，属于明确的产业鼓励类','政策覆盖研发支持、首批次应用与下游推广等环节','高端材料国产替代是方案主线之一'],
-     impact:['公司主营柔性导电材料，直接处于政策鼓励赛道','有助于对接研发补贴与下游首批次应用，降低市场拓展阻力','融资叙事中的政策确定性增强，利于下一轮估值'],
-     action:'建议梳理可申报的专项与补贴清单，由专人对接工信部门，10 月底前形成申报计划。'},
-    {t:'09:19',type:'gov',src:'工信部',lv:'key',
-     title:'关于开展重点新材料首批次应用保险补偿申报工作的通知',
-     points:['对首批次应用新材料给予保险补偿，降低下游试用风险','明确申报材料、时间窗口与产品目录要求','柔性导电材料具备进入申报目录的条件'],
-     impact:['可借助保险补偿推动头部客户试用，缩短认证导入周期','直接降低客户对早期供应商的质量与稳定顾虑','与现有切入头部封装供应链的策略高度契合'],
-     action:'建议立即核对产品是否在目录范围，准备检测报告与应用案例，赶在申报截止前提交。'},
-    {t:'昨天',type:'paper',src:'Nature Materials',lv:'key',
-     title:'高耐温柔性导电复合体系研究取得新进展，工作温区拓宽至 -55~150℃',
-     points:['新型复合体系稳定工作温区达到 -55~150℃','在极端温度循环下保持导电网络稳定','材料路线与公司现有技术方向相近'],
-     impact:['从学术侧验证了耐温技术路线的可行性','公司现有产品温区与前沿成果一致，技术领先性获得旁证','需关注新路线对现有工艺的潜在替代，提前做专利布局'],
-     action:'建议技术团队精读原文并评估专利可绕开性，必要时补充专利申请，避免技术被动。'},
-    {t:'09:05',type:'report',src:'中金公司研报',lv:'watch',
-     title:'导电及封装材料 2026 年市场规模有望达 86 亿元，CAGR 18.2%',
-     points:['预计 2026 年市场规模约 86 亿元','2024–2028 年 CAGR 约 18.2%','增长主要来自先进封装与汽车电子'],
-     impact:['行业保持较快增长，为公司提供扩张空间','可作为融资材料中市场空间的第三方引用','规模为机构测算，仅供方向性参考']},
-    {t:'09-20',type:'report',src:'中信证券研报',lv:'watch',
-     title:'先进封装材料专题：差异化耐温性能企业有望切入头部供应链',
-     points:['头部封装厂对耐温材料需求上升','差异化性能是进入供应链的关键门槛','客户认证与良率是核心考察项'],
-     impact:['印证公司耐温差异化的切入点成立','同时提示客户认证和良率仍是需要补强的短板']},
-    {t:'昨天',type:'frontier',src:'行业大会',lv:'watch',
-     title:'2026 柔性电子产业大会：国产柔性导电材料量产良率显著提升',
-     points:['国产耐温材料量产良率普遍提升','产业界对国产替代信心增强','多家厂商公布扩产计划'],
-     impact:['利于国产材料整体接受度提升','也意味着后续竞争与产能扩张加速，需提前建立壁垒']},
-    {t:'09-20',type:'news',src:'财联社',lv:'normal',
-     title:'多家半导体封装厂商上调全年材料采购指引，关注上游国产替代',
-     points:['封装厂商上调全年采购指引','上游材料国产替代受关注']},
-    {t:'09-19',type:'paper',src:'arXiv',lv:'normal',
-     title:'高稳定导电网络在极端温度循环下的可靠性机理研究',
-     points:['研究极端温度循环下导电网络可靠性机理','为耐温材料设计提供理论参考']}
-  ];
-  var TYPE_LABEL={news:'新闻',report:'研报',paper:'论文',frontier:'前沿',gov:'政策'};
-  var LV_LABEL={key:'重点',watch:'关注',normal:'一般'};
-  var newsTrack=document.getElementById('newsTrack');
-  var newsFilters=document.getElementById('newsFilters');
-  var enabledTypes={news:1,report:1,paper:1,frontier:1,gov:1};
-  var lvFilter='all';
-  function visibleNews(){
-    return NEWS.filter(function(n){return enabledTypes[n.type]&&(lvFilter==='all'||n.lv===lvFilter);});
+  /* ========== 公司看板：员工动态小卡（只读持久任务状态，公司范围由宿主注入） ========== */
+  // 仅 GET /api/parse-jobs，不带 company_id，公司范围由服务端决定；不创建、取消或重试任务。
+  // 读取失败/没有任务时如实展示空态与可重试错误态，不回退演示数据；缺字段不补造阶段、进度、时间或成功状态。
+  var ACTIVITY_ACTIVE=['queued','parsing'],ACTIVITY_ATTENTION=['failed','needs_human','partial'],
+      ACTIVITY_ROW_LIMIT=3,
+      activitySub=document.getElementById('activitySub'),
+      activityListEl=document.getElementById('activityList'),
+      activityRetryBtn=document.getElementById('activityRetryBtn'),
+      activityJobs=null,activityVersion=0,activityTimer=null,activityPolling=false;
+  function activityStop(){++activityVersion;if(activityTimer){clearTimeout(activityTimer);activityTimer=null;}}
+  function activityHomeActive(){return document.getElementById('overview').classList.contains('active');}
+  function activitySchedule(){
+    if(activityTimer||activityPolling||document.hidden||!activityHomeActive())return;
+    if(!kList(activityJobs).some(function(job){return ACTIVITY_ACTIVE.indexOf(kObject(job).status)>=0;}))return;
+    activityTimer=setTimeout(function(){activityTimer=null;loadActivity();},1800);
   }
-  function row(n){
-    var detail=n.lv==='key'?'<span class="ni-detail">关键点 · 影响 ▸</span>':'';
-    return '<div class="news-item lv-'+n.lv+'" data-i="'+NEWS.indexOf(n)+'"><span class="ni-time">'+n.t+'</span>'+
-      '<span class="lv-tag t-'+n.lv+'">'+LV_LABEL[n.lv]+'</span>'+
-      '<span class="src-tag src-'+n.type+'">'+TYPE_LABEL[n.type]+' · '+n.src+'</span>'+
-      '<span class="ni-title">'+n.title+'</span>'+detail+'</div>';
+  function activityLabel(job){
+    var status=job.status;
+    if(status==='queued')return {text:'排队中',tone:''};
+    if(status==='parsing'){
+      var text='解析中';
+      if(typeof job.stage==='string'&&job.stage)text+=' · '+job.stage;
+      var total=Number(job.progress_total),current=Number(job.progress_current);
+      if(Number.isFinite(total)&&total>0&&Number.isFinite(current)&&current>=0)
+        text+=' · '+Math.min(100,Math.max(0,Math.round(current/total*100)))+'%';
+      return {text:text,tone:''};
+    }
+    if(status==='done')return {text:'已完成'+(typeof job.finished_at==='string'&&job.finished_at?' · '+fmtTime(job.finished_at):''),tone:'ok'};
+    if(status==='failed')return {text:'失败 · 需处理',tone:'err'};
+    if(status==='needs_human')return {text:'待人工确认 · 需处理',tone:'warn'};
+    if(status==='partial')return {text:'部分完成 · 需处理',tone:'warn'};
+    if(status==='canceled')return {text:'已取消',tone:''};
+    return {text:typeof status==='string'&&status?status:'状态未提供',tone:''};
   }
-  function renderNews(){
-    var list=visibleNews();
-    if(list.length===0){newsTrack.innerHTML='<div class="news-item" style="justify-content:center;color:var(--t3);">当前筛选条件下暂无消息</div>';}
-    else{newsTrack.innerHTML=list.map(row).join('')+list.map(row).join('');}
-    newsOffset=0;newsTrack.style.transform='translateY(0)';
-  }
-  function renderFilters(){
-    var base=NEWS.filter(function(n){return enabledTypes[n.type];});
-    function cnt(lv){return base.filter(function(n){return n.lv===lv;}).length;}
-    var defs=[['all','全部'],['key','重点'],['watch','关注'],['normal','一般']];
-    newsFilters.innerHTML=defs.map(function(d){
-      var c=d[0]==='all'?base.length:cnt(d[0]);
-      return '<button class="nf'+(lvFilter===d[0]?' on':'')+'" data-lv="'+d[0]+'">'+d[1]+'<small>'+c+'</small></button>';
-    }).join('');
-  }
-  renderFilters();renderNews();
-  var newsOffset=0,newsPaused=false;
-  document.getElementById('newsViewport').addEventListener('mouseenter',function(){newsPaused=true;});
-  document.getElementById('newsViewport').addEventListener('mouseleave',function(){newsPaused=false;});
-  newsFilters.addEventListener('click',function(e){
-    var b=e.target.closest('.nf');if(!b)return;
-    lvFilter=b.dataset.lv;renderFilters();renderNews();
-  });
-  setInterval(function(){
-    if(newsPaused)return;
-    var list=visibleNews();if(list.length===0)return;
-    var half=newsTrack.scrollHeight/2;if(half<=0)return;
-    newsOffset+=0.5;if(newsOffset>=half){newsOffset-=half;}
-    newsTrack.style.transform='translateY('+(-newsOffset)+'px)';
-  },40);
-
-  /* ---- 消息详情 ---- */
-  var dMask=document.getElementById('newsDetailMask');
-  function openDetail(n){
-    document.getElementById('ndMeta').innerHTML=
-      '<span class="lv-tag t-'+n.lv+'">'+LV_LABEL[n.lv]+'</span>'+
-      '<span class="src-tag src-'+n.type+'">'+TYPE_LABEL[n.type]+' · '+n.src+'</span>'+
-      '<span style="font-size:11.5px;color:var(--t3);">'+n.t+'</span>';
-    document.getElementById('ndTitle').textContent=n.title;
-    document.getElementById('ndPoints').innerHTML=n.points.map(function(p){return '<li>'+p+'</li>';}).join('');
-    var iw=document.getElementById('ndImpactWrap'),aw=document.getElementById('ndActionWrap');
-    if(n.impact&&n.impact.length){
-      iw.innerHTML='<div class="nd-g"><span class="g-ic" style="background:#ffece8;color:var(--red)"><svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/></svg></span>对本企业的影响</div>'+
-        '<div class="nd-impact">'+n.impact.map(function(m){return '<div class="im"><i></i><span>'+m+'</span></div>';}).join('')+'</div>';
-    }else{iw.innerHTML='';}
-    if(n.action){
-      aw.innerHTML='<div class="nd-action" style="margin-top:12px;"><span>💡</span><span>'+n.action+'</span></div>';
-    }else{aw.innerHTML='';}
-    document.getElementById('ndAskBtn').onclick=function(){closeDetail();ask('针对这条消息（'+n.title+'），给我一份应对方案');};
-    dMask.classList.add('show');
-  }
-  function closeDetail(){dMask.classList.remove('show');}
-  newsTrack.addEventListener('click',function(e){
-    var it=e.target.closest('.news-item');if(!it||it.dataset.i===undefined)return;
-    var n=NEWS[it.dataset.i];if(n)openDetail(n);
-  });
-  document.getElementById('ndCloseBtn').addEventListener('click',closeDetail);
-  dMask.addEventListener('click',function(e){if(e.target===dMask)closeDetail();});
-
-  /* ---- 关注设置弹窗 ---- */
-  var nMask=document.getElementById('newsSetMask');
-  function openNewsSet(){nMask.classList.add('show');}
-  function closeNewsSet(){nMask.classList.remove('show');}
-  document.getElementById('newsSetBtn').addEventListener('click',openNewsSet);
-  document.getElementById('newsSetClose').addEventListener('click',closeNewsSet);
-  document.getElementById('newsSetCancel').addEventListener('click',closeNewsSet);
-  nMask.addEventListener('click',function(e){if(e.target===nMask)closeNewsSet();});
-  document.querySelectorAll('#srcOpts .src-opt').forEach(function(o){
-    o.addEventListener('click',function(){o.classList.toggle('on');});
-  });
-  document.getElementById('newsSetSave').addEventListener('click',function(){
-    enabledTypes={news:0,report:0,paper:0,frontier:0,gov:0};
-    document.querySelectorAll('#srcOpts .src-opt').forEach(function(o){
-      if(o.classList.contains('on'))enabledTypes[o.dataset.type]=1;
+  function activityLatestDone(jobs){
+    // 最近完成代表项：优先按可解析的真实 finished_at 取最新一条；都没有有效时间时沿用API顺序，不造时间
+    var best=null,bestAt=-Infinity;
+    jobs.forEach(function(job){
+      if(job.status!=='done')return;
+      var at=typeof job.finished_at==='string'?Date.parse(job.finished_at):NaN;
+      if(Number.isFinite(at)&&at>bestAt){best=job;bestAt=at;}
     });
-    renderFilters();renderNews();closeNewsSet();
+    if(best)return best;
+    for(var i=0;i<jobs.length;i++)if(jobs[i].status==='done')return jobs[i];
+    return null;
+  }
+  function renderActivity(){
+    activityRetryBtn.hidden=true;
+    var jobs=kList(activityJobs).map(kObject);
+    if(!jobs.length){
+      activitySub.textContent='当前没有上传任务';
+      activityListEl.innerHTML='<div class="activity-empty">暂无处理中的资料任务。上传企业资料后，这里会显示真实处理进度。</div>';
+      return;
+    }
+    var active=jobs.filter(function(job){return ACTIVITY_ACTIVE.indexOf(job.status)>=0;});
+    var attention=jobs.filter(function(job){return ACTIVITY_ATTENTION.indexOf(job.status)>=0;});
+    var recent=jobs.filter(function(job){return ACTIVITY_ACTIVE.indexOf(job.status)<0&&ACTIVITY_ATTENTION.indexOf(job.status)<0;});
+    var parts=[];
+    if(active.length)parts.push(active.length+' 项处理中');
+    if(attention.length)parts.push(attention.length+' 项需处理');
+    if(recent.length)parts.push(recent.length+' 项最近记录');
+    activitySub.textContent=parts.join(' · ');
+    var priority=active.concat(attention).concat(recent);
+    // 代表项保底：存在时先各留一条活跃、需处理与真实最近完成，再按处理中→需处理→最近记录补齐剩余行
+    var picked=[];
+    [active[0],attention[0],activityLatestDone(jobs)].concat(priority).forEach(function(job){
+      if(job&&picked.length<ACTIVITY_ROW_LIMIT&&picked.indexOf(job)<0)picked.push(job);
+    });
+    var shown=priority.filter(function(job){return picked.indexOf(job)>=0;});
+    var rest=jobs.length-shown.length;
+    activityListEl.innerHTML=shown.map(function(job){
+      var label=activityLabel(job);
+      var message=typeof job.message==='string'&&job.message?'<div class="message">'+escapeImport(job.message)+'</div>':'';
+      return '<div class="activity-item '+label.tone+'"><span class="name">'+kText(job.original_name,'未提供文件名')+'</span>'+
+        '<span class="status">'+escapeImport(label.text)+'</span>'+message+'</div>';
+    }).join('')+(rest>0?'<div class="activity-more">另有 '+rest+' 项任务未列出，点击「任务详情」查看全部。</div>':'');
+  }
+  function activityError(message){
+    activitySub.textContent='任务状态暂不可用';
+    activityListEl.innerHTML='<div class="activity-empty">'+escapeImport(message)+' 未回退到演示数据。</div>';
+    activityRetryBtn.hidden=false;
+  }
+  async function loadActivity(){
+    var version=++activityVersion;
+    if(activityTimer){clearTimeout(activityTimer);activityTimer=null;}
+    activityPolling=true;
+    try{
+      var body=await importRequest('/api/parse-jobs');
+      if(!body||!Array.isArray(body.jobs))throw new Error('任务状态返回无效');
+      if(version!==activityVersion)return;
+      activityJobs=body.jobs;
+      renderActivity();
+    }catch(error){
+      if(version!==activityVersion)return;
+      activityJobs=null;
+      activityError('任务状态读取失败：'+(error&&error.message?error.message:'网络错误')+'。');
+    }finally{
+      if(version===activityVersion){activityPolling=false;activitySchedule();}
+    }
+  }
+  document.getElementById('activityDetailBtn').addEventListener('click',openImportWizard);
+  activityRetryBtn.addEventListener('click',loadActivity);
+  document.addEventListener('visibilitychange',function(){
+    if(document.hidden)activityStop();
+    else if(activityHomeActive())loadActivity();
   });
+  loadActivity(); // 首次进入公司主页读取一次持久任务；之后切回主页、恢复可见、上传与任务终态时重新读取
+
   routeKnowledgeLocation();
 })();
 </script>
