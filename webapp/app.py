@@ -924,15 +924,17 @@ def api_upload():
         harness_format = "docx" if upload.filename.lower().endswith(".docx") else "doc"
     else:
         harness_format = file_format
-    job = _PARSE_MANAGER.create(
+    job = _PARSE_MANAGER.create_idempotent(
         company_id=company_id, file_hash=stored.file_hash,
         original_name=upload.filename, file_format=file_format,
         harness_format=harness_format, size_bytes=len(blob),
     )
+    # Duplicate uploads reuse the existing job; report its real state and file
+    # metadata instead of pretending a finished/failed job was just queued.
     return {
         "job_id": job["job_id"], "file_hash": stored.file_hash,
-        "original_name": upload.filename, "format": file_format,
-        "size": len(blob), "status": "queued", "stage": "queued",
+        "original_name": job["original_name"], "format": job["file_format"],
+        "size": job["size_bytes"], "status": job["status"], "stage": job["stage"],
     }, 202
 
 

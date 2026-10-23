@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-import hashlib
 import logging
 import os
 from uuid import uuid4
@@ -95,19 +94,73 @@ class ParseJobManager:
             timer.cancel()
         self.executor.shutdown(wait=False, cancel_futures=True)
 
+    @staticmethod
+    def _new_job_id() -> str:
+        # Random suffix: job_id has a global UNIQUE constraint, and two
+        # concurrent creates of the same file within one millisecond must
+        # never collide.
+        stamp = str(int(time.time() * 1000))
+        return "j_" + stamp + "_" + uuid4().hex[:12]
+
+    @staticmethod
+    def _insert_queued_job(conn, *, job_id: str, company_id: str, file_hash: str,
+                           original_name: str, file_format: str, harness_format: str,
+                           size_bytes: int, now: str) -> None:
+        conn.execute(
+            """INSERT INTO parse_jobs
+            (job_id,company_id,file_hash,original_name,file_format,harness_format,size_bytes,
+             status,stage,progress_current,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,?,'queued','queued',0,?,?)""",
+            (job_id, company_id, file_hash, original_name, file_format, harness_format,
+             size_bytes, now, now),
+        )
+
     def create(self, *, company_id: str, file_hash: str, original_name: str,
                file_format: str, harness_format: str, size_bytes: int) -> dict[str, Any]:
-        stamp = str(int(time.time() * 1000))
-        job_id = "j_" + stamp + "_" + hashlib.sha256(f"{file_hash}:{stamp}".encode()).hexdigest()[:10]
-        now = _now()
+        job_id = self._new_job_id()
         with connect(self.db_path) as conn:
-            conn.execute(
-                """INSERT INTO parse_jobs
-                (job_id,company_id,file_hash,original_name,file_format,harness_format,size_bytes,
-                 status,stage,progress_current,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,'queued','queued',0,?,?)""",
-                (job_id, company_id, file_hash, original_name, file_format, harness_format,
-                 size_bytes, now, now),
+            self._insert_queued_job(
+                conn, job_id=job_id, company_id=company_id, file_hash=file_hash,
+                original_name=original_name, file_format=file_format,
+                harness_format=harness_format, size_bytes=size_bytes, now=_now(),
+            )
+            conn.commit()
+        with self._lock:
+            self._events[job_id] = Event()
+        self._submit(job_id)
+        return self.get(job_id)
+
+    def create_idempotent(self, *, company_id: str, file_hash: str, original_name: str,
+                          file_format: str, harness_format: str, size_bytes: int) -> dict[str, Any]:
+        """Reuse the current job for (company_id, file_hash) or create exactly one.
+
+        Upload-entry idempotency only: duplicate submissions of the same
+        content for the same company return the existing job and never
+        restart the worker.  With several historical rows an active
+        (queued/parsing) job wins — the newest active one — because its
+        result will supersede older terminal rows; with no active job the
+        latest terminal row is returned as-is, so failed/canceled/
+        needs_human/partial jobs are never auto-retried.  Retry stays an
+        explicit operation; ``create`` keeps its explicit multi-job semantics
+        for other callers.  BEGIN IMMEDIATE serializes the check-and-insert
+        so concurrent duplicates can create and submit at most one job.
+        """
+        with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT job_id FROM parse_jobs WHERE company_id=? AND file_hash=?
+                   ORDER BY CASE WHEN status IN ('queued','parsing') THEN 0 ELSE 1 END,
+                            created_at DESC, id DESC LIMIT 1""",
+                (company_id, file_hash),
+            ).fetchone()
+            if row is not None:
+                conn.commit()
+                return self.get(row["job_id"])
+            job_id = self._new_job_id()
+            self._insert_queued_job(
+                conn, job_id=job_id, company_id=company_id, file_hash=file_hash,
+                original_name=original_name, file_format=file_format,
+                harness_format=harness_format, size_bytes=size_bytes, now=_now(),
             )
             conn.commit()
         with self._lock:

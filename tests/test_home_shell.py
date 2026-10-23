@@ -141,7 +141,8 @@ def test_full_routes_still_work_and_readonly_blocks_before_services(shell_web, m
     assert response.status_code == 200
     assert response.get_json()["message"] == "测试回复"
     assert model_calls[0][1]["company_id"] == "acc-shell"
-    monkeypatch.setattr(web._PARSE_MANAGER, "create", lambda **kwargs: {"job_id": "acc-job", **kwargs})
+    monkeypatch.setattr(web._PARSE_MANAGER, "create_idempotent",
+                        lambda **kwargs: {"job_id": "acc-job", "status": "queued", "stage": "queued", **kwargs})
     response = client.post("/api/upload", data={"file": (io.BytesIO(b"acc-test-document"), "acc-test.pdf")})
     assert response.status_code == 202
     assert response.get_json()["status"] == "queued"
@@ -260,6 +261,292 @@ def test_cabinet_job_transport_and_existing_result_routes(shell_web, monkeypatch
         assert client.get('/knowledge/sources/' + data['file_hash']).status_code == 200
     finally:
         release.set()
+        manager.executor.shutdown(wait=True, cancel_futures=True)
+
+
+def _upload(client, content=b"acc-content", name="acc-file.pdf", company=None):
+    data = {"file": (io.BytesIO(content), name)}
+    if company:
+        data["company_id"] = company
+    return client.post("/api/upload", data=data)
+
+
+def _install_fake_parse_manager(web, monkeypatch, worker, workers=1):
+    from app.parse_jobs import ParseJobManager
+
+    web._PARSE_MANAGER.close()
+    manager = ParseJobManager(web.MAIN_DB, worker, workers=workers)
+    monkeypatch.setattr(web, "_PARSE_MANAGER", manager)
+    return manager
+
+
+def _wait_for_job(manager, job_id, predicate, timeout=2.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = manager.get(job_id)
+        if predicate(job):
+            return job
+        time.sleep(0.01)
+    return manager.get(job_id)
+
+
+def _parse_job_rows(web, company_id):
+    from app.db.database import connect
+
+    with connect(web.MAIN_DB) as conn:
+        return conn.execute(
+            "SELECT job_id FROM parse_jobs WHERE company_id=? ORDER BY id", (company_id,)
+        ).fetchall()
+
+
+def test_upload_same_company_duplicate_reuses_existing_job(shell_web, monkeypatch):
+    from threading import Event
+
+    web = shell_web
+    client = web.app.test_client()
+    if web.RUNTIME_CONFIG.cloud_readonly:
+        assert _upload(client).status_code == 403
+        return
+    assert client.post("/api/entity-roster", json={"entity_name": "acc-cabinet"}).status_code == 201
+    started, release = Event(), Event()
+    calls = []
+
+    def worker(job, progress, event):
+        calls.append(job["job_id"])
+        progress(stage="parsing", current=1, total=2, message="acc-page")
+        started.set()
+        assert release.wait(5)
+
+    manager = _install_fake_parse_manager(web, monkeypatch, worker)
+    try:
+        first = _upload(client)
+        assert first.status_code == 202
+        job_id = first.get_json()["job_id"]
+        assert started.wait(2)
+        # A duplicate while the job is parsing reuses it and reports real state.
+        duplicate = _upload(client, name="acc-renamed.pdf")
+        assert duplicate.status_code == 202
+        data = duplicate.get_json()
+        assert data["job_id"] == job_id
+        assert (data["status"], data["stage"]) == ("parsing", "parsing")
+        # The reused job's own file metadata wins over the duplicate request.
+        assert data["original_name"] == "acc-file.pdf"
+        release.set()
+        assert _wait_for_job(manager, job_id, lambda j: j["status"] == "done")["status"] == "done"
+        # A duplicate after completion still reuses the terminal job.
+        again = _upload(client)
+        assert again.status_code == 202
+        assert (again.get_json()["job_id"], again.get_json()["status"]) == (job_id, "done")
+        assert len(_parse_job_rows(web, "acc-shell")) == 1
+        assert calls == [job_id]
+    finally:
+        release.set()
+        manager.executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_upload_concurrent_duplicates_create_one_job(shell_web, monkeypatch):
+    from threading import Barrier, Event, Thread
+
+    web = shell_web
+    client = web.app.test_client()
+    if web.RUNTIME_CONFIG.cloud_readonly:
+        assert _upload(client).status_code == 403
+        return
+    assert client.post("/api/entity-roster", json={"entity_name": "acc-cabinet"}).status_code == 201
+    started, release = Event(), Event()
+    calls = []
+
+    def worker(job, progress, event):
+        calls.append(job["job_id"])
+        started.set()
+        assert release.wait(5)
+
+    manager = _install_fake_parse_manager(web, monkeypatch, worker, workers=4)
+    threads = []
+    try:
+        gate = Barrier(4)
+        responses = []
+
+        def post():
+            thread_client = web.app.test_client()
+            gate.wait(5)
+            responses.append(_upload(thread_client))
+
+        threads = [Thread(target=post) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+        assert all(not thread.is_alive() for thread in threads)
+        assert len(responses) == 4
+        assert [response.status_code for response in responses] == [202] * 4
+        job_ids = {response.get_json()["job_id"] for response in responses}
+        assert len(job_ids) == 1
+        rows = _parse_job_rows(web, "acc-shell")
+        assert len(rows) == 1
+        assert rows[0]["job_id"] in job_ids
+        assert started.wait(2)
+        release.set()
+        assert _wait_for_job(manager, rows[0]["job_id"], lambda j: j["status"] == "done")["status"] == "done"
+        assert calls == [rows[0]["job_id"]]
+    finally:
+        # Always unblock the worker and reap request threads, pass or fail.
+        release.set()
+        for thread in threads:
+            thread.join(10)
+        manager.executor.shutdown(wait=True, cancel_futures=True)
+
+
+def _seed_source_file(web, file_hash="acc-hash"):
+    from app.db.database import connect
+
+    with connect(web.MAIN_DB) as conn:
+        conn.execute(
+            """INSERT INTO source_files (file_hash, original_name, size_bytes, storage_path, uploaded_at)
+               VALUES (?,?,?,?,?)""",
+            (file_hash, "acc-file.pdf", 3, "acc-objects/acc-file.pdf", "2026-01-01T00:00:00+00:00"),
+        )
+        conn.commit()
+
+
+def _create_kwargs(company_id="acc-shell", file_hash="acc-hash"):
+    return dict(company_id=company_id, file_hash=file_hash, original_name="acc-file.pdf",
+                file_format="pdf", harness_format="pdf", size_bytes=3)
+
+
+def test_new_job_ids_never_collide_under_identical_clock(shell_web, monkeypatch):
+    import app.parse_jobs as parse_jobs_module
+    from app.parse_jobs import ParseJobManager
+
+    web = shell_web
+    if web.RUNTIME_CONFIG.cloud_readonly:
+        return
+    # Pure unit check: one frozen clock, same hash, 100 ids, all distinct.
+    monkeypatch.setattr(parse_jobs_module.time, "time", lambda: 1700000000.0)
+    assert len({ParseJobManager._new_job_id() for _ in range(100)}) == 100
+    # End to end: explicit create of two same-hash jobs under the frozen
+    # clock must insert two distinct rows instead of hitting the UNIQUE
+    # constraint on job_id.
+    _seed_source_file(web)
+    manager = _install_fake_parse_manager(web, monkeypatch, lambda job, progress, event: None, workers=2)
+    try:
+        first = manager.create(**_create_kwargs())
+        second = manager.create(**_create_kwargs())
+        assert first["job_id"] != second["job_id"]
+        assert len(_parse_job_rows(web, "acc-shell")) == 2
+    finally:
+        manager.executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_create_idempotent_prefers_older_active_over_newer_terminal(shell_web, monkeypatch):
+    from threading import Event
+
+    web = shell_web
+    if web.RUNTIME_CONFIG.cloud_readonly:
+        return
+    _seed_source_file(web)
+    first_seen, started, release = [], Event(), Event()
+
+    def worker(job, progress, event):
+        # Only the first (active) job blocks; later jobs finish immediately.
+        if not first_seen:
+            first_seen.append(job["job_id"])
+            started.set()
+            assert release.wait(5)
+
+    manager = _install_fake_parse_manager(web, monkeypatch, worker, workers=2)
+    try:
+        active = manager.create(**_create_kwargs())
+        assert started.wait(2)
+        assert _wait_for_job(manager, active["job_id"], lambda j: j["status"] == "parsing")
+        terminal = manager.create(**_create_kwargs())
+        assert _wait_for_job(manager, terminal["job_id"], lambda j: j["status"] == "done")["status"] == "done"
+        # The older still-active job wins over the newer terminal one.
+        reused = manager.create_idempotent(**_create_kwargs())
+        assert (reused["job_id"], reused["status"]) == (active["job_id"], "parsing")
+        assert len(_parse_job_rows(web, "acc-shell")) == 2
+        release.set()
+        assert _wait_for_job(manager, active["job_id"], lambda j: j["status"] == "done")["status"] == "done"
+        # With nothing active, reuse falls back to the latest terminal job.
+        settled = manager.create_idempotent(**_create_kwargs())
+        assert (settled["job_id"], settled["status"]) == (terminal["job_id"], "done")
+        assert len(_parse_job_rows(web, "acc-shell")) == 2
+    finally:
+        release.set()
+        manager.executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_upload_new_content_or_other_company_creates_own_job(shell_web, monkeypatch):
+    from app.entities import EntityRosterService
+
+    web = shell_web
+    client = web.app.test_client()
+    if web.RUNTIME_CONFIG.cloud_readonly:
+        assert _upload(client).status_code == 403
+        return
+    assert client.post("/api/entity-roster", json={"entity_name": "acc-cabinet"}).status_code == 201
+    EntityRosterService(web.MAIN_DB).declare(company_id="acc-other", entity_name="acc-other")
+    manager = _install_fake_parse_manager(web, monkeypatch, lambda job, progress, event: None, workers=2)
+    try:
+        first = _upload(client)
+        assert first.status_code == 202
+        different = _upload(client, content=b"acc-other-content")
+        assert different.status_code == 202
+        assert different.get_json()["job_id"] != first.get_json()["job_id"]
+        foreign = _upload(client, company="acc-other")
+        assert foreign.status_code == 202
+        assert foreign.get_json()["job_id"] != first.get_json()["job_id"]
+        assert len(_parse_job_rows(web, "acc-shell")) == 2
+        assert [row["job_id"] for row in _parse_job_rows(web, "acc-other")] == [foreign.get_json()["job_id"]]
+        assert manager.get(first.get_json()["job_id"])["company_id"] == "acc-shell"
+        assert manager.get(foreign.get_json()["job_id"])["company_id"] == "acc-other"
+    finally:
+        manager.executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_upload_duplicate_of_failed_job_never_auto_retries_but_explicit_retry_works(shell_web, monkeypatch):
+    import time
+
+    web = shell_web
+    client = web.app.test_client()
+    if web.RUNTIME_CONFIG.cloud_readonly:
+        assert _upload(client).status_code == 403
+        return
+    assert client.post("/api/entity-roster", json={"entity_name": "acc-cabinet"}).status_code == 201
+    calls = []
+
+    def worker(job, progress, event):
+        calls.append(job["job_id"])
+        if len(calls) == 1:
+            raise RuntimeError("acc-engine-down")
+        progress(stage="parsing", current=1, total=1, message="done")
+
+    manager = _install_fake_parse_manager(web, monkeypatch, worker)
+    try:
+        first = _upload(client)
+        assert first.status_code == 202
+        job_id = first.get_json()["job_id"]
+        assert _wait_for_job(manager, job_id, lambda j: j["status"] == "failed")["status"] == "failed"
+        # Re-uploading the same content returns the failed job without restarting it.
+        duplicate = _upload(client)
+        assert duplicate.status_code == 202
+        assert (duplicate.get_json()["job_id"], duplicate.get_json()["status"]) == (job_id, "failed")
+        assert len(_parse_job_rows(web, "acc-shell")) == 1
+        assert calls == [job_id]
+        # Explicit retry is still the only way to run the failed job again.
+        for _ in range(100):
+            retried = client.post("/api/parse-jobs/" + job_id + "/retry")
+            if retried.status_code == 202:
+                break
+            assert retried.status_code == 409
+            time.sleep(0.01)
+        assert retried.status_code == 202
+        assert retried.get_json()["job"]["job_id"] == job_id
+        assert _wait_for_job(manager, job_id, lambda j: j["status"] == "done")["status"] == "done"
+        assert calls == [job_id, job_id]
+    finally:
         manager.executor.shutdown(wait=True, cancel_futures=True)
 
 
