@@ -6,12 +6,13 @@ import sys
 
 import pytest
 
-from app.db import connect
 from app.memory.company_facts.paths import fact_uri
 from app.memory_map import MapBuilder, MemoryMapTools, ROOT, source_map_uri
 from app.ports import LocalMemoryProvider
 from app.tool_bridge import ToolBridge, handle_request
-from tests.test_memory_map import source_setup
+from tests.test_facts_tree_leaves import kernel, publish, COMPANY
+from tests.test_facts_tree_tree_read import attribute, db_path
+from tests.test_memory_map import LedgerFiles, employee_tools, source_setup
 
 
 def test_empty_map_and_tool_construction_never_touch_ov(tmp_path, monkeypatch):
@@ -43,21 +44,28 @@ def test_scoped_external_source_read_uses_corrected_source_map_and_not_ov(tmp_pa
     assert "经理校正正文" in result and "4820" not in result
 
 
-def test_l2_fact_drilldown_uses_exact_scoped_ledger_coordinate(tmp_path):
-    memory, files, _, catalog = source_setup(tmp_path)
-    with connect(files._db_path) as conn:
-        cur = conn.execute("""INSERT INTO facts(company_id,entity,attribute,value,source_file,source_page,source_span,status,created_at)
-                            VALUES ('acme','谷斗','员工原始标签','1200',?,1,'sheet/财务/C2','verified','fixture')""",
-                           (catalog[0][1],))
-        fact_id = cur.lastrowid
-    tools = MemoryMapTools(memory, files, "acme", source_catalog=catalog)
-    row = json.loads(tools.memory_read(fact_uri("acme", fact_id)))
-    assert row["value"] == "1200" and row["source_span"] == "sheet/财务/C2"
+def test_l2_fact_drilldown_uses_exact_scoped_ledger_coordinate(kernel):
+    # Decision 13-A: F<ID>.md drill-down is served only through the verified
+    # TreeReadService chain (company scope, identity, unique placement, formal
+    # leaf reference) — never a direct SQLite facts row read. The kernel
+    # fixture keeps SAM_FACTS_TREE enabled only inside this test.
+    published = publish(kernel)
+    attribute(kernel)
+    kernel.db.execute("UPDATE facts SET source_page=2, source_span='sheet/财务/C2' WHERE id=1")
+    kernel.db.commit()
+    tools = employee_tools(kernel)
+    card = json.loads(tools.memory_read(fact_uri(COMPANY, 1, module_key="bizov")))
+    assert card["company_id"] == COMPANY and card["fact"]["fact_id"] == 1
+    assert card["fact"]["source"]["page"] == 2 and card["fact"]["source"]["span"] == "sheet/财务/C2"
+    assert card["leaf"]["code"] == "L-bizov-08" and card["leaf"]["uri"] == published["uri"]
     with pytest.raises(PermissionError):
-        tools.memory_read(fact_uri("other", fact_id))
-    global_tools = MemoryMapTools(memory, files, "acme", source_catalog=catalog, global_read_only=True)
+        tools.memory_read(fact_uri("acc-other", 1, module_key="bizov"))
+    global_tools = MemoryMapTools(kernel.memory, LedgerFiles(db_path(kernel)), COMPANY,
+                                  global_read_only=True)
     with pytest.raises(FileNotFoundError):
-        global_tools.memory_read(fact_uri("other", fact_id))  # ID cannot override URI company
+        global_tools.memory_read(fact_uri("acc-other", 1, module_key="bizov"))  # ID cannot override URI company
+    with pytest.raises(FileNotFoundError):
+        global_tools.memory_read(fact_uri(COMPANY, 1, module_key="bizov"))
     with pytest.raises(PermissionError):
         tools.memory_read(ROOT + "/2b/acme/../other/L1/brief.md")
 
