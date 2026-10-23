@@ -6,6 +6,7 @@ publisher guards.
 """
 from copy import deepcopy
 import json
+import runpy
 from types import SimpleNamespace
 
 import pytest
@@ -21,6 +22,7 @@ from app.facts_tree.notes_publish import NotesPublishService, PublishRejected
 from app.facts_tree.quote_sources import DossierQuoteResolver
 from app.facts_tree.source_registry import SourceRegistry
 from app.facts_tree.template_packs import available_packs, load_pack
+from app.facts_tree.tree_read import TreeReadService
 from tests.memory_setup import migrated_memory
 from tests.test_facts_tree_provider import Embedding
 from tests.test_facts_tree_transactions import real_store
@@ -457,6 +459,132 @@ def test_generic_v2_v4_publish_placement(v4_job_generic_v2, monkeypatch):
     with pytest.raises(ValueError, match='not released'):
         template_packs.load_released_pack('generic-v2')
     assert store.binding.get(COMPANY)['template_pack'] == 'generic-v2'
+
+
+def test_generic_v2_v4_publish_readback(v4_job_generic_v2, monkeypatch):
+    """P7 prerequisite chain: one isolated synthetic company completes the
+    generic-v2 V4 publish under test-scoped draft seams, then the published
+    facts replay through the rollup, the read-only tree/finance trunk/leaf/
+    single-fact reads and the finance/leaf_code searches. Sources are checked
+    only through the ledger's existing supports links and coordinates — no
+    original download and no real hash re-verification is claimed."""
+    store = v4_job_generic_v2
+    pack = load_pack('generic-v2')
+    # Same test-scoped seams as the placement test: the draft binding register
+    # accepts the draft pack for this one call only and is restored before the
+    # chain; the packed-URI projection guard allows the draft pack for the
+    # duration of the chain plus the read-only replay, then is restored before
+    # the formal gate assertions. No production guard or default is changed.
+    formal_pack = CompanyBindingStore._pack
+
+    def draft_pack(name):
+        return load_pack(name) if name == 'generic-v2' else formal_pack(name)
+
+    monkeypatch.setattr(CompanyBindingStore, '_pack', staticmethod(draft_pack))
+    store.binding.register(COMPANY, '临时草稿绑定公司', pack='generic-v2')
+    monkeypatch.setattr(CompanyBindingStore, '_pack', staticmethod(formal_pack))
+
+    from app.facts_tree import template_packs
+    formal_released = template_packs.load_released_pack
+    monkeypatch.setattr(template_packs, 'load_released_pack',
+        lambda name='generic': load_pack(name) if name == 'generic-v2' else formal_released(name))
+    model = FinanceV2PublishModel()
+    result = run_full(store, model)
+    publication = result['mapped_notes']['publication']
+    assert result['done'] and publication['complete']
+    by_note = {r['note_id']: r for r in store.db.execute(
+        'SELECT * FROM md_note_publications WHERE company_id=? AND job_id=?', (COMPANY, JOB)).fetchall()}
+    assert sorted(by_note) == ['n-0001', 'n-0002']
+    assert by_note['n-0001']['leaf_code'] == 'L-finance-01'
+    assert by_note['n-0002']['leaf_code'] == 'L-finance-02'
+    fact_id_1 = by_note['n-0001']['fact_id']
+    fact_id_2 = by_note['n-0002']['fact_id']
+    # Rollup consumption was part of the same stage C completion.
+    assert len(publication['md_consumption']['consumed']) == 2
+    assert store.db.execute('SELECT count(*) FROM md_leaf_consumption').fetchone()[0] == 2
+
+    # Read-only replay through TreeReadService: the draft seam is still open
+    # here so the packed generic-v2 URIs resolve through the projection guard.
+    with TreeReadService(store.memory.database, store.memory, company_id=COMPANY) as reader:
+        tree = reader.read_tree(COMPANY)
+        assert tree['node'] == 'tree' and tree['state'] == 'ready'
+        assert tree['binding']['template_pack'] == 'generic-v2'
+        assert tree['binding']['pack_digest'] == pack.manifest_sha256
+        finance_summary = next(t for t in tree['trunks'] if t['code'] == 'finance')
+        assert (finance_summary['state'], finance_summary['generated_leaves']) == ('ready', 2)
+        assert all(t['state'] == 'not_generated' for t in tree['trunks'] if t['code'] != 'finance')
+        # Rollup readback: the L0 brief carries both published facts with their
+        # verbatim claimed status (never upgraded) and declared source name.
+        for fact_id in (fact_id_1, fact_id_2):
+            assert f'F{fact_id} 状态：claimed' in tree['brief']
+        assert 'sample.docx' in tree['brief']
+
+        trunk = reader.read_trunk(COMPANY, 'finance')
+        assert trunk['node'] == 'trunk' and trunk['state'] == 'ready'
+        assert len(trunk['leaves']) == 7  # generic-v2 finance trunk
+        entries = {leaf['code']: leaf for leaf in trunk['leaves']}
+        for code in ('L-finance-01', 'L-finance-02'):
+            assert (entries[code]['state'], entries[code]['version']) == ('active', 1)
+
+        leaf = reader.read_leaf(COMPANY, 'L-finance-01')
+        assert leaf['node'] == 'leaf' and leaf['state'] == 'ready'
+        assert leaf['version'] == 1 and leaf['leaf_state'] == 'active'
+        assert leaf['leaf']['trunk'] == 'finance'
+        assert leaf['index']['sources'] == [SHA]
+        assert [fact['fact_id'] for fact in leaf['facts']] == [fact_id_1]
+        leaf_fact = leaf['facts'][0]
+        assert leaf_fact['status'] == 'claimed'
+        assert leaf_fact['source']['file_hash'] == SHA
+        assert leaf_fact['source']['original_name'] == 'sample.docx'
+
+        fact = reader.read_fact(COMPANY, fact_id_2)
+        assert fact['node'] == 'fact' and fact['code'] == f'F{fact_id_2}'
+        assert fact['binding']['template_pack'] == 'generic-v2'
+        assert fact['fact']['status'] == 'claimed'
+        assert (fact['leaf']['trunk'], fact['leaf']['code']) == ('finance', 'L-finance-02')
+        # 来源回放只到账本坐标：支持链接与笔记/行区间元数据，不下载原件、不重算哈希。
+        span = json.loads(fact['fact']['source']['span'])
+        assert span['reading_protocol'] == 4 and len(span['sources']) == 1
+        witness = span['sources'][0]
+        assert witness['note_id'] == 'n-0002' and witness['source_loc'] == LOC1
+        assert witness['ranges'] and all(len(r) == 2 for r in witness['ranges'])
+
+        uri_1 = leaf['uri']
+        uri_2 = reader.read_leaf(COMPANY, 'L-finance-02')['uri']
+        both = sorted([uri_1, uri_2])
+        assert reader.search_leaves(COMPANY, '', filters={'trunk_code': 'finance'}) == both
+        assert reader.search_leaves(COMPANY, '有9个') == both
+        assert reader.search_leaves(COMPANY, '', filters={'leaf_code': 'L-finance-02'}) == [uri_2]
+        assert reader.search_leaves(COMPANY, '', filters={'trunk_code': 'governance'}) == []
+
+    # 来源注册表回放：每条已发布事实恰好一条 active supports 链接，
+    # 坐标仍指回映射的 V4 笔记；没有回填链接。
+    registry = SourceRegistry(store.memory.database, company_id=COMPANY)
+    try:
+        for fact_id, note_id in ((fact_id_1, 'n-0001'), (fact_id_2, 'n-0002')):
+            links = registry.links_for_fact(fact_id)
+            assert len(links) == 1 and links[0]['relation'] == 'supports'
+            assert links[0]['status'] == 'active'
+            evidences = registry.evidence_for_fact(fact_id)
+            assert len(evidences) == 1
+            coordinate = json.loads(evidences[0]['coordinate'])
+            assert coordinate['note_id'] == note_id and coordinate['reading_protocol'] == 4
+    finally:
+        registry.close()
+
+    # 草稿缝已关闭：正式发布包仍隐藏 generic-v2，正式绑定与运行时加载
+    # 依旧拒绝，功能门默认值仍为关闭；注入的草稿绑定本身保持原样。
+    monkeypatch.setattr(template_packs, 'load_released_pack', formal_released)
+    assert 'generic-v2' not in available_packs()
+    with pytest.raises(ValueError, match='supports only generic'):
+        store.binding.register(COMPANY, '草稿门核验公司', pack='generic-v2')
+    with pytest.raises(ValueError, match='supports only generic'):
+        store.binding.bind_pack(COMPANY, 'generic-v2')
+    with pytest.raises(ValueError, match='not released'):
+        template_packs.load_released_pack('generic-v2')
+    assert store.binding.get(COMPANY)['template_pack'] == 'generic-v2'
+    monkeypatch.delenv('SAM_FACTS_TREE', raising=False)
+    assert runpy.run_path(settings.__file__)['SAM_FACTS_TREE'] is False
 
 
 def test_merged_same_fact_group_one_fact_all_witnesses(v4_job):
