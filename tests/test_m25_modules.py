@@ -185,9 +185,12 @@ function kList(v){return Array.isArray(v)?v:[];}
 function fileCategory(f){return f.category===undefined||f.category===null?null:String(f.category);}
 ''' + functions + '\nconst data=' + json.dumps(data) + ''';
 const categories=driveCategories(data);
-console.log(JSON.stringify({categories,hidden:moduleHidden(data,'fin'),files:data.evidence.files.length}));
+console.log(JSON.stringify({categories,files:data.evidence.files.length}));
 '''
     result = subprocess.run(['node', '-e', script], check=True, capture_output=True, text=True)
     value = json.loads(result.stdout)
+    # Hidden branches are filtered straight from the shared module dictionary:
+    # they never enter the navigation even when they own files.
     assert [c['category'] for c in value['categories']] == ['info', 'bizov', 'hr', 'mkt', 'legal', None]
-    assert value['hidden'] is True and value['files'] == 3
+    assert {m['code'] for m in data['modules'] if m['hidden']} == {'prod', 'purch', 'sales', 'fin', 'fund'}
+    assert value['files'] == 3  # hidden-module files still exist; only the navigation hides them
