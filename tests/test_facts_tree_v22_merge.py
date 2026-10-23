@@ -9,16 +9,22 @@ transaction. V2-1 digests, V2/V3 submissions, the closed gate and the missing
 publish budget keep their frozen behavior. The CHG-036 section verifies that
 service-level merges also re-check every carried fact's active identity,
 current revision and exact current leaf placement against the versioned
-attribution ledger, failing closed with a full rollback on any drift.
+attribution ledger, failing closed with a full rollback on any drift. The
+generic-v2 section drives the same two-job same-leaf merge on the unreleased
+draft pack's finance trunk through test-scoped binding/projection seams, then
+re-verifies the restored formal gate still hides and refuses the draft pack.
 """
 from copy import deepcopy
 import json
+import runpy
 import sqlite3
 
 import pytest
 
 from app import settings
 from app.document_read.dossier import Dossier
+from app.facts_tree import template_packs
+from app.facts_tree.company_binding import CompanyBindingStore
 from app.facts_tree.fact_identity import FactIdentityStore
 from app.facts_tree.fact_placements import FactPlacementStore
 from app.facts_tree.leaf_store import LeafPublishService, LeafRejected
@@ -26,9 +32,12 @@ from app.facts_tree.md_publish import MDLeafPublisher, digest
 from app.facts_tree.md_reader import MDWindows
 from app.facts_tree.notes_publish import NotesPublishService, PublishRejected
 from app.facts_tree.quote_sources import DossierQuoteResolver
+from app.facts_tree.template_packs import available_packs, load_pack
 from app.memory.provider import ProjectionError
+from tests.memory_setup import migrated_memory
 from tests.test_facts_tree_transactions import real_store
 from tests.test_facts_tree_leaves import COMPANY, SHA, artifact
+from tests.test_facts_tree_provider import Embedding
 from tests.test_facts_tree_reading_notes import dossier, reader, LOC0, LOC1, JOB, REVIEW_LIMITS
 from tests.test_facts_tree_notes_publish import PublishModel, PUBLISH_LIMITS, registry_counts
 
@@ -641,12 +650,13 @@ class SeedBothModel(PublishModel):
 
 
 class MergeModel(PublishModel):
-    """Job 2: merge the two job-1 blocks on L-bizov-07, carry every old
+    """Job 2: merge the two job-1 blocks on the target leaf, carry every old
     evidence ref and attach this job's fresh note as new evidence."""
+    target_leaf = LEAF
     merge_reason = '员工判断两旧块同主题，合并呈现且事实证据全量保留'
 
     def submit_leaf(self, request):
-        if request['target']['leaf_code'] != LEAF:
+        if request['target']['leaf_code'] != self.target_leaf:
             return super().submit_leaf(request)
         current = request['current']
         covered_ids = ('pub-grp-n-0001', 'pub-grp-n-0002')
@@ -1174,3 +1184,195 @@ def test_merge_rejected_when_placement_binding_is_not_current(v4_jobs, pub, monk
     with pytest.raises(PublishRejected, match='differs from the current company binding'):
         run_seeded_merge(store)
     assert_merge_rejected_clean(store, snapshot)
+
+
+# ---------------------------------------------------------------------------
+# Unreleased generic-v2 draft pack: two isolated V4 jobs share one finance
+# leaf — job 1 lands two ordinary blocks, job 2 merges them in place. The
+# draft binding and the packed-URI projection guard are opened through
+# test-scoped seams only (monkeypatch, restored before the formal-gate
+# assertions); production code, the release set and the SAM_FACTS_TREE
+# default stay untouched.
+# ---------------------------------------------------------------------------
+
+GENERIC_V2_LEAF = 'L-finance-01'
+GENERIC_V2_APPEND_LEAF = 'L-finance-02'
+
+
+@pytest.fixture
+def v4_jobs_generic_v2(tmp_path, monkeypatch):
+    """Isolated synthetic company with two V4 jobs and NO binding yet; the
+    test injects the draft generic-v2 binding in test scope only."""
+    monkeypatch.setattr(settings, 'SAM_FACTS_TREE', True)
+    monkeypatch.setenv('SAM_MD_READ_PROTOCOL', 'v4')
+    memory = migrated_memory(tmp_path / 'ledger-gv2-merge.db', embedding=Embedding(),
+                             company_id=COMPANY)
+    store = LeafPublishService(memory.database, memory, company_id=COMPANY)
+    store.db.execute('INSERT INTO source_files(file_hash,original_name,size_bytes,storage_path,uploaded_at) VALUES(?,?,?,?,?)',
+                     (SHA, 'sample.docx', 1, '/unused', 'now'))
+    store.db.execute('''INSERT INTO facts(company_id,entity,attribute,period,value,unit,source_file,module_key,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?)''', (COMPANY, '临时主体', '测试指标', '2025-01', '9', '个', SHA, 'finance', 'now'))
+    for job_id in (JOB, JOB2):
+        store.db.execute('''INSERT INTO parse_jobs(job_id,company_id,file_hash,original_name,file_format,harness_format,size_bytes,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?)''',
+            (job_id, COMPANY, SHA, 'sample.docx', 'docx', 'docx', 1, 'now', 'now'))
+    store.db.commit()
+    yield store
+    store.close()
+    memory.close()
+
+
+class GenericV2SeedBothModel(PublishModel):
+    """Job 1: both notes land on the same generic-v2 finance leaf."""
+    leaf_for = {'n-0001': GENERIC_V2_LEAF, 'n-0002': GENERIC_V2_LEAF}
+
+
+class GenericV2MergeModel(MergeModel):
+    """Job 2: merge the two job-1 blocks on the generic-v2 finance leaf and
+    attach this job's fresh note as new evidence; the second note makes a
+    plain append on a neighboring finance leaf."""
+    target_leaf = GENERIC_V2_LEAF
+    leaf_for = {'n-0001': GENERIC_V2_LEAF, 'n-0002': GENERIC_V2_APPEND_LEAF}
+
+
+def test_generic_v2_same_leaf_merge_two_job_chain_and_replay(v4_jobs_generic_v2, monkeypatch):
+    store = v4_jobs_generic_v2
+    pack = load_pack('generic-v2')
+    # Test-scoped draft binding injection: the formal gate accepts only
+    # "generic"; patch it for this single register call, restore immediately,
+    # and run both V4 chains under the restored formal gate.
+    formal_pack = CompanyBindingStore._pack
+
+    def draft_pack(name):
+        return load_pack(name) if name == 'generic-v2' else formal_pack(name)
+
+    monkeypatch.setattr(CompanyBindingStore, '_pack', staticmethod(draft_pack))
+    store.binding.register(COMPANY, '临时草稿绑定公司', pack='generic-v2')
+    monkeypatch.setattr(CompanyBindingStore, '_pack', staticmethod(formal_pack))
+
+    # The packed-tree URI projection guard is the second production seam that
+    # resolves only released packs; allow the draft pack through it for the
+    # duration of the chains and replays, then restore it below. Neither
+    # bypass is written into any production implementation.
+    formal_released = template_packs.load_released_pack
+    monkeypatch.setattr(template_packs, 'load_released_pack',
+        lambda name='generic': load_pack(name) if name == 'generic-v2' else formal_released(name))
+
+    # Job 1: two ordinary V4 blocks on the same generic-v2 finance leaf.
+    seed_model = GenericV2SeedBothModel()
+    first = reader(store, seed_model).run(company_id=COMPANY, job_id=JOB, limits=PUBLISH_LIMITS)
+    assert first['done'] and first['mapped_notes']['publication']['complete']
+    assert first['calls']['publish'] == 2  # one assignment + one shared-leaf turn
+    before = MDLeafPublisher(store, reading_protocol=4).current(COMPANY, GENERIC_V2_LEAF)
+    assert [b['block_id'] for b in before['blocks']] == ['pub-grp-n-0001', 'pub-grp-n-0002']
+
+    # Job 2: same-leaf merge carrying every old evidence ref plus fresh evidence.
+    model = GenericV2MergeModel()
+    result = reader(store, model).run(company_id=COMPANY, job_id=JOB2, limits=PUBLISH_LIMITS)
+    assert result['done'] and result['mapped_notes']['publication']['complete']
+    assert result['calls']['publish'] == 3  # one assignment + two leaf turns
+    assert store.db.execute('SELECT count(*) FROM facts').fetchone()[0] == 5
+    current = MDLeafPublisher(store, reading_protocol=4).current(COMPANY, GENERIC_V2_LEAF)
+    assert current['version'] == 2
+    assert [b['block_id'] for b in current['blocks']] == ['merged-cap']
+    merged = current['blocks'][0]
+
+    publications = store.db.execute(
+        'SELECT job_id,note_id,fact_id,leaf_code FROM md_note_publications').fetchall()
+    job1 = {r['note_id']: r for r in publications if r['job_id'] == JOB}
+    job2 = {r['note_id']: r for r in publications if r['job_id'] == JOB2}
+    assert sorted(job1) == sorted(job2) == ['n-0001', 'n-0002']
+    f1, f2 = job1['n-0001']['fact_id'], job1['n-0002']['fact_id']
+    new_fact = job2['n-0001']['fact_id']
+    assert job1['n-0001']['leaf_code'] == job1['n-0002']['leaf_code'] == GENERIC_V2_LEAF
+    assert job2['n-0001']['leaf_code'] == GENERIC_V2_LEAF
+    assert job2['n-0002']['leaf_code'] == GENERIC_V2_APPEND_LEAF
+
+    # Every old evidence ref is carried exactly once, host-copied verbatim
+    # with only the ref label renamed; the old fact ids stay on their refs.
+    old_refs = {e['ref']: e for b in before['blocks'] for e in b['evidence']}
+    by_ref = {e['ref']: e for e in merged['evidence']}
+    assert by_ref['m-a'] == dict(old_refs['a'], ref='m-a')
+    assert by_ref['m-b'] == dict(old_refs['b'], ref='m-b')
+    assert by_ref['m-a']['fact_ids'] == [f1] and by_ref['m-b']['fact_ids'] == [f2]
+    # The fresh evidence ref resolves to exactly this job's new fact.
+    assert by_ref['m-new']['fact_ids'] == [new_fact]
+    assert by_ref['m-new']['note_id'] == 'n-0001'
+    # Old fact identities are preserved as-is: one active revision row each.
+    for old in (f1, f2):
+        rows = store.db.execute('SELECT fact_version FROM fact_revisions '
+                                'WHERE company_id=? AND fact_row_id=?', (COMPANY, old)).fetchall()
+        assert [r['fact_version'] for r in rows] == [1]
+
+    # Attribution: old and new facts sit on the generic-v2 finance leaf under
+    # the current binding revision; old placements were never rewritten.
+    meta = store.db.execute(
+        'SELECT template_pack,pack_version,pack_digest,binding_revision FROM company_tree_meta '
+        'WHERE company_id=?', (COMPANY,)).fetchone()
+    assert meta['template_pack'] == 'generic-v2' and meta['pack_version'] == pack.version
+    assert meta['pack_digest'] == pack.manifest_sha256
+    pointers = {r['fact_row_id']: r for r in store.db.execute(
+        'SELECT * FROM fact_current_placement WHERE company_id=?', (COMPANY,)).fetchall()}
+    assert len(pointers) == 4
+    for old in (f1, f2):
+        assert pointers[old]['placement_seq'] == 1
+    for row in pointers.values():
+        expected_leaf = (GENERIC_V2_APPEND_LEAF if row['fact_row_id'] == job2['n-0002']['fact_id']
+                         else GENERIC_V2_LEAF)
+        assert row['trunk_code'] == 'finance' and row['leaf_code'] == expected_leaf
+        assert row['pack_id'] == 'generic-v2' and row['pack_version'] == pack.version
+        assert row['manifest_sha256'] == pack.manifest_sha256
+        assert row['binding_revision'] == meta['binding_revision']
+    history = store.db.execute(
+        'SELECT * FROM fact_placements WHERE company_id=?', (COMPANY,)).fetchall()
+    assert len(history) == 4
+    for row in history:
+        assert row['record_type'] == 'initial' and row['placement_seq'] == 1
+        assert row['pack_id'] == 'generic-v2' and row['pack_version'] == pack.version
+        assert row['manifest_sha256'] == pack.manifest_sha256
+        assert row['binding_revision'] == meta['binding_revision']
+        assert row['trunk_code'] == 'finance'
+
+    # Same-transaction rewrite audit: full old/new markdown+blocks+coverage.
+    rows = store.db.execute('SELECT * FROM md_leaf_rewrites').fetchall()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row['operation_id'].startswith('md-') and row['leaf_code'] == GENERIC_V2_LEAF
+    assert row['base_version'] == 1 and row['base_sha'] == before['content_sha']
+    assert row['old_markdown'] == before['markdown'] and row['new_markdown'] == current['markdown']
+    assert json.loads(row['old_blocks']) == before['blocks']
+    assert json.loads(row['new_blocks']) == current['blocks']
+    assert json.loads(row['coverage']) == [dict(block_id='merged-cap',
+        covers=['pub-grp-n-0001', 'pub-grp-n-0002'],
+        carry=[dict(from_block_id='pub-grp-n-0001', from_ref='a', to_ref='m-a'),
+               dict(from_block_id='pub-grp-n-0002', from_ref='b', to_ref='m-b')],
+        reason=MergeModel.merge_reason)]
+
+    # Full replay of BOTH jobs: durable receipts make every stage a zero-call
+    # no-op; facts, sources, identities, placements and the leaf audit keep
+    # their exact counts (no duplicates).
+    snapshot = attribution_snapshot(store)
+    replay1 = GenericV2SeedBothModel()
+    again1 = reader(store, replay1).run(company_id=COMPANY, job_id=JOB, limits=PUBLISH_LIMITS)
+    assert again1['done'] and replay1.requests == []
+    replay2 = GenericV2MergeModel()
+    again2 = reader(store, replay2).run(company_id=COMPANY, job_id=JOB2, limits=PUBLISH_LIMITS)
+    assert again2['done'] and replay2.requests == []
+    assert attribution_snapshot(store) == snapshot
+    assert store.db.execute('SELECT count(*) FROM facts').fetchone()[0] == 5
+    assert store.db.execute('SELECT count(*) FROM md_leaf_rewrites').fetchone()[0] == 1
+
+    # Seams restored: the formal release set still hides generic-v2, formal
+    # registration/binding/released-pack loading still refuse it, and the
+    # feature gate default stays closed; the injected draft binding is untouched.
+    monkeypatch.setattr(template_packs, 'load_released_pack', formal_released)
+    assert 'generic-v2' not in available_packs()
+    with pytest.raises(ValueError, match='supports only generic'):
+        store.binding.register(COMPANY, '草稿门核验公司', pack='generic-v2')
+    with pytest.raises(ValueError, match='supports only generic'):
+        store.binding.bind_pack(COMPANY, 'generic-v2')
+    with pytest.raises(ValueError, match='not released'):
+        template_packs.load_released_pack('generic-v2')
+    assert store.binding.get(COMPANY)['template_pack'] == 'generic-v2'
+    monkeypatch.delenv('SAM_FACTS_TREE', raising=False)
+    assert runpy.run_path(settings.__file__)['SAM_FACTS_TREE'] is False
