@@ -131,6 +131,51 @@ def _tree_with_added_file(repo_path, base_tree, path, blob_oid, tmp_path,
         index_name)
 
 
+def _tree_with_removed_file(repo_path, base_tree, path):
+    # Dropping one path from an existing tree is the only way to
+    # express a deleted record in a raw tree. read-tree/update-index
+    # would need a work tree, which a bare repo does not have, so the
+    # tree is rebuilt layer by layer with ls-tree + mktree instead.
+    # Filtering ls-tree output keeps the entries in tree order, which
+    # is exactly what mktree requires. Like a real Git commit, a
+    # directory left empty by the removal is pruned, so the rest of
+    # the tree stays well-formed.
+    parts = path.split("/")
+
+    def rebuild(tree_oid, remaining):
+        # Returns the rebuilt tree OID, or None when nothing is left.
+        lines = _git_text(repo_path, "ls-tree", tree_oid).splitlines()
+        head = remaining[0]
+        out = []
+        for line in lines:
+            meta, name = line.split("\t", 1)
+            if name != head:
+                out.append(line)
+            elif len(remaining) == 1:
+                continue  # this is the deleted record: drop the entry
+            else:
+                mode, kind, oid = meta.split(" ")
+                if kind != "tree":
+                    raise AssertionError(
+                        "%s: %s is not a directory" % (path, head))
+                sub = rebuild(oid, remaining[1:])
+                if sub is not None:
+                    out.append("%s tree %s\t%s" % (mode, sub, name))
+        if not out:
+            return None
+        return _git_text(
+            repo_path, "mktree",
+            input_bytes=("\n".join(out) + "\n").encode("utf-8")).strip()
+
+    rebuilt = rebuild(base_tree, parts)
+    if rebuilt is None:
+        # Only possible when the base tree held just the one record;
+        # mktree with empty input yields the canonical empty tree.
+        rebuilt = _git_text(
+            repo_path, "mktree", input_bytes=b"").strip()
+    return rebuilt
+
+
 def _tree_with_empty_directory(repo_path, commit_oid, name="facts"):
     # An index can never hold an empty subtree, so this tree is built
     # directly with mktree: the commit's current meta/ tree plus one
@@ -689,6 +734,138 @@ def test_accept_rejects_empty_directory_outside_expected_paths(tmp_path):
     with pytest.raises(GitRepositoryError, match="empty"):
         repo.accept(genesis, commit, expected_paths=_accept_paths())
     assert repo.head_oid() == genesis
+
+
+_FACT1_R1 = git_format.record_path(
+    "fact_revision", fact_uid="fact-1", revision="r1")
+_FACT1_CURRENT = git_format.record_path("fact_current", fact_uid="fact-1")
+
+
+def _init_repo_with_fact_history(tmp_path, name="facts-history.git"):
+    # Genesis plus one accepted commit carrying fact-1's revision r1
+    # record and its current pointer: the append-only base every
+    # retention test below extends or attacks.
+    repo = _init_repo(tmp_path, name=name)
+    genesis = repo.head_oid()
+    tree = _tree_with_added_file(
+        repo.path, _tree_oid(repo.path, genesis), _FACT1_R1,
+        _write_blob(repo.path, git_format.dumps_record(
+            {"fact_uid": "fact-1", "revision": "r1"})),
+        tmp_path, "index-r1")
+    tree = _tree_with_added_file(
+        repo.path, tree, _FACT1_CURRENT,
+        _write_blob(repo.path, git_format.dumps_record(
+            {"fact_uid": "fact-1", "revision": "r1"})),
+        tmp_path, "index-current")
+    commit = repo.create_commit(tree, genesis)
+    assert repo.accept(
+        genesis, commit,
+        expected_paths=_accept_paths(_FACT1_R1, _FACT1_CURRENT)).accepted
+    return repo, commit
+
+
+def test_accept_allows_appending_a_new_fact_revision(tmp_path):
+    # Section 10.2.2: history revisions are append-only, so adding r2
+    # next to an untouched r1 is the legal shape of a new version.
+    repo, tip = _init_repo_with_fact_history(tmp_path)
+    r2 = git_format.record_path(
+        "fact_revision", fact_uid="fact-1", revision="r2")
+    tree = _tree_with_added_file(
+        repo.path, _tree_oid(repo.path, tip), r2,
+        _write_blob(repo.path, git_format.dumps_record(
+            {"fact_uid": "fact-1", "revision": "r2"})),
+        tmp_path, "index-r2")
+    commit = repo.create_commit(tree, tip)
+    assert repo.accept(
+        tip, commit,
+        expected_paths=_accept_paths(
+            _FACT1_R1, _FACT1_CURRENT, r2)).accepted
+    assert repo.head_oid() == commit
+    # The old revision blob rides into the new tree unchanged.
+    assert _git_text(
+        repo.path, "rev-parse", "%s:%s" % (commit, _FACT1_R1)).strip() == \
+        _git_text(
+            repo.path, "rev-parse", "%s:%s" % (tip, _FACT1_R1)).strip()
+
+
+def test_accept_allows_current_pointer_advance(tmp_path):
+    # The *_current pointers are mutable by design: rewriting the
+    # pointer blob while keeping the append-only records is legal.
+    repo, tip = _init_repo_with_fact_history(tmp_path)
+    old_pointer = _git_text(
+        repo.path, "rev-parse", "%s:%s" % (tip, _FACT1_CURRENT)).strip()
+    tree = _tree_with_added_file(
+        repo.path, _tree_oid(repo.path, tip), _FACT1_CURRENT,
+        _write_blob(repo.path, git_format.dumps_record(
+            {"fact_uid": "fact-1", "revision": "r2"})),
+        tmp_path, "index-current-r2")
+    commit = repo.create_commit(tree, tip)
+    assert repo.accept(
+        tip, commit,
+        expected_paths=_accept_paths(_FACT1_R1, _FACT1_CURRENT)).accepted
+    assert repo.head_oid() == commit
+    new_pointer = _git_text(
+        repo.path, "rev-parse", "%s:%s" % (commit, _FACT1_CURRENT)).strip()
+    assert new_pointer != old_pointer
+
+
+def test_accept_rejects_deleted_append_only_record_and_keeps_ref(
+        tmp_path):
+    repo, tip = _init_repo_with_fact_history(tmp_path)
+    tree = _tree_with_removed_file(
+        repo.path, _tree_oid(repo.path, tip), _FACT1_R1)
+    commit = repo.create_commit(tree, tip)
+    # The tree is otherwise well-formed and the whitelist matches its
+    # remaining paths, so only the retention check can refuse it.
+    with pytest.raises(GitRepositoryError, match="deleted"):
+        repo.accept(tip, commit,
+                    expected_paths=_accept_paths(_FACT1_CURRENT))
+    assert repo.head_oid() == tip
+    assert _head(repo.path) == tip
+    assert FactsGitRepository.open(repo.path, **_IDS).head_oid() == tip
+
+
+def test_accept_rejects_rewritten_append_only_record_and_keeps_ref(
+        tmp_path):
+    repo, tip = _init_repo_with_fact_history(tmp_path)
+    # Same path set, same canonical JSON shape, different bytes: an
+    # in-place rewrite of an old version, refused before the CAS.
+    tree = _tree_with_added_file(
+        repo.path, _tree_oid(repo.path, tip), _FACT1_R1,
+        _write_blob(repo.path, git_format.dumps_record(
+            {"fact_uid": "fact-1", "revision": "r1", "tampered": True})),
+        tmp_path, "index-rewrite-r1")
+    commit = repo.create_commit(tree, tip)
+    with pytest.raises(GitRepositoryError, match="rewritten in place"):
+        repo.accept(
+            tip, commit,
+            expected_paths=_accept_paths(_FACT1_R1, _FACT1_CURRENT))
+    assert repo.head_oid() == tip
+    assert _head(repo.path) == tip
+    assert FactsGitRepository.open(repo.path, **_IDS).head_oid() == tip
+
+
+def test_accept_with_zero_expected_old_has_empty_retention_base(tmp_path):
+    # Genesis boundary: with the all-zero expected_old there is no
+    # accepted history, so the retention base is empty and a
+    # well-formed zero-parent tree passes that check; only the CAS
+    # decides. The ref already points at genesis here, so the same
+    # acceptance reports a lost race instead of raising.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    path = "facts/fact-1/current.json"
+    tree = _tree_with_added_file(
+        repo.path, _tree_oid(repo.path, genesis), path,
+        _write_blob(repo.path, git_format.dumps_record({"fact": 1})),
+        tmp_path, "index-zero-base")
+    zero_parent = _commit_tree(repo.path, tree, [], "facts: zero base")
+    result = repo.accept(
+        repo.zero_oid, zero_parent, expected_paths=_accept_paths(path))
+    assert result == CasResult(
+        accepted=False, current_oid=genesis,
+        expected_old=repo.zero_oid, new_oid=zero_parent)
+    assert repo.head_oid() == genesis
+    assert FactsGitRepository.open(repo.path, **_IDS).head_oid() == genesis
 
 
 def test_oid_length_and_zero_oid_follow_object_format(tmp_path):

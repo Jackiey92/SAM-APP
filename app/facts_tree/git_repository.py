@@ -60,7 +60,13 @@ Guarantees enforced here:
   exactly expected_paths, and symlinks, executables, Git submodules,
   unknown object types and directories holding no whitelisted record
   (for example an empty directory outside the snapshot) are refused
-  with the authoritative ref left at its previous value. A commit
+  with the authoritative ref left at its previous value. The accepted
+  parent tree's append-only records (design section 10.2.2) must also
+  survive unchanged in the new tree: a deleted or in-place rewritten
+  history revision, evidence, operation, consumed-candidate or event
+  record is refused through
+  git_append_only.validate_append_only_retention, while appending new
+  versions and advancing the *_current pointers stay legal. A commit
   assembled outside build_tree() is held to exactly the same physical
   contract.
 - build_tree() materializes a caller-assembled complete final snapshot
@@ -110,6 +116,7 @@ import os
 from pathlib import Path
 import subprocess
 
+from app.facts_tree import git_append_only
 from app.facts_tree import git_format
 from app.facts_tree import git_tree_validation
 
@@ -478,7 +485,14 @@ class FactsGitRepository:
           exactly expected_paths. Unknown object types, symlinks,
           executables, Git submodules (gitlinks) and directories
           holding no whitelisted record (for example empty directories
-          outside the snapshot) are refused. A commit assembled outside
+          outside the snapshot) are refused, and the accepted parent
+          tree's append-only records (design section 10.2.2) must all
+          still be present with unchanged blob OIDs in the new tree: a
+          deleted or in-place rewritten history revision, evidence,
+          operation, consumed-candidate or event record is refused
+          through git_append_only.validate_append_only_retention, while
+          appending new revisions and advancing the *_current pointers
+          stay legal. A commit assembled outside
           build_tree() is held to exactly the same physical contract.
         - the repository's effective local fsync configuration is
           re-verified against the exact section 10.9.1 policy
@@ -516,7 +530,8 @@ class FactsGitRepository:
             raise GitRepositoryError(
                 "accepted commit must have exactly one parent equal to "
                 "expected_old %s, got %s" % (expected_old, parents))
-        self._validate_commit_tree(new_oid, expected_paths)
+        new_entries = self._validate_commit_tree(new_oid, expected_paths)
+        self._validate_append_only_retention(expected_old, new_entries)
         # Last guard before the authoritative ref moves: the section
         # 10.9.1 durability configuration is re-read through Git, so a
         # repository whose policy was removed or drifted since open()
@@ -544,6 +559,9 @@ class FactsGitRepository:
         # assembled outside build_tree() could carry non-canonical
         # bytes, unexpected paths or dangerous entry types, and the
         # authoritative ref must never advance onto such a tree.
+        # Returns the tree's actual blob entries as (path, oid) tuples
+        # so the append-only retention check compares exactly the
+        # physical snapshot that passed validation here.
         try:
             listed = self._list_tree_entries(commit_oid)
         except (GitRepositoryError, UnicodeDecodeError, ValueError) as exc:
@@ -601,6 +619,42 @@ class FactsGitRepository:
         except (TypeError, ValueError) as exc:
             raise GitRepositoryError(
                 "accepted commit tree failed validation: %s" % exc) from exc
+        return [(path, oid) for _mode, path, oid, _content in entries]
+
+    def _validate_append_only_retention(self, expected_old, new_entries):
+        # Design sections 10.2.2 and 14.2: history revisions, evidence,
+        # operations, consumed candidates and event files already on the
+        # authoritative history are append-only; old versions are never
+        # deleted or rewritten in place, while new revisions and
+        # *_current pointer advances stay legal. Compare the accepted
+        # parent commit's actual (path, blob OID) entries against the
+        # candidate's before the CAS. The parentage check above has
+        # already bound expected_old to the new commit's own parent, so
+        # the compared base is exactly the history being extended; a
+        # genesis acceptance (all-zero expected_old) has an empty base
+        # and trivially passes. The repository identity record is not
+        # part of the compared append-only set; accept() guarantees its
+        # immutability through the identity-record comparison above.
+        if expected_old == self.zero_oid:
+            base_entries = []
+        else:
+            try:
+                listed = self._list_tree_entries(expected_old)
+            except (GitRepositoryError, UnicodeDecodeError, ValueError) \
+                    as exc:
+                raise GitRepositoryError(
+                    "accepted parent commit tree listing is unreadable: "
+                    "%s" % exc) from exc
+            base_entries = [
+                (path, oid) for _mode, object_type, oid, path in listed
+                if object_type == "blob"]
+        try:
+            git_append_only.validate_append_only_retention(
+                base_entries, new_entries)
+        except (TypeError, ValueError) as exc:
+            raise GitRepositoryError(
+                "accepted commit violates append-only retention: %s"
+                % exc) from exc
 
     def _list_tree_entries(self, commit_oid):
         # -z keeps paths raw (no quoting) with NUL terminators; -r
