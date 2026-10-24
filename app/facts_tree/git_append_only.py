@@ -5,7 +5,11 @@ F-001 P01 section 10.2.2 (history revisions, evidence, operations,
 consumed candidates and event files are append-only; current pointers
 may advance in legal operations; old versions are never rewritten in
 place or deleted) and section 14.2 (a tree whose old versions were
-changed must not be accepted; the accepted base stays untouched).
+changed must not be accepted; the accepted base stays untouched), plus
+the DEC-030 approved "97-业务记录与投影重建设计.md" section 3.2
+(published taxonomy manifest/leaf records must not be rewritten in
+place or deleted; the append-only module must be extended to protect
+that family).
 
 Public entry point:
 
@@ -34,6 +38,11 @@ types P01 section 10.2.2 explicitly describes as append-only:
     proposal_event, input_candidate, operation, consumed_candidate,
     event
 
+plus the two taxonomy record types that 97 section 3.2 protects the
+same way once published:
+
+    taxonomy_manifest, taxonomy_leaf
+
 The classification is delegated to ``canonical_record_type`` so this
 module never re-implements the fixed path templates in parallel; a
 path that merely looks like a template but is not the canonical
@@ -44,12 +53,15 @@ of the record types section 10.2.2 lists as append-only, and the
 repository identity it carries is already guaranteed immutable by the
 accept() gate, which refuses any commit whose identity record differs
 from the one bound at initialize()/open() time.
-``taxonomy_manifest`` and ``taxonomy_leaf`` are deliberately not in
-the set: P01 fixes their versioned paths but does not state
-append-only retention with the same explicitness, and this function
-does not decide that interpretive question. The ``*_current`` and
-``bindings_current`` pointers are mutable by design and are also
-outside the set, as is any path outside the fixed layout.
+For the taxonomy family this validator protects every canonical
+versioned path already present in the base entries as a written
+versioned record: deleting or rewriting it is rejected, while adding a
+new ``pack_version`` manifest or a new leaf version path stays legal.
+Whether a pack version counts as formally published is a separate
+gate's question; this function does not track publish state.
+The ``*_current`` and ``bindings_current`` pointers are mutable by
+design and are also outside the set, as is any path outside the fixed
+layout.
 
 Retention rule
 --------------
@@ -98,6 +110,8 @@ APPEND_ONLY_RECORD_TYPES = (
     "proposal_event",
     "source_lifecycle",
     "source_version",
+    "taxonomy_leaf",
+    "taxonomy_manifest",
 )
 
 _APPEND_ONLY_TYPES = frozenset(APPEND_ONLY_RECORD_TYPES)

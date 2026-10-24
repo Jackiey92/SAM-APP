@@ -3,7 +3,11 @@
 Covers the approved design baseline 36f9035555c7a016d0f51eb2a266611a36ab5e3f
 sections 10.2.2 and 14.2: history revisions, evidence, operations, consumed
 candidates and event files are append-only, old versions are never rewritten
-in place or deleted, and current pointers may change. The validator is a
+in place or deleted, and current pointers may change. The DEC-030 approved
+"97-业务记录与投影重建设计.md" section 3.2 extends the same retention to
+published taxonomy manifest/leaf records: existing versioned taxonomy paths
+in the base entries must not be deleted or rewritten, while new pack
+versions and new leaf versions may still be appended. The validator is a
 pure function over caller-supplied (path, oid) entries; repository_meta is
 outside its append-only set because the accept() gate already pins the
 repository identity record separately.
@@ -41,13 +45,13 @@ _APPEND_ONLY_PATHS = {
         "consumed_candidate", candidate_uid="cand-1",
         candidate_revision="r1"),
     "event": git_format.record_path("event", event_id="ev-1"),
-}
-
-_MUTABLE_PATHS = {
     "taxonomy_manifest": git_format.record_path(
         "taxonomy_manifest", pack_version="pack-1"),
     "taxonomy_leaf": git_format.record_path(
         "taxonomy_leaf", pack_version="pack-1", leaf_id="leaf-1"),
+}
+
+_MUTABLE_PATHS = {
     "bindings_current": git_format.record_path("bindings_current"),
     "entity_current": git_format.record_path(
         "entity_current", entity_uid="ent-1"),
@@ -82,6 +86,26 @@ def test_new_append_only_paths_are_legal():
     assert git_append_only.validate_append_only_retention(base, new) is None
 
 
+def test_new_taxonomy_version_paths_are_legal():
+    # A new pack version's manifest and leaves, and a new leaf inside the
+    # existing pack version, are new versioned records and may be added.
+    base = [
+        (_APPEND_ONLY_PATHS["taxonomy_manifest"], _OID_A),
+        (_APPEND_ONLY_PATHS["taxonomy_leaf"], _OID_A),
+    ]
+    new = base + [
+        (git_format.record_path(
+            "taxonomy_manifest", pack_version="pack-2"), _OID_B),
+        (git_format.record_path(
+            "taxonomy_leaf", pack_version="pack-2", leaf_id="leaf-1"),
+         _OID_B),
+        (git_format.record_path(
+            "taxonomy_leaf", pack_version="pack-1", leaf_id="leaf-2"),
+         _OID_B),
+    ]
+    assert git_append_only.validate_append_only_retention(base, new) is None
+
+
 def test_mutable_and_unknown_paths_may_change_or_disappear():
     base = [(path, _OID_A) for path in _MUTABLE_PATHS.values()]
     base.append(("notes/free-form.json", _OID_A))
@@ -96,6 +120,16 @@ def test_non_canonical_alias_path_gets_no_retention_guarantee():
     # canonical_record_type returns None and the path is not append-only.
     canonical = _APPEND_ONLY_PATHS["evidence"]
     alias = canonical.replace("ev-1", "ev~2D1")
+    assert git_format.canonical_record_type(alias) is None
+    assert git_append_only.validate_append_only_retention(
+        [(alias, _OID_A)], []) is None
+
+
+def test_non_canonical_taxonomy_alias_gets_no_retention_guarantee():
+    # Same escape-alias rule for the taxonomy family: "pack~2D1" decodes
+    # to "pack-1" but is not the canonical encoding.
+    canonical = _APPEND_ONLY_PATHS["taxonomy_leaf"]
+    alias = canonical.replace("pack-1", "pack~2D1")
     assert git_format.canonical_record_type(alias) is None
     assert git_append_only.validate_append_only_retention(
         [(alias, _OID_A)], []) is None
