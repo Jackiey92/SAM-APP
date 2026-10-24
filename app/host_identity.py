@@ -1,6 +1,6 @@
 """Trusted identity entrance for the SAM host (F-007 P01 step 1).
 
-Approved design baseline a40f31aaaa615a2ebcbfa54177710b07b3661445,
+Approved design baseline 4ba389ebe3ecc39ba10716ce107e4d25e4fb63a6,
 F-007 P01 sections 2-3 (identity/trust boundary and authoritative
 records), section 6 (TC-001) and section 7 implementation step 1: the
 trusted identity entrance. This module implements the independent
