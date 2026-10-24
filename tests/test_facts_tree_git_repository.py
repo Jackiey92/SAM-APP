@@ -72,6 +72,30 @@ def _git_text(repo_path, *args, **kwargs):
     return _git(repo_path, *args, **kwargs).stdout.decode("utf-8")
 
 
+# Design section 10.9.1: the exact local durability configuration the
+# facts authority repo must carry. Tests assert these literal strings
+# so a drift in the production constant is caught, not echoed.
+_FSYNC_EXPECTED = {
+    "core.fsync": "objects,reference",
+    "core.fsyncMethod": "fsync",
+}
+
+
+def _local_config_values(repo_path, key):
+    # The effective local configuration as Git itself parses it, with
+    # duplicated entries exposed (--get-all), never the write command's
+    # word. Exit code 1 means the key is absent.
+    result = _git(
+        repo_path, "config", "--local", "--get-all", key, check=False)
+    if result.returncode == 1:
+        return []
+    if result.returncode != 0:
+        raise AssertionError(
+            "git config --get-all %s failed: %s"
+            % (key, result.stderr.decode("utf-8", "replace")))
+    return result.stdout.decode("utf-8").splitlines()
+
+
 def _init_repo(tmp_path, name="facts.git", **kwargs):
     return FactsGitRepository.initialize(tmp_path / name, **_IDS, **kwargs)
 
@@ -334,6 +358,94 @@ def test_open_rejects_configured_remote(tmp_path):
     with pytest.raises(OpenError):
         FactsGitRepository.open(repo.path, **_IDS)
     assert _head(repo.path) == before
+
+
+def test_initialize_sets_exact_fsync_policy(tmp_path):
+    # Section 10.9.1: the new repository must carry the exact local
+    # fsync configuration. The values are read back through Git
+    # plumbing, not assumed from the adapter's write. This is a
+    # configuration-value check only: it does not prove the running
+    # Git or filesystem actually performs fsync, and it is no
+    # substitute for power-loss or backup validation.
+    repo = _init_repo(tmp_path)
+    for key, expected in _FSYNC_EXPECTED.items():
+        assert _local_config_values(repo.path, key) == [expected]
+    assert repo.head_oid() == repo.genesis_oid
+
+
+@pytest.mark.parametrize("key", sorted(_FSYNC_EXPECTED))
+def test_open_rejects_missing_fsync_configuration(tmp_path, key):
+    repo = _init_repo(tmp_path)
+    before = _head(repo.path)
+    _git(repo.path, "config", "--local", "--unset", key)
+    with pytest.raises(OpenError, match="missing"):
+        FactsGitRepository.open(repo.path, **_IDS)
+    # The refusal is read-only: nothing was repaired or rewritten.
+    assert _head(repo.path) == before
+    assert _local_config_values(repo.path, key) == []
+
+
+@pytest.mark.parametrize(
+    "key,drifted",
+    [("core.fsync", "objects"),
+     ("core.fsync", "none"),
+     ("core.fsyncMethod", "writeout-only"),
+     ("core.fsyncMethod", "batch")])
+def test_open_rejects_drifted_fsync_configuration(tmp_path, key, drifted):
+    repo = _init_repo(tmp_path)
+    before = _head(repo.path)
+    _git(repo.path, "config", "--local", key, drifted)
+    with pytest.raises(OpenError, match="fsync policy"):
+        FactsGitRepository.open(repo.path, **_IDS)
+    assert _head(repo.path) == before
+    assert _local_config_values(repo.path, key) == [drifted]
+
+
+@pytest.mark.parametrize("key", sorted(_FSYNC_EXPECTED))
+def test_open_rejects_duplicated_fsync_configuration(tmp_path, key):
+    # A duplicated entry is ambiguous even when every copy carries the
+    # right value: fail closed instead of letting Git collapse it.
+    repo = _init_repo(tmp_path)
+    before = _head(repo.path)
+    _git(repo.path, "config", "--local", "--add", key,
+         _FSYNC_EXPECTED[key])
+    assert len(_local_config_values(repo.path, key)) == 2
+    with pytest.raises(OpenError, match="exactly one"):
+        FactsGitRepository.open(repo.path, **_IDS)
+    assert _head(repo.path) == before
+
+
+@pytest.mark.parametrize("key", sorted(_FSYNC_EXPECTED))
+@pytest.mark.parametrize("mode", ["missing", "drifted"])
+def test_accept_rejects_fsync_violation_and_ref_keeps_value(
+        tmp_path, key, mode):
+    # accept() re-verifies the section 10.9.1 configuration immediately
+    # before the authoritative ref CAS: a violation found after open()
+    # refuses the acceptance and the ref keeps its previous value.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    path = "facts/fact-1/current.json"
+    blob = _write_blob(repo.path, git_format.dumps_record({"fact": 1}))
+    tree = _tree_with_added_file(
+        repo.path, _tree_oid(repo.path, genesis), path, blob, tmp_path,
+        "index-fsync-%s-%s" % (key.replace(".", "-"), mode))
+    commit = repo.create_commit(tree, genesis)
+    # Break the policy only after the commit object already exists, so
+    # the pre-CAS re-verification is the last guard that can catch it.
+    if mode == "missing":
+        _git(repo.path, "config", "--local", "--unset", key)
+    else:
+        _git(repo.path, "config", "--local", key, "none")
+    with pytest.raises(GitRepositoryError, match="fsync policy"):
+        repo.accept(genesis, commit, expected_paths=_accept_paths(path))
+    assert repo.head_oid() == genesis
+    assert _head(repo.path) == genesis
+    # The refusal was the configuration check, not the commit: once the
+    # policy is restored the very same acceptance succeeds.
+    _git(repo.path, "config", "--local", key, _FSYNC_EXPECTED[key])
+    assert repo.accept(
+        genesis, commit, expected_paths=_accept_paths(path)).accepted
+    assert repo.head_oid() == commit
 
 
 def test_child_commit_single_parent_and_cas_advances_ref(tmp_path):

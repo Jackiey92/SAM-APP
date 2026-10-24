@@ -14,6 +14,23 @@ Guarantees enforced here:
   any symbolic link at the target is refused before its contents are
   ever inspected. The new repository is bare, has no remote, and HEAD
   is fixed to the single authoritative ref REF_FACTS.
+- Durability policy (design section 10.9.1): Git's default
+  configuration can lose recently written objects on an abnormal
+  shutdown, so the repository must carry the exact local configuration
+  core.fsync=objects,reference and core.fsyncMethod=fsync.
+  initialize() sets and reads back this configuration before any
+  object or the genesis commit is written; open() re-verifies the
+  effective local values and refuses a repository whose policy is
+  missing, duplicated or drifted; accept() re-verifies them once more
+  immediately before the authoritative ref CAS, so a policy violation
+  keeps the ref at its previous value. A configuration value that
+  cannot be written or verified fails closed and is never silently
+  degraded. This slice only sets and verifies configuration values:
+  it does not prove
+  that the running Git or filesystem actually performs and persists
+  fsync, and it is neither a power-loss verification nor a complete
+  backup verification; those underlying capabilities and failure
+  behaviors still require independent validation.
 - The genesis snapshot is a zero-parent commit carrying only the fixed
   repository identity record built through
   git_format.record_path("repository_meta") and git_format.dumps_record;
@@ -114,6 +131,18 @@ _VERIFY_ENV = {
 # bookkeeping fields, never a user identity or approval proof.
 _IDENTITY_NAME = "SAM Facts Repository"
 _IDENTITY_EMAIL = "sam-facts-repository@localhost.invalid"
+# Design section 10.9.1: the exact local durability configuration the
+# facts authority repo must carry. initialize() installs it before any
+# object is written; open() and accept() re-verify the effective local
+# values read back through Git itself (never assumed from an earlier
+# write) and fail closed on a missing, duplicated or drifted value.
+# This is a configuration-value check only: whether the platform
+# actually honors fsync is out of scope here and needs independent
+# validation.
+_FSYNC_POLICY = (
+    ("core.fsync", "objects,reference"),
+    ("core.fsyncMethod", "fsync"),
+)
 
 
 class GitRepositoryError(Exception):
@@ -266,6 +295,13 @@ class FactsGitRepository:
         genesis commit has zero parents and is accepted through the
         expected-old CAS on REF_FACTS with the all-zero OID of the
         repository object format.
+
+        Before any object or the genesis commit is written, the exact
+        section 10.9.1 local fsync configuration (_FSYNC_POLICY) is
+        installed and read back through Git; if it cannot be
+        established, initialization fails instead of silently degrading
+        to Git's default durability behavior. Establishing the
+        configured values does not prove the platform honors fsync.
         """
         _require_id("repo_id", repo_id)
         _require_id("installation_id", installation_id)
@@ -296,6 +332,15 @@ class FactsGitRepository:
         except GitCommandError as exc:
             raise InitializeError("git init failed: %s" % exc) from exc
         repo = cls(target)
+        # The fsync policy must be in effect before the first object is
+        # written, so it is installed and read back before symbolic-ref
+        # setup and before any blob, tree or commit object exists.
+        try:
+            repo._install_fsync_policy()
+        except GitRepositoryError as exc:
+            raise InitializeError(
+                "cannot establish the section 10.9.1 fsync "
+                "configuration: %s" % exc) from exc
         repo._git(["symbolic-ref", "HEAD", REF_FACTS])
         payload = _repository_meta_payload(
             repo_id, installation_id, company_id)
@@ -318,9 +363,14 @@ class FactsGitRepository:
         """Open and verify an existing repository without modifying it.
 
         The repository must be bare, remote-less, with HEAD fixed to
-        REF_FACTS, and the identity record at the current ref tip must
-        match the host-issued identity exactly; any mismatch refuses
-        the open and leaves the repository untouched.
+        REF_FACTS, carry the exact section 10.9.1 local fsync
+        configuration (_FSYNC_POLICY), and the identity record at the
+        current ref tip must match the host-issued identity exactly;
+        any mismatch refuses the open and leaves the repository
+        untouched. A missing, duplicated or drifted fsync value fails
+        closed: a missing, duplicated or drifted local configuration
+        value is refused. This check does not detect whether the
+        running Git supports these settings at runtime.
         """
         _require_id("repo_id", repo_id)
         _require_id("installation_id", installation_id)
@@ -343,6 +393,12 @@ class FactsGitRepository:
                 "repository HEAD is %r, not %r" % (head_ref, REF_FACTS))
         if remotes:
             raise OpenError("repository has remotes configured")
+        try:
+            repo._enforce_fsync_policy()
+        except GitRepositoryError as exc:
+            raise OpenError(
+                "repository fsync configuration failed section 10.9.1 "
+                "verification: %s" % exc) from exc
         head = repo._ref_value()
         if head is None:
             raise OpenError("authoritative ref %s is missing" % REF_FACTS)
@@ -424,6 +480,15 @@ class FactsGitRepository:
           holding no whitelisted record (for example empty directories
           outside the snapshot) are refused. A commit assembled outside
           build_tree() is held to exactly the same physical contract.
+        - the repository's effective local fsync configuration is
+          re-verified against the exact section 10.9.1 policy
+          (_FSYNC_POLICY) immediately before the swap: a missing,
+          duplicated or drifted value refuses the acceptance so the
+          ref is never advanced while the configured policy cannot
+          even be confirmed. Confirming the configuration values does
+          not prove the underlying Git or filesystem actually honors
+          fsync; that durability behavior requires independent
+          validation.
 
         Any validation failure raises GitRepositoryError before the CAS
         is attempted, so the authoritative ref keeps its previous
@@ -452,6 +517,11 @@ class FactsGitRepository:
                 "accepted commit must have exactly one parent equal to "
                 "expected_old %s, got %s" % (expected_old, parents))
         self._validate_commit_tree(new_oid, expected_paths)
+        # Last guard before the authoritative ref moves: the section
+        # 10.9.1 durability configuration is re-read through Git, so a
+        # repository whose policy was removed or drifted since open()
+        # refuses here and the ref keeps its previous value.
+        self._enforce_fsync_policy()
         result = self._git(
             ["update-ref", REF_FACTS, new_oid, expected_old], check=False)
         if result.returncode == 0:
@@ -807,6 +877,52 @@ class FactsGitRepository:
             raise IntegrityError(
                 "reachable Git objects failed integrity checks: %s"
                 % detail)
+
+    def _install_fsync_policy(self):
+        # Write the exact policy values into the repository's own
+        # config file, then confirm the values by reading the effective
+        # local configuration back through Git instead of trusting the
+        # write. This confirms configuration values only, not the
+        # platform's actual fsync behavior.
+        for key, value in _FSYNC_POLICY:
+            self._git(["config", "--local", key, value])
+        self._enforce_fsync_policy()
+
+    def _enforce_fsync_policy(self):
+        # Section 10.9.1 fail-closed check. --local reads only the
+        # repository's own config file (GIT_CONFIG_NOSYSTEM and the
+        # devnull global file in _git_env already keep user and system
+        # configuration out), and --get-all exposes duplicated entries
+        # that a plain --get would silently collapse to the last value.
+        # Missing, duplicated or drifted values raise
+        # GitRepositoryError; open() converts that into OpenError while
+        # accept() lets it fail closed before the CAS.
+        for key, expected in _FSYNC_POLICY:
+            result = self._git(
+                ["config", "--local", "--get-all", key], check=False)
+            if result.returncode == 1:
+                values = []
+            elif result.returncode != 0:
+                raise GitCommandError(
+                    "git config --get-all %s failed" % key, result)
+            else:
+                values = result.stdout.decode(
+                    "utf-8", "replace").splitlines()
+            if not values:
+                raise GitRepositoryError(
+                    "repository configuration %s is missing; the section "
+                    "10.9.1 fsync policy requires exactly one local "
+                    "value %r" % (key, expected))
+            if len(values) != 1:
+                raise GitRepositoryError(
+                    "repository configuration %s is set %d times; the "
+                    "section 10.9.1 fsync policy requires exactly one "
+                    "local value %r" % (key, len(values), expected))
+            if values[0] != expected:
+                raise GitRepositoryError(
+                    "repository configuration %s is %r, not the section "
+                    "10.9.1 fsync policy value %r"
+                    % (key, values[0], expected))
 
     def _git(self, args, input_bytes=None, check=True, env_extra=None):
         return _run_git(
