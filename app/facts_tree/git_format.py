@@ -52,15 +52,25 @@ Path contract:
   digits, '-' and '_' pass through, every other UTF-8 byte becomes '~'
   plus two uppercase hex digits. An encoded ID can therefore never contain
   '/', '..', a leading '.', NUL, a backslash or any traversal primitive.
+- Numeric revision parameters ('revision' and 'candidate_revision') are
+  the one exception to the opaque rule: per the DEC-030 approved appendix
+  97 section 2.1, a revision ordinal is a strictly positive int and its
+  path segment is the canonical ASCII decimal string with no leading
+  zeros and no sign. bool is never an int here; str, float, Decimal, 0,
+  negative values and every other non-int type are rejected. Opaque IDs
+  such as version_id, pack_version and event_id keep the encode_id rules
+  unchanged.
 - The assembled relative path is length-capped (MAX_PATH_BYTES) and
   re-checked for clean relative segments before being returned.
 - canonical_record_type(path) decides the reverse question: it returns
   the fixed record type whose record_path() output is exactly the given
-  path, or None when no template matches. A placeholder segment only
-  matches a token that decode_id accepts and that re-encodes through
-  encode_id to the identical token, so a decodable but non-canonical
-  escape alias (for example "~2D" standing in for the safe character
-  "-") never qualifies.
+  path, or None when no template matches. A revision placeholder segment
+  only matches a canonical decimal token ([1-9][0-9]*), so "0", leading
+  zeros, signs, non-ASCII digits and legacy opaque tokens such as "r1"
+  never qualify. Every other placeholder segment only matches a token
+  that decode_id accepts and that re-encodes through encode_id to the
+  identical token, so a decodable but non-canonical escape alias (for
+  example "~2D" standing in for the safe character "-") never qualifies.
 """
 from decimal import Decimal
 import json
@@ -79,9 +89,18 @@ _SAFE = frozenset(
 )
 _HEX = "0123456789ABCDEF"
 
+# Numeric revision parameter names (DEC-030 approved appendix 97 section
+# 2.1): their path segments are canonical ASCII decimal strings produced
+# by encode_revision, not encode_id outputs. Every other placeholder in
+# the fixed table stays an opaque host-issued ID.
+_REVISION_NAMES = frozenset({"revision", "candidate_revision"})
+_ASCII_DIGITS = frozenset("0123456789")
+
 # Fixed record layout from the approved design section 10.2.2. Each entry
 # maps a record type to (relative path pattern, required id names); every
-# {placeholder} segment is filled only with an encode_id output.
+# {placeholder} segment is filled only with an encode_id output, except
+# the _REVISION_NAMES placeholders, which are filled with an
+# encode_revision canonical decimal output.
 _TEMPLATES = {
     "repository_meta": ("meta/repository.json", ()),
     "taxonomy_manifest": (
@@ -178,11 +197,44 @@ def decode_id(token):
     return data.decode("utf-8")
 
 
+def encode_revision(value):
+    """Encode a numeric revision ordinal into its canonical path segment.
+
+    Approved appendix 97 section 2.1: a revision is a strictly positive
+    int and its path token is the canonical decimal string, so bool is
+    never treated as an int, str/float/Decimal/None and every other
+    non-int type raise TypeError, and 0 or negative values raise
+    ValueError. str(value) of a positive int is exactly the ASCII
+    decimal representation with no leading zeros and no sign.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(
+            "revision must be a positive int, got %s" % type(value).__name__)
+    if value <= 0:
+        raise ValueError("revision must be a strictly positive int")
+    return str(value)
+
+
+def _is_revision_token(token):
+    """True only for a canonical decimal revision segment [1-9][0-9]*.
+
+    "0", leading zeros ("007"), signs, non-ASCII digit characters and
+    legacy opaque tokens such as "r1" all fail here, so they can never
+    identify a revision path.
+    """
+    if not token or token[0] not in "123456789":
+        return False
+    return all(char in _ASCII_DIGITS for char in token)
+
+
 def record_path(record_type, **ids):
     """Build a repository-relative path from a fixed record type and IDs.
 
-    Callers pass a record type name and the opaque IDs that type requires;
-    there is intentionally no way to supply a raw path.
+    Callers pass a record type name and the IDs that type requires;
+    there is intentionally no way to supply a raw path. Revision
+    parameters ('revision', 'candidate_revision') must be strictly
+    positive ints and become canonical decimal segments; every other
+    parameter is an opaque host-issued str encoded by encode_id.
     """
     if not isinstance(record_type, str) or record_type not in _TEMPLATES:
         raise ValueError("unknown record type: %r" % (record_type,))
@@ -190,7 +242,13 @@ def record_path(record_type, **ids):
     if set(ids) != set(names):
         raise ValueError(
             "record type %r requires exactly the ids %s" % (record_type, names))
-    encoded = {name: encode_id(ids[name]) for name in names}
+    encoded = {}
+    for name in names:
+        value = ids[name]
+        if name in _REVISION_NAMES:
+            encoded[name] = encode_revision(value)
+        else:
+            encoded[name] = encode_id(value)
     path = pattern
     for name in names:
         path = path.replace("{" + name + "}", encoded[name])
@@ -202,12 +260,15 @@ def canonical_record_type(path):
     """Return the record type whose record_path() output is exactly path.
 
     The path must match one fixed template segment by segment: literal
-    segments must be identical, and every placeholder segment must carry
-    a token that decode_id accepts and that encode_id re-encodes to the
-    identical token. A path that is merely safe, or one whose escape
-    sequences decode but are not the canonical encoding of the decoded
-    ID (an alias such as "~2D" for "-"), returns None; so does any path
-    outside the fixed layout. The exact reconstruction through
+    segments must be identical, a revision placeholder segment must carry
+    a canonical decimal token ([1-9][0-9]*), and every other placeholder
+    segment must carry a token that decode_id accepts and that encode_id
+    re-encodes to the identical token. A path that is merely safe, one
+    whose escape sequences decode but are not the canonical encoding of
+    the decoded ID (an alias such as "~2D" for "-"), or one whose
+    revision segment carries "0", a leading zero, a sign, a non-ASCII
+    digit or a legacy opaque token such as "r1", returns None; so does
+    any path outside the fixed layout. The exact reconstruction through
     record_path() must equal the input, so all record_path() limits
     apply to a match as well. Returns None for any non-matching str;
     raises TypeError for a non-str argument.
@@ -222,8 +283,9 @@ def canonical_record_type(path):
 
 
 def _match_template(record_type, path):
-    # Returns the decoded {name: id} mapping when path is exactly
-    # record_path(record_type, **ids) for some host-issued ids, else
+    # Returns the {name: id} mapping when path is exactly
+    # record_path(record_type, **ids) for some host-issued ids (opaque
+    # IDs decoded to str, revision segments parsed back to int), else
     # None. RECORD_TYPES is sorted, so callers see deterministic
     # behaviour even if two templates could ever match the same path.
     pattern, names = _TEMPLATES[record_type]
@@ -249,6 +311,19 @@ def _match_template(record_type, path):
             token = path_segment[len(prefix):-len(suffix)]
         else:
             token = path_segment[len(prefix):]
+        if name in _REVISION_NAMES:
+            # Only the canonical decimal token [1-9][0-9]* identifies a
+            # revision segment: "0", leading zeros, signs, non-ASCII
+            # digits and legacy opaque tokens such as "r1" never match.
+            if not _is_revision_token(token):
+                return None
+            try:
+                ids[name] = int(token)
+            except ValueError:
+                # Fail closed on a digit string beyond the int/str
+                # conversion limit; it is not a usable revision.
+                return None
+            continue
         try:
             value = decode_id(token)
         except (TypeError, ValueError, UnicodeDecodeError):

@@ -22,28 +22,28 @@ _OID_B = "b" * 40
 
 _APPEND_ONLY_PATHS = {
     "entity_revision": git_format.record_path(
-        "entity_revision", entity_uid="ent-1", revision="r1"),
+        "entity_revision", entity_uid="ent-1", revision=1),
     "fact_revision": git_format.record_path(
-        "fact_revision", fact_uid="fact-1", revision="r1"),
+        "fact_revision", fact_uid="fact-1", revision=1),
     "source_version": git_format.record_path(
         "source_version", source_id="src-1", version_id="v1"),
     "source_lifecycle": git_format.record_path(
-        "source_lifecycle", source_id="src-1", revision="r1"),
+        "source_lifecycle", source_id="src-1", revision=1),
     "evidence": git_format.record_path("evidence", evidence_id="ev-1"),
     "link_revision": git_format.record_path(
-        "link_revision", link_id="link-1", revision="r1"),
+        "link_revision", link_id="link-1", revision=1),
     "placement_revision": git_format.record_path(
-        "placement_revision", fact_uid="fact-1", revision="r1"),
+        "placement_revision", fact_uid="fact-1", revision=1),
     "issue_event": git_format.record_path(
         "issue_event", issue_uid="issue-1", event_id="ev-1"),
     "proposal_event": git_format.record_path(
         "proposal_event", proposal_uid="prop-1", event_id="ev-1"),
     "input_candidate": git_format.record_path(
-        "input_candidate", candidate_uid="cand-1", candidate_revision="r1"),
+        "input_candidate", candidate_uid="cand-1", candidate_revision=1),
     "operation": git_format.record_path("operation", operation_id="op-1"),
     "consumed_candidate": git_format.record_path(
         "consumed_candidate", candidate_uid="cand-1",
-        candidate_revision="r1"),
+        candidate_revision=1),
     "event": git_format.record_path("event", event_id="ev-1"),
     "taxonomy_manifest": git_format.record_path(
         "taxonomy_manifest", pack_version="pack-1"),
@@ -81,7 +81,7 @@ def test_new_append_only_paths_are_legal():
     new = base + [
         (git_format.record_path("event", event_id="ev-2"), _OID_B),
         (git_format.record_path(
-            "fact_revision", fact_uid="fact-1", revision="r2"), _OID_B),
+            "fact_revision", fact_uid="fact-1", revision=2), _OID_B),
     ]
     assert git_append_only.validate_append_only_retention(base, new) is None
 

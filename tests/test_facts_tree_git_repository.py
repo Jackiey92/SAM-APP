@@ -737,56 +737,57 @@ def test_accept_rejects_empty_directory_outside_expected_paths(tmp_path):
     assert repo.head_oid() == genesis
 
 
-_FACT1_R1 = git_format.record_path(
-    "fact_revision", fact_uid="fact-1", revision="r1")
+_FACT1_REV1 = git_format.record_path(
+    "fact_revision", fact_uid="fact-1", revision=1)
 _FACT1_CURRENT = git_format.record_path("fact_current", fact_uid="fact-1")
 
 
 def _init_repo_with_fact_history(tmp_path, name="facts-history.git"):
-    # Genesis plus one accepted commit carrying fact-1's revision r1
+    # Genesis plus one accepted commit carrying fact-1's revision 1
     # record and its current pointer: the append-only base every
     # retention test below extends or attacks.
     repo = _init_repo(tmp_path, name=name)
     genesis = repo.head_oid()
     tree = _tree_with_added_file(
-        repo.path, _tree_oid(repo.path, genesis), _FACT1_R1,
+        repo.path, _tree_oid(repo.path, genesis), _FACT1_REV1,
         _write_blob(repo.path, git_format.dumps_record(
-            {"fact_uid": "fact-1", "revision": "r1"})),
-        tmp_path, "index-r1")
+            {"fact_uid": "fact-1", "revision": 1})),
+        tmp_path, "index-rev1")
     tree = _tree_with_added_file(
         repo.path, tree, _FACT1_CURRENT,
         _write_blob(repo.path, git_format.dumps_record(
-            {"fact_uid": "fact-1", "revision": "r1"})),
+            {"fact_uid": "fact-1", "revision": 1})),
         tmp_path, "index-current")
     commit = repo.create_commit(tree, genesis)
     assert repo.accept(
         genesis, commit,
-        expected_paths=_accept_paths(_FACT1_R1, _FACT1_CURRENT)).accepted
+        expected_paths=_accept_paths(_FACT1_REV1, _FACT1_CURRENT)).accepted
     return repo, commit
 
 
 def test_accept_allows_appending_a_new_fact_revision(tmp_path):
-    # Section 10.2.2: history revisions are append-only, so adding r2
-    # next to an untouched r1 is the legal shape of a new version.
+    # Section 10.2.2: history revisions are append-only, so adding
+    # revision 2 next to an untouched revision 1 is the legal shape of a
+    # new version.
     repo, tip = _init_repo_with_fact_history(tmp_path)
-    r2 = git_format.record_path(
-        "fact_revision", fact_uid="fact-1", revision="r2")
+    rev2 = git_format.record_path(
+        "fact_revision", fact_uid="fact-1", revision=2)
     tree = _tree_with_added_file(
-        repo.path, _tree_oid(repo.path, tip), r2,
+        repo.path, _tree_oid(repo.path, tip), rev2,
         _write_blob(repo.path, git_format.dumps_record(
-            {"fact_uid": "fact-1", "revision": "r2"})),
-        tmp_path, "index-r2")
+            {"fact_uid": "fact-1", "revision": 2})),
+        tmp_path, "index-rev2")
     commit = repo.create_commit(tree, tip)
     assert repo.accept(
         tip, commit,
         expected_paths=_accept_paths(
-            _FACT1_R1, _FACT1_CURRENT, r2)).accepted
+            _FACT1_REV1, _FACT1_CURRENT, rev2)).accepted
     assert repo.head_oid() == commit
     # The old revision blob rides into the new tree unchanged.
     assert _git_text(
-        repo.path, "rev-parse", "%s:%s" % (commit, _FACT1_R1)).strip() == \
+        repo.path, "rev-parse", "%s:%s" % (commit, _FACT1_REV1)).strip() == \
         _git_text(
-            repo.path, "rev-parse", "%s:%s" % (tip, _FACT1_R1)).strip()
+            repo.path, "rev-parse", "%s:%s" % (tip, _FACT1_REV1)).strip()
 
 
 def test_accept_allows_current_pointer_advance(tmp_path):
@@ -798,12 +799,12 @@ def test_accept_allows_current_pointer_advance(tmp_path):
     tree = _tree_with_added_file(
         repo.path, _tree_oid(repo.path, tip), _FACT1_CURRENT,
         _write_blob(repo.path, git_format.dumps_record(
-            {"fact_uid": "fact-1", "revision": "r2"})),
-        tmp_path, "index-current-r2")
+            {"fact_uid": "fact-1", "revision": 2})),
+        tmp_path, "index-current-rev2")
     commit = repo.create_commit(tree, tip)
     assert repo.accept(
         tip, commit,
-        expected_paths=_accept_paths(_FACT1_R1, _FACT1_CURRENT)).accepted
+        expected_paths=_accept_paths(_FACT1_REV1, _FACT1_CURRENT)).accepted
     assert repo.head_oid() == commit
     new_pointer = _git_text(
         repo.path, "rev-parse", "%s:%s" % (commit, _FACT1_CURRENT)).strip()
@@ -814,7 +815,7 @@ def test_accept_rejects_deleted_append_only_record_and_keeps_ref(
         tmp_path):
     repo, tip = _init_repo_with_fact_history(tmp_path)
     tree = _tree_with_removed_file(
-        repo.path, _tree_oid(repo.path, tip), _FACT1_R1)
+        repo.path, _tree_oid(repo.path, tip), _FACT1_REV1)
     commit = repo.create_commit(tree, tip)
     # The tree is otherwise well-formed and the whitelist matches its
     # remaining paths, so only the retention check can refuse it.
@@ -832,15 +833,15 @@ def test_accept_rejects_rewritten_append_only_record_and_keeps_ref(
     # Same path set, same canonical JSON shape, different bytes: an
     # in-place rewrite of an old version, refused before the CAS.
     tree = _tree_with_added_file(
-        repo.path, _tree_oid(repo.path, tip), _FACT1_R1,
+        repo.path, _tree_oid(repo.path, tip), _FACT1_REV1,
         _write_blob(repo.path, git_format.dumps_record(
-            {"fact_uid": "fact-1", "revision": "r1", "tampered": True})),
-        tmp_path, "index-rewrite-r1")
+            {"fact_uid": "fact-1", "revision": 1, "tampered": True})),
+        tmp_path, "index-rewrite-rev1")
     commit = repo.create_commit(tree, tip)
     with pytest.raises(GitRepositoryError, match="rewritten in place"):
         repo.accept(
             tip, commit,
-            expected_paths=_accept_paths(_FACT1_R1, _FACT1_CURRENT))
+            expected_paths=_accept_paths(_FACT1_REV1, _FACT1_CURRENT))
     assert repo.head_oid() == tip
     assert _head(repo.path) == tip
     assert FactsGitRepository.open(repo.path, **_IDS).head_oid() == tip

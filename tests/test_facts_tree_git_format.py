@@ -1,8 +1,10 @@
 """Pinned checks for the versioned facts Git record format helpers.
 
 Covers the approved design baseline 36f9035555c7a016d0f51eb2a266611a36ab5e3f
-sections 10.2.2-10.2.3: deterministic serialization, exact decimal handling
-and host-only path construction from fixed record types and opaque IDs.
+sections 10.2.2-10.2.3 plus DEC-030 approved appendix 97 section 2.1:
+deterministic serialization, exact decimal handling, host-only path
+construction from fixed record types and opaque IDs, and numeric revision
+parameters whose path segments are canonical ASCII decimal strings.
 """
 from array import array
 from decimal import Decimal
@@ -327,7 +329,7 @@ def test_unsupported_value_types_rejected():
 
 def test_record_paths_from_fixed_types():
     assert git_format.record_path(
-        "fact_revision", fact_uid="f-1", revision="3"
+        "fact_revision", fact_uid="f-1", revision=3
     ) == "facts/f-1/revisions/3.json"
     assert git_format.record_path(
         "fact_current", fact_uid="f-1"
@@ -337,8 +339,8 @@ def test_record_paths_from_fixed_types():
     ) == "operations/op-9.json"
     assert git_format.record_path("repository_meta") == "meta/repository.json"
     assert git_format.record_path(
-        "consumed_candidate", candidate_uid="c1", candidate_revision="r2"
-    ) == "consumed/c1/r2.json"
+        "consumed_candidate", candidate_uid="c1", candidate_revision=2
+    ) == "consumed/c1/2.json"
     assert git_format.record_path(
         "taxonomy_leaf", pack_version="v2", leaf_id="L-07"
     ) == "taxonomy/v2/leaves/L-07.json"
@@ -391,6 +393,118 @@ def test_invalid_ids_rejected():
             "fact_current", fact_uid="x" * (git_format.MAX_ID_CHARS + 1))
 
 
+# DEC-030 approved appendix 97 section 2.1: numeric revision parameters.
+# Each sample is (record_type, other required ids, revision parameter
+# name, expected path pattern with one %s slot for the canonical
+# decimal segment).
+_REVISION_SAMPLES = [
+    ("entity_revision", {"entity_uid": "ent-1"}, "revision",
+     "entities/ent-1/revisions/%s.json"),
+    ("fact_revision", {"fact_uid": "f-1"}, "revision",
+     "facts/f-1/revisions/%s.json"),
+    ("source_lifecycle", {"source_id": "src-1"}, "revision",
+     "sources/src-1/lifecycle/%s.json"),
+    ("link_revision", {"link_id": "lk-1"}, "revision",
+     "links/lk-1/revisions/%s.json"),
+    ("placement_revision", {"fact_uid": "f-1"}, "revision",
+     "placements/f-1/revisions/%s.json"),
+    ("input_candidate", {"candidate_uid": "cand-1"}, "candidate_revision",
+     "inputs/cand-1/%s.json"),
+    ("consumed_candidate", {"candidate_uid": "c1"}, "candidate_revision",
+     "consumed/c1/%s.json"),
+]
+
+
+def test_positive_int_revisions_form_canonical_decimal_paths():
+    for record_type, base, name, pattern in _REVISION_SAMPLES:
+        for revision in (1, 2, 7, 42, 99999999999999999999):
+            path = git_format.record_path(
+                record_type, **dict(base, **{name: revision}))
+            assert path == pattern % revision
+            assert git_format.canonical_record_type(path) == record_type
+
+
+def test_revision_rejects_bool_str_float_and_other_types():
+    # bool is never an int for a revision ordinal, and no non-int type
+    # (str, float, Decimal, None, containers, bytes) is coerced either.
+    for record_type, base, name, _pattern in _REVISION_SAMPLES:
+        for bad in (True, False, "1", "r1", 1.0, Decimal("2"), None, [1],
+                    b"1", (1,)):
+            with pytest.raises(TypeError):
+                git_format.record_path(
+                    record_type, **dict(base, **{name: bad}))
+
+
+def test_revision_rejects_zero_and_negative_ints():
+    for record_type, base, name, _pattern in _REVISION_SAMPLES:
+        for bad in (0, -1, -99999999999999999999):
+            with pytest.raises(ValueError):
+                git_format.record_path(
+                    record_type, **dict(base, **{name: bad}))
+
+
+def test_encode_revision_is_canonical_ascii_decimal():
+    assert git_format.encode_revision(1) == "1"
+    assert git_format.encode_revision(10**30) == "1" + "0" * 30
+    token = git_format.encode_revision(12345678901234567890)
+    assert token.isascii() and token.isdigit()
+    assert not token.startswith("0")
+    with pytest.raises(TypeError):
+        git_format.encode_revision(True)
+    with pytest.raises(TypeError):
+        git_format.encode_revision("3")
+    with pytest.raises(ValueError):
+        git_format.encode_revision(0)
+
+
+def test_canonical_record_type_rejects_non_revision_tokens():
+    for path in [
+        "facts/f-1/revisions/r1.json",      # legacy opaque test token
+        "facts/f-1/revisions/0.json",       # zero is not a revision
+        "facts/f-1/revisions/007.json",     # leading zeros are not canonical
+        "facts/f-1/revisions/+3.json",      # signed form is not canonical
+        "facts/f-1/revisions/-3.json",
+        "facts/f-1/revisions/3.0.json",
+        "facts/f-1/revisions/٣.json",  # Arabic-Indic digit: non-ASCII
+        "facts/f-1/revisions/３.json",  # fullwidth digit: non-ASCII
+        "entities/ent-1/revisions/r3.json",
+        "sources/src-1/lifecycle/01.json",
+        "links/lk-1/revisions/r1.json",
+        "placements/f-1/revisions/0.json",
+        "inputs/cand-1/r2.json",            # legacy candidate token
+        "inputs/cand-1/02.json",
+        "consumed/c1/0.json",
+        "facts/f-1/revisions/%s.json" % ("9" * 5000),  # over the int limit
+    ]:
+        assert git_format.canonical_record_type(path) is None
+
+
+def test_opaque_ids_keep_their_string_rules():
+    # version_id, pack_version and event_id stay opaque host-issued str
+    # IDs: the numeric revision rule does not apply to them, so a
+    # leading-zero decimal string remains legal and canonical, and an
+    # int value is still rejected.
+    assert git_format.record_path(
+        "source_version", source_id="src-1", version_id="007"
+    ) == "sources/src-1/versions/007.json"
+    assert git_format.canonical_record_type(
+        "sources/src-1/versions/007.json") == "source_version"
+    assert git_format.record_path(
+        "taxonomy_manifest", pack_version="v2"
+    ) == "taxonomy/v2/manifest.json"
+    assert git_format.canonical_record_type(
+        "taxonomy/v2/manifest.json") == "taxonomy_manifest"
+    assert git_format.record_path(
+        "event", event_id="evt-1") == "events/evt-1.json"
+    with pytest.raises(TypeError):
+        git_format.record_path(
+            "source_version", source_id="src-1", version_id=7)
+    with pytest.raises(TypeError):
+        git_format.record_path("taxonomy_manifest", pack_version=2)
+    with pytest.raises(TypeError):
+        git_format.record_path("event", event_id=1)
+
+
 def test_id_encoding_reversible_and_deterministic():
     samples = [
         "plain-1_OK", "公司α", "a b/c\\d.e~f", "..", "🦀",
@@ -422,23 +536,23 @@ def test_canonical_record_type_accepts_every_template_output():
         ("taxonomy_manifest", {"pack_version": "v2"}),
         ("taxonomy_leaf", {"pack_version": "generic-v2", "leaf_id": "L-07"}),
         ("bindings_current", {}),
-        ("entity_revision", {"entity_uid": "ent-1", "revision": "3"}),
+        ("entity_revision", {"entity_uid": "ent-1", "revision": 3}),
         ("entity_current", {"entity_uid": "ent-1"}),
-        ("fact_revision", {"fact_uid": "f-1", "revision": "3"}),
+        ("fact_revision", {"fact_uid": "f-1", "revision": 3}),
         ("fact_current", {"fact_uid": "f-1"}),
         ("source_version", {"source_id": "src-1", "version_id": "v-1"}),
-        ("source_lifecycle", {"source_id": "src-1", "revision": "2"}),
+        ("source_lifecycle", {"source_id": "src-1", "revision": 2}),
         ("evidence", {"evidence_id": "ev-1"}),
-        ("link_revision", {"link_id": "lk-1", "revision": "1"}),
-        ("placement_revision", {"fact_uid": "f-1", "revision": "4"}),
+        ("link_revision", {"link_id": "lk-1", "revision": 1}),
+        ("placement_revision", {"fact_uid": "f-1", "revision": 4}),
         ("placement_current", {"fact_uid": "f-1"}),
         ("issue_event", {"issue_uid": "is-1", "event_id": "ev-9"}),
         ("proposal_event", {"proposal_uid": "pr-1", "event_id": "ev-9"}),
         ("input_candidate",
-         {"candidate_uid": "cand-1", "candidate_revision": "r2"}),
+         {"candidate_uid": "cand-1", "candidate_revision": 2}),
         ("operation", {"operation_id": "op-9"}),
         ("consumed_candidate", {"candidate_uid": "c1",
-                                "candidate_revision": "r2"}),
+                                "candidate_revision": 2}),
         ("event", {"event_id": "evt-1"}),
     ]
     assert {record_type for record_type, _ids in samples} == \
