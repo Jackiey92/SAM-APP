@@ -1730,6 +1730,77 @@ def test_list_maintenance_pins_sorts_and_rejects_foreign_refs(tmp_path):
     assert _head(repo.path) == h1
 
 
+@pytest.mark.parametrize("target", ["blob", "tree", "tag"])
+def test_pin_queries_reject_ref_repointed_at_non_commit(tmp_path, target):
+    # Isolated rework reproduction: a validly created pin ref alone is
+    # repointed at an existing non-commit object inside tmp_path. A
+    # pin denotes one exact frozen commit H, so both query legs must
+    # reject the corrupted ref instead of reporting a MaintenancePin,
+    # and the corruption must stay exactly as planted: no repair, no
+    # move, no delete.
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    created = repo.create_maintenance_pin("bk-d", "bar-d", h1)
+    ref = created.pin.ref
+    h2 = _append_commit(repo, tmp_path, "fact-1", "index-pin-corrupt")
+    healthy = repo.create_maintenance_pin("bk-ok", "bar-ok", h2)
+    assert healthy.created
+    assert len(repo.list_maintenance_pins()) == 2
+    if target == "blob":
+        corrupt = _write_blob(repo.path, b"not a commit\n")
+    elif target == "tree":
+        corrupt = _tree_oid(repo.path, h2)
+    else:
+        corrupt = _git_text(
+            repo.path, "mktag",
+            input_bytes=(
+                "object %s\ntype commit\ntag fixture\n"
+                "tagger Fixture <fixture@example.invalid> "
+                "1700000000 +0000\n\nfixture tag\n" % h1
+            ).encode("ascii")).strip()
+    _point_ref_at(repo.path, corrupt, ref=ref)
+    with pytest.raises(PinTargetError, match="not a commit"):
+        repo.read_maintenance_pin("bk-d", "bar-d")
+    # One corrupted ref fails the whole listing even with a healthy
+    # pin present: the healthy pin is neither returned alone nor
+    # silently dropped along with the corrupted one.
+    with pytest.raises(PinTargetError, match="not a commit"):
+        repo.list_maintenance_pins()
+    # The healthy identity read on its own is unaffected.
+    assert repo.read_maintenance_pin("bk-ok", "bar-ok") == healthy.pin
+    # Nothing was repaired, moved or deleted.
+    assert (repo.path / ref).read_text(encoding="ascii").strip() == corrupt
+    assert _raw_refs_under(repo.path, PIN_REF_NAMESPACE) == sorted(
+        [ref, healthy.pin.ref])
+    assert _head(repo.path) == h2
+
+
+def test_pin_queries_reject_unresolvable_target_not_confused_with_absent(
+        tmp_path):
+    # The same corruption one level deeper: the pin ref records a
+    # syntactically full object id whose object does not exist in this
+    # repository. Because the ref exists, this must never collapse
+    # into the "no such pin" answer (None / silent omission): a
+    # missing object is corruption, and both query legs fail closed
+    # without repairing anything and without fetching from anywhere.
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    created = repo.create_maintenance_pin("bk-u", "bar-u", h1)
+    ref = created.pin.ref
+    assert repo.list_maintenance_pins() == (created.pin,)
+    missing = "f" * repo.oid_length
+    _point_ref_at(repo.path, missing, ref=ref)
+    with pytest.raises(PinTargetError, match="not a readable object"):
+        repo.read_maintenance_pin("bk-u", "bar-u")
+    with pytest.raises(PinTargetError, match="not a readable object"):
+        repo.list_maintenance_pins()
+    # True absence stays a distinct, non-raising answer.
+    assert repo.read_maintenance_pin("bk-none", "bar-none") is None
+    # The corrupted ref was left exactly as planted.
+    assert (repo.path / ref).read_text(encoding="ascii").strip() == missing
+    assert _head(repo.path) == h1
+
+
 def test_pin_creation_race_with_head_move_fails_closed(tmp_path,
                                                        monkeypatch):
     # The authoritative head moves between the adapter's pre-check read

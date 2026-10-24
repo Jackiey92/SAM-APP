@@ -149,12 +149,23 @@ Guarantees enforced here:
   move, delete, TTL or auto-release counterpart in this slice: once
   created the pin survives process exit, restart and timeout, and as a
   Git reachability root it protects H and its history from gc/prune.
-  Replacement refs are ignored and promisor lazy fetch is disabled for
-  the target object check, and the section 10.9.1 fsync policy is
-  re-verified immediately before the pin transaction. Barrier
-  participation, backup job state, W checkpoints, R retention, export,
-  restore, authorization and pin release all remain out of scope for
-  this primitive.
+  The query legs verify what they report: a pin denotes one exact
+  frozen commit H, so read_maintenance_pin() returns None only for a
+  truly absent ref, while an existing ref whose recorded value is not
+  a full object id of this repository's format, whose target object is
+  missing or whose target is a non-commit (blob, tree or tag) fails
+  closed (MaintenancePinError / PinTargetError) instead of being
+  reported as a valid pin or confused with absence, and
+  list_maintenance_pins() fails closed as a whole when any ref inside
+  the namespace is so corrupted, never listing, skipping or repairing
+  a corrupted ref among the healthy ones. Every pin target object
+  check runs against this repository's real objects with replacement
+  refs ignored and promisor lazy fetch disabled, so verification never
+  substitutes an object and never fetches over the network; the
+  section 10.9.1 fsync policy is re-verified immediately before the
+  pin transaction. Barrier participation, backup job state, W
+  checkpoints, R retention, export, restore, authorization and pin
+  release all remain out of scope for this primitive.
 
 All Git invocations use argv lists without a shell, the fixed ref and a
 timeout; no remote, push or network command is ever issued, and no
@@ -1338,19 +1349,29 @@ class FactsGitRepository:
     def read_maintenance_pin(self, backup_id, barrier_id):
         """Return the MaintenancePin for one identity, or None if absent.
 
-        Strictly read-only: validates the identity, then reports the
-        exact full OID the maintenance ref records. No object is
-        created, no ref moves and REF_FACTS is never touched. The
-        recorded value is reported as-is; pins are only ever created
-        against commit objects, and a ref that no longer resolves to a
-        commit indicates outside interference for the backup and
-        integrity flows to judge, never something this query repairs or
-        reinterprets.
+        Strictly read-only: validates the identity, reads the exact
+        maintenance ref and verifies its recorded target before
+        reporting anything. None means exactly one thing: the
+        maintenance ref does not exist. An existing ref whose recorded
+        value is not a full object id of this repository's format,
+        whose target object is missing, or whose target resolves to a
+        non-commit (blob, tree or tag) fails closed
+        (MaintenancePinError / PinTargetError): a pin denotes one
+        exact frozen commit H, so a corrupted ref is never reported as
+        a valid pin and never collapses into the absent answer. The
+        target check sees this repository's real objects with
+        replacement refs ignored and promisor lazy fetch disabled, so
+        it never substitutes an object and never touches the network.
+        No object is created, no ref moves and REF_FACTS is never
+        touched; a corrupted ref is never repaired, moved or deleted
+        either: the interference is for the backup and integrity flows
+        to judge, never for this query.
         """
         pin_ref = maintenance_pin_ref(backup_id, barrier_id)
-        value = self._read_ref_oid(pin_ref)
+        value = self._pin_ref_oid(pin_ref)
         if value is None:
             return None
+        self._require_pin_target_commit(pin_ref, value)
         return MaintenancePin(
             backup_id=backup_id, barrier_id=barrier_id,
             commit_oid=value, ref=pin_ref)
@@ -1364,8 +1385,14 @@ class FactsGitRepository:
         exactly <backup_id>/<barrier_id> with validated ids and a full
         object id of this repository's format is an anomaly and raises
         MaintenancePinError instead of being skipped, guessed at or
-        repaired; REF_FACTS and every other namespace are outside the
-        scan.
+        repaired. Every surviving ref's recorded target is then
+        verified to be an existing commit object of this repository,
+        with replacement refs ignored and promisor lazy fetch
+        disabled, and a missing or non-commit target fails the whole
+        query closed (PinTargetError): one corrupted ref is never
+        listed as a valid pin, never silently dropped among the
+        healthy ones and never repaired. REF_FACTS and every other
+        namespace are outside the scan.
         """
         data = self._git_bytes(
             ["for-each-ref", "--format=%(objectname) %(refname)",
@@ -1383,11 +1410,7 @@ class FactsGitRepository:
                 raise MaintenancePinError(
                     "unexpected ref %r inside the dedicated maintenance "
                     "pin namespace; refusing to interpret it" % refname)
-            if len(oid) != self.oid_length or any(
-                    char not in _HEX_DIGITS for char in oid):
-                raise MaintenancePinError(
-                    "maintenance pin ref %r does not record a full %s "
-                    "object id: %r" % (refname, self.object_format, oid))
+            self._require_pin_target_commit(refname, oid)
             pins.append(MaintenancePin(
                 backup_id=parts[0], barrier_id=parts[1],
                 commit_oid=oid, ref=refname))
@@ -1512,6 +1535,55 @@ class FactsGitRepository:
                 "ref %s does not record a full %s object id: %r"
                 % (ref, self.object_format, value))
         return value
+
+    def _pin_ref_oid(self, pin_ref):
+        # The raw object id one exact pin ref records, or None only
+        # when the ref itself is absent. Read through for-each-ref
+        # instead of rev-parse: for-each-ref reports the recorded
+        # value without requiring the target object to exist and
+        # without ever peeling a tag, so a ref whose target went
+        # missing stays distinguishable from a truly absent ref (never
+        # None) and a tag target can never masquerade as the commit it
+        # annotates. The pattern also matches deeper refs under a
+        # directory/file-conflicting name; those are namespace
+        # anomalies list_maintenance_pins() rejects, and for this
+        # exact-name query they simply mean the pin ref is absent.
+        data = self._git_bytes(
+            ["for-each-ref", "--format=%(objectname) %(refname)", pin_ref])
+        for line in data.decode("utf-8", "replace").splitlines():
+            if not line:
+                continue
+            oid, refname = line.split(" ", 1)
+            if refname == pin_ref:
+                return oid
+        return None
+
+    def _require_pin_target_commit(self, pin_ref, oid):
+        # Fail-closed target verification shared by both pin queries:
+        # the recorded value must be a full object id of this
+        # repository's format naming an existing commit object of this
+        # very repository. Replacement refs are ignored and promisor
+        # lazy fetch is disabled (_VERIFY_ENV), so the check sees the
+        # real objects and a missing object fails closed here instead
+        # of being substituted or fetched over the network. No refusal
+        # path repairs, moves or deletes anything.
+        if len(oid) != self.oid_length or any(
+                char not in _HEX_DIGITS for char in oid):
+            raise MaintenancePinError(
+                "maintenance pin ref %s does not record a full %s "
+                "object id: %r" % (pin_ref, self.object_format, oid))
+        try:
+            object_type = self._object_type(oid, _VERIFY_ENV)
+        except GitRepositoryError as exc:
+            raise PinTargetError(
+                "maintenance pin ref %s targets %s, which is not a "
+                "readable object of this repository: %s"
+                % (pin_ref, oid, exc)) from exc
+        if object_type != "commit":
+            raise PinTargetError(
+                "maintenance pin ref %s targets %s, a %s, not a commit; "
+                "refusing to report it as a valid pin"
+                % (pin_ref, oid, object_type))
 
     def _object_type(self, oid, env_extra=None):
         result = self._git(
