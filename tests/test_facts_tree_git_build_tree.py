@@ -451,3 +451,40 @@ def test_build_tree_rejects_decodable_noncanonical_escape_alias(
         repo.build_tree(records, expected_paths=sorted(snapshot) + [alias])
     assert _loose_object_count(repo.path) == objects_before
     assert _head(repo.path) == head_before
+
+
+@pytest.mark.parametrize("token", [
+    "r1",        # legacy opaque revision token, not a decimal ordinal
+    "0",         # zero is not a strictly positive ordinal
+    "01",        # canonical decimal carries no leading zero
+    "+1",        # canonical decimal carries no sign; int() would parse it
+    "-1",        # negative ordinal
+    "١",    # ARABIC-INDIC DIGIT ONE; int() would parse it
+    "１",    # FULLWIDTH DIGIT ONE; int() would parse it
+])
+def test_build_tree_rejects_noncanonical_revision_path_token(tmp_path, token):
+    # Approved appendix 97 section 2.1: a revision ordinal is a strictly
+    # positive int and its path segment is the canonical ASCII decimal
+    # string, so only [1-9][0-9]* identifies a revision path. Each token
+    # here is a safe, UTF-8-encodable segment -- some even parse with
+    # int() -- but none is a canonical record_path() revision token, so
+    # the build_tree gate must refuse the snapshot with the canonical
+    # record_path reason before any Git object is written and with the
+    # authoritative ref unmoved. The payload is the same canonical bytes
+    # as the legitimate revisions/1.json record; only the path token is
+    # under test. This is an entry-gate rejection check alone: it makes
+    # no claim about JSON payload schema validation or about the path
+    # agreeing with the payload's revision value.
+    repo = _init_repo(tmp_path)
+    objects_before = _loose_object_count(repo.path)
+    head_before = _head(repo.path)
+    snapshot = _snapshot()
+    bad = "facts/fact-0001/revisions/%s.json" % token
+    records = _records(snapshot) + [
+        (bad, git_format.dumps_record(
+            {"fact_uid": "fact-0001", "revision": 1,
+             "statement": "synthetic fact"}))]
+    with pytest.raises(BuildTreeError, match="canonical record_path"):
+        repo.build_tree(records, expected_paths=sorted(snapshot) + [bad])
+    assert _loose_object_count(repo.path) == objects_before
+    assert _head(repo.path) == head_before
