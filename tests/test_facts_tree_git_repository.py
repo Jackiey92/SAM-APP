@@ -25,6 +25,7 @@ from app.facts_tree.git_repository import (
     IntegrityError,
     IntegrityReport,
     OpenError,
+    SnapshotReadError,
     StaleBaseError,
 )
 
@@ -1237,4 +1238,221 @@ def test_verify_integrity_sha256_chain_and_missing_ancestor(tmp_path):
     _loose_object_path(repo.path, middle).unlink()
     with pytest.raises(IntegrityError):
         repo.verify_integrity()
+    assert _head(repo.path) == tip
+
+
+def _snapshot_map(snapshot):
+    return {record.path: record.content for record in snapshot.records}
+
+
+def _all_object_oids(repo_path):
+    # Every object the repository currently holds; read_snapshot_at()
+    # must never add to this set.
+    out = _git_text(
+        repo_path, "cat-file", "--batch-all-objects",
+        "--batch-check=%(objectname)")
+    return set(out.split())
+
+
+def test_read_snapshot_at_genesis_returns_identity_record(tmp_path):
+    repo = _init_repo(tmp_path)
+    before = _head(repo.path)
+    snapshot = repo.read_snapshot_at(repo.genesis_oid)
+    assert snapshot.commit_oid == repo.genesis_oid
+    assert snapshot.head_oid == repo.genesis_oid
+    assert snapshot.ref == REF_FACTS
+    # The genesis snapshot carries exactly the identity record, as the
+    # raw canonical bytes written at initialize() time.
+    assert _snapshot_map(snapshot) == {
+        _META_PATH: git_format.dumps_record(_meta_payload()),
+    }
+    assert _head(repo.path) == before
+
+
+def test_read_snapshot_at_pins_historical_and_current_commits(tmp_path):
+    repo = _init_repo(tmp_path)
+    first = _append_commit(repo, tmp_path, "fact-1", "index-hist-1")
+    second = _append_commit(repo, tmp_path, "fact-2", "index-hist-2")
+    expected_meta = git_format.dumps_record(_meta_payload())
+    # A historical commit stays readable through the later head, and
+    # carries only the records accepted at that commit.
+    historical = repo.read_snapshot_at(first)
+    assert historical.commit_oid == first
+    assert historical.head_oid == second
+    assert _snapshot_map(historical) == {
+        _META_PATH: expected_meta,
+        "facts/fact-1/current.json":
+            git_format.dumps_record({"fact": "fact-1"}),
+    }
+    # The current snapshot of the tip adds the second fact record.
+    current = repo.read_snapshot_at(second)
+    assert current.commit_oid == second
+    assert current.head_oid == second
+    assert _snapshot_map(current) == {
+        _META_PATH: expected_meta,
+        "facts/fact-1/current.json":
+            git_format.dumps_record({"fact": "fact-1"}),
+        "facts/fact-2/current.json":
+            git_format.dumps_record({"fact": "fact-2"}),
+    }
+    paths = [record.path for record in current.records]
+    assert paths == sorted(paths)
+    # A later move of H never splices newer records into the pinned C:
+    # the same historical read returns the same bytes, with only the
+    # reachability-proof head advancing.
+    third = _append_commit(repo, tmp_path, "fact-3", "index-hist-3")
+    again = repo.read_snapshot_at(first)
+    assert again.commit_oid == first
+    assert again.head_oid == third
+    assert again.records == historical.records
+    assert _head(repo.path) == third
+
+
+def test_read_snapshot_at_rejects_unreachable_commit(tmp_path):
+    # A commit object that exists in the store but lost its CAS race is
+    # not part of the authoritative history and must be refused.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    base_tree = _tree_oid(repo.path, genesis)
+    tree1 = _tree_with_added_file(
+        repo.path, base_tree, "facts/fact-1/current.json",
+        _write_blob(repo.path, git_format.dumps_record({"fact": 1})),
+        tmp_path, "index-unreach-1")
+    competitor = repo.create_commit(tree1, genesis)
+    assert repo.accept(
+        genesis, competitor,
+        expected_paths=_accept_paths("facts/fact-1/current.json")).accepted
+    tree2 = _tree_with_added_file(
+        repo.path, base_tree, "facts/fact-2/current.json",
+        _write_blob(repo.path, git_format.dumps_record({"fact": 2})),
+        tmp_path, "index-unreach-2")
+    loser = _commit_tree(repo.path, tree2, [genesis], "facts: stale")
+    assert _git_text(repo.path, "cat-file", "-t", loser).strip() == "commit"
+    before = _head(repo.path)
+    with pytest.raises(SnapshotReadError, match="not reachable"):
+        repo.read_snapshot_at(loser)
+    assert _head(repo.path) == before == competitor
+
+
+def test_read_snapshot_at_rejects_unknown_object(tmp_path):
+    repo = _init_repo(tmp_path)
+    before = _head(repo.path)
+    with pytest.raises(SnapshotReadError, match="not a readable object"):
+        repo.read_snapshot_at("f" * repo.oid_length)
+    assert _head(repo.path) == before
+
+
+def test_read_snapshot_at_rejects_non_commit_oid(tmp_path):
+    repo = _init_repo(tmp_path)
+    tip = _append_commit(repo, tmp_path, "fact-1", "index-noncommit")
+    tree = _tree_oid(repo.path, tip)
+    blob = _git_text(
+        repo.path, "rev-parse", "%s:facts/fact-1/current.json" % tip
+    ).strip()
+    before = _head(repo.path)
+    for oid in (tree, blob):
+        with pytest.raises(SnapshotReadError, match="not a commit"):
+            repo.read_snapshot_at(oid)
+    assert _head(repo.path) == before
+
+
+def test_read_snapshot_at_rejects_malformed_oid_input(tmp_path):
+    repo = _init_repo(tmp_path)
+    for bad in ("123", "A" * repo.oid_length, repo.zero_oid, 42):
+        with pytest.raises(ValueError):
+            repo.read_snapshot_at(bad)
+    assert _head(repo.path) == repo.head_oid()
+
+
+def test_read_snapshot_at_requires_bound_identity(tmp_path):
+    repo = _init_repo(tmp_path)
+    unbound = FactsGitRepository(repo.path)
+    with pytest.raises(SnapshotReadError, match="not bound"):
+        unbound.read_snapshot_at(repo.genesis_oid)
+    assert _head(repo.path) == repo.genesis_oid
+
+
+def test_read_snapshot_at_fails_when_authoritative_head_is_unusable(
+        tmp_path):
+    repo = _init_repo(tmp_path)
+    tip = _append_commit(repo, tmp_path, "fact-1", "index-headbad")
+    tree = _tree_oid(repo.path, tip)
+    _point_ref_at(repo.path, tree)
+    with pytest.raises(SnapshotReadError, match="does not point to a "
+                                                "commit"):
+        repo.read_snapshot_at(tip)
+    assert _head(repo.path) == tree
+    _git(repo.path, "update-ref", "-d", REF_FACTS)
+    with pytest.raises(SnapshotReadError, match="missing"):
+        repo.read_snapshot_at(tip)
+    # Nothing was repaired: the ref is still missing afterwards.
+    result = _git(
+        repo.path, "rev-parse", "--verify", REF_FACTS, check=False)
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("case", ["noncanonical_blob", "freeform_path"])
+def test_read_snapshot_at_rejects_anomalous_tree(tmp_path, case):
+    # Corruption on the authoritative chain (planted by raw plumbing and
+    # a forced ref, the way verify_integrity fixtures do it): the read
+    # must fail closed instead of returning the anomalous bytes.
+    repo = _init_repo(tmp_path)
+    tip = _append_commit(repo, tmp_path, "fact-1", "index-anom-%s" % case)
+    if case == "noncanonical_blob":
+        blob = _write_blob(repo.path, b'{"fact": 2}\n')
+        path = "facts/fact-2/current.json"
+    else:
+        blob = _write_blob(repo.path, git_format.dumps_record({"note": "x"}))
+        path = "notes/freeform.json"
+    tree = _tree_with_added_file(
+        repo.path, _tree_oid(repo.path, tip), path, blob, tmp_path,
+        "index-anom-tree-%s" % case)
+    commit = _commit_tree(repo.path, tree, [tip], "facts: anomalous")
+    _git(repo.path, "update-ref", REF_FACTS, commit)
+    with pytest.raises(SnapshotReadError, match="failed validation"):
+        repo.read_snapshot_at(commit)
+    # The earlier, well-formed commit on the same chain still reads:
+    # the refusal is scoped to the anomalous C, not the whole history.
+    assert "facts/fact-1/current.json" in _snapshot_map(
+        repo.read_snapshot_at(tip))
+    assert _head(repo.path) == commit
+
+
+def test_read_snapshot_at_rejects_unreadable_object(tmp_path):
+    repo = _init_repo(tmp_path)
+    tip = _append_commit(repo, tmp_path, "fact-1", "index-corrupt-read")
+    blob = _git_text(
+        repo.path, "rev-parse", "%s:facts/fact-1/current.json" % tip
+    ).strip()
+    _overwrite_loose_object(repo.path, blob, b"not a zlib stream")
+    with pytest.raises(SnapshotReadError, match="unreadable"):
+        repo.read_snapshot_at(tip)
+    assert _head(repo.path) == tip
+
+
+def test_read_snapshot_at_rejects_identity_mismatch(tmp_path):
+    repo = _init_repo(tmp_path)
+    tip = _append_commit(repo, tmp_path, "fact-1", "index-idm-read")
+    rewritten = _meta_payload(company_id="co-evil")
+    blob = _write_blob(repo.path, git_format.dumps_record(rewritten))
+    env = {"GIT_INDEX_FILE": str(tmp_path / "index-evil-meta-read")}
+    _git(repo.path, "read-tree", _tree_oid(repo.path, tip), env=env)
+    _git(repo.path, "update-index", "--add", "--cacheinfo",
+         "100644,%s,%s" % (blob, _META_PATH), env=env)
+    tree = _git_text(repo.path, "write-tree", env=env).strip()
+    commit = _commit_tree(repo.path, tree, [tip], "facts: rewrite meta")
+    _git(repo.path, "update-ref", REF_FACTS, commit)
+    with pytest.raises(SnapshotReadError, match="identity"):
+        repo.read_snapshot_at(commit)
+    assert _head(repo.path) == commit
+
+
+def test_read_snapshot_at_creates_no_objects_and_moves_no_ref(tmp_path):
+    repo = _init_repo(tmp_path)
+    first = _append_commit(repo, tmp_path, "fact-1", "index-ro-1")
+    tip = _append_commit(repo, tmp_path, "fact-2", "index-ro-2")
+    objects_before = _all_object_oids(repo.path)
+    repo.read_snapshot_at(first)
+    repo.read_snapshot_at(tip)
+    assert _all_object_oids(repo.path) == objects_before
     assert _head(repo.path) == tip

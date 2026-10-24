@@ -106,6 +106,24 @@ Guarantees enforced here:
   consults the reflog or touches the network, and it does not claim to
   prove a full H/W/R backup set or the freshness of an external backup
   watermark.
+- read_snapshot_at() is the strictly read-only storage leg behind the
+  section 10.9.3 history view: given a full commit OID it captures the
+  authoritative head H once, proves the target commit C is reachable
+  from that captured H (an object that merely exists in the local
+  object store, for example a commit that lost its CAS race, is never
+  treated as part of the authoritative history), re-verifies the
+  repository identity record at C against the identity bound to this
+  instance, and validates the complete physical tree of C with the
+  same structural and canonical-JSON rules accept() enforces. Every
+  returned byte comes from the single pinned C: a later move of H is
+  never spliced into the result, and the captured H is reported only
+  as the reachability proof. The read creates no Git object, moves no
+  ref and touches no SQLite; replacement refs are ignored and promisor
+  lazy fetch is disabled so a missing object fails closed instead of
+  being substituted or fetched over the network. Authorization,
+  business record schemas, reference closure, projections and the
+  tree.history logical action itself remain out of scope for this
+  primitive.
 
 All Git invocations use argv lists without a shell, the fixed ref and a
 timeout; no remote, push or network command is ever issued, and no
@@ -191,6 +209,10 @@ class IntegrityError(GitRepositoryError):
     """Read-only integrity verification failed; nothing was modified."""
 
 
+class SnapshotReadError(GitRepositoryError):
+    """A pinned historical snapshot read failed; nothing was modified."""
+
+
 @dataclass(frozen=True)
 class IntegrityReport:
     """Result of one successful verify_integrity() pass."""
@@ -210,6 +232,29 @@ class CasResult:
     current_oid: str
     expected_old: str
     new_oid: str
+    ref: str = REF_FACTS
+
+
+@dataclass(frozen=True)
+class SnapshotRecord:
+    """One record of a pinned snapshot: its path and raw canonical bytes."""
+
+    path: str
+    content: bytes
+
+
+@dataclass(frozen=True)
+class HistoricalSnapshot:
+    """Result of one successful read_snapshot_at() call.
+
+    head_oid is the authoritative head captured to prove the
+    reachability of commit_oid for this read; every record byte comes
+    from commit_oid alone and records are sorted by path.
+    """
+
+    commit_oid: str
+    head_oid: str
+    records: tuple
     ref: str = REF_FACTS
 
 
@@ -562,44 +607,70 @@ class FactsGitRepository:
         # Returns the tree's actual blob entries as (path, oid) tuples
         # so the append-only retention check compares exactly the
         # physical snapshot that passed validation here.
+        entries = self._read_commit_tree_entries(
+            commit_oid, context="accepted commit tree")
         try:
-            listed = self._list_tree_entries(commit_oid)
+            git_tree_validation.validate_tree_entries(
+                entries, expected_paths=expected_paths,
+                object_format=self.object_format)
+        except (TypeError, ValueError) as exc:
+            raise GitRepositoryError(
+                "accepted commit tree failed validation: %s" % exc) from exc
+        return [(path, oid) for _mode, path, oid, _content in entries]
+
+    def _read_commit_tree_entries(self, commit_oid, env_extra=None,
+                                  context="accepted commit tree"):
+        # Structural leg shared by accept() and read_snapshot_at():
+        # list the complete physical tree of a commit and read every
+        # blob, so unknown object types, symlinks, executables, Git
+        # submodules, directories holding no record, paths outside the
+        # fixed record templates and unreadable blobs all fail closed
+        # before any caller-specific comparison. Persisted objects are
+        # not proof of validity: a commit assembled outside build_tree()
+        # could carry non-canonical bytes, unexpected paths or dangerous
+        # entry types. ``context`` is the message prefix identifying the
+        # caller. Returns (mode, path, oid, content) tuples in tree
+        # listing order; modes, OID shapes, whitelist membership and
+        # canonical JSON bytes are validated by the caller through
+        # git_tree_validation.validate_tree_entries.
+        try:
+            listed = self._list_tree_entries(commit_oid, env_extra)
         except (GitRepositoryError, UnicodeDecodeError, ValueError) as exc:
             raise GitRepositoryError(
-                "accepted commit tree listing is unreadable: %s" % exc) \
-                from exc
+                "%s listing is unreadable: %s" % (context, exc)) from exc
         blobs = []
         directories = []
         for mode, object_type, oid, path in listed:
             if object_type == "tree":
                 if mode != "040000":
                     raise GitRepositoryError(
-                        "accepted commit tree directory %r has mode %r, "
-                        "not 040000" % (path, mode))
+                        "%s directory %r has mode %r, not 040000"
+                        % (context, path, mode))
                 directories.append(path)
                 continue
             if object_type != "blob":
                 raise GitRepositoryError(
-                    "accepted commit tree entry %r is a %s object; only "
-                    "regular file blobs and directories are accepted"
-                    % (path, object_type))
+                    "%s entry %r is a %s object; only regular file blobs "
+                    "and directories are accepted"
+                    % (context, path, object_type))
             blobs.append((mode, path, oid))
         blob_paths = {path for _mode, path, _oid in blobs}
         for directory in directories:
             prefix = directory + "/"
             if not any(path.startswith(prefix) for path in blob_paths):
                 raise GitRepositoryError(
-                    "accepted commit tree directory %r holds no record; "
-                    "empty or unexpected directories are refused"
-                    % directory)
+                    "%s directory %r holds no record; empty or "
+                    "unexpected directories are refused"
+                    % (context, directory))
         entries = []
         for mode, path, oid in blobs:
             try:
-                content = self._git_bytes(["cat-file", "blob", oid])
+                content = self._git_bytes(
+                    ["cat-file", "blob", oid], env_extra=env_extra)
             except GitCommandError as exc:
                 raise GitRepositoryError(
-                    "accepted commit tree blob at %r is unreadable: %s"
-                    % (path, exc)) from exc
+                    "%s blob at %r is unreadable: %s"
+                    % (context, path, exc)) from exc
             entries.append((mode, path, oid, content))
         # The complete tree may only carry paths a host generated from
         # the fixed record templates with canonically encoded IDs; a
@@ -609,17 +680,10 @@ class FactsGitRepository:
         for _mode, path, _oid, _content in entries:
             if git_format.canonical_record_type(path) is None:
                 raise GitRepositoryError(
-                    "accepted commit tree path %r is not the canonical "
-                    "record_path() output of any fixed record template"
-                    % (path,))
-        try:
-            git_tree_validation.validate_tree_entries(
-                entries, expected_paths=expected_paths,
-                object_format=self.object_format)
-        except (TypeError, ValueError) as exc:
-            raise GitRepositoryError(
-                "accepted commit tree failed validation: %s" % exc) from exc
-        return [(path, oid) for _mode, path, oid, _content in entries]
+                    "%s path %r is not the canonical record_path() "
+                    "output of any fixed record template"
+                    % (context, path))
+        return entries
 
     def _validate_append_only_retention(self, expected_old, new_entries):
         # Design sections 10.2.2 and 14.2: history revisions, evidence,
@@ -656,11 +720,13 @@ class FactsGitRepository:
                 "accepted commit violates append-only retention: %s"
                 % exc) from exc
 
-    def _list_tree_entries(self, commit_oid):
+    def _list_tree_entries(self, commit_oid, env_extra=None):
         # -z keeps paths raw (no quoting) with NUL terminators; -r
         # recurses and -t also lists the tree entries themselves, so an
         # empty or unexpected directory cannot hide between the blobs.
-        data = self._git_bytes(["ls-tree", "-r", "-t", "-z", commit_oid])
+        data = self._git_bytes(
+            ["ls-tree", "-r", "-t", "-z", commit_oid],
+            env_extra=env_extra)
         listed = []
         for record in data.split(b"\0"):
             if not record:
@@ -907,6 +973,127 @@ class FactsGitRepository:
         return IntegrityReport(
             head_oid=head, genesis_oid=genesis, commit_count=count,
             object_format=self.object_format)
+
+    def read_snapshot_at(self, commit_oid):
+        """Read the record paths and raw canonical bytes of one commit.
+
+        This is the strictly read-only storage leg behind the design
+        section 10.9.3 history view; it is not the tree.history logical
+        action and does no authorization, business schema, reference
+        closure or projection work. ``commit_oid`` must be the full OID
+        of a commit reachable from the authoritative head H captured at
+        the start of this call (ValueError for a malformed or all-zero
+        OID). Every returned record comes from that single pinned
+        commit C alone: a later move of H is never spliced into the
+        result, and the captured H is reported as head_oid only to
+        document the reachability proof.
+
+        Fail-closed checks, in order:
+
+        - the instance must be bound to a repository identity by
+          initialize()/open();
+        - the captured authoritative head must resolve to a commit;
+        - commit_oid must name an existing commit object (an object id
+          that merely exists in the local store, for example a commit
+          that lost its CAS race, is not proof of history membership);
+        - the target must be reachable from the captured H;
+        - the repository identity record at C must exactly match the
+          identity bound to this instance;
+        - the complete physical tree of C is re-read and held to the
+          same structural and canonical-JSON rules accept() enforces:
+          only regular non-executable blobs at canonical
+          git_format.record_path() outputs with canonical
+          git_format.dumps_record() bytes, no unknown object types,
+          symlinks, executables, gitlinks or record-less directories.
+
+        SnapshotReadError signals any of these refusals; the repository
+        is never modified: no Git object is created, no ref moves and
+        no SQLite table is touched. Replacement refs are ignored and
+        promisor lazy fetch is disabled for every object read, so a
+        missing object fails closed instead of being substituted or
+        fetched over the network.
+        """
+        self._require_oid(commit_oid, "commit_oid")
+        if self._expected_meta is None:
+            raise SnapshotReadError(
+                "repository identity is not bound to this instance; "
+                "use initialize() or open()")
+        head = self._ref_value()
+        if head is None:
+            raise SnapshotReadError(
+                "authoritative ref %s is missing" % REF_FACTS)
+        try:
+            head_type = self._object_type(head, _VERIFY_ENV)
+        except GitRepositoryError as exc:
+            raise SnapshotReadError(
+                "authoritative ref %s is unreadable: %s"
+                % (REF_FACTS, exc)) from exc
+        if head_type != "commit":
+            raise SnapshotReadError(
+                "authoritative ref %s does not point to a commit"
+                % REF_FACTS)
+        try:
+            target_type = self._object_type(commit_oid, _VERIFY_ENV)
+        except GitRepositoryError as exc:
+            raise SnapshotReadError(
+                "snapshot target %s is not a readable object: %s"
+                % (commit_oid, exc)) from exc
+        if target_type != "commit":
+            raise SnapshotReadError(
+                "snapshot target %s is a %s, not a commit"
+                % (commit_oid, target_type))
+        # Reachability against the single H captured above: only commits
+        # on the authoritative history may be read. merge-base with
+        # --is-ancestor is a pure read and treats a commit as an
+        # ancestor of itself, so reading the current head is allowed.
+        result = self._git(
+            ["merge-base", "--is-ancestor", commit_oid, head],
+            check=False, env_extra=_VERIFY_ENV)
+        if result.returncode == 1:
+            raise SnapshotReadError(
+                "snapshot target %s is not reachable from the "
+                "authoritative head %s captured for this read"
+                % (commit_oid, head))
+        if result.returncode != 0:
+            raise GitCommandError("git merge-base failed", result)
+        try:
+            meta = self._read_meta(commit_oid, _VERIFY_ENV)
+        except GitRepositoryError as exc:
+            raise SnapshotReadError(
+                "repository metadata at %s is unreadable: %s"
+                % (commit_oid, exc)) from exc
+        if meta != self._expected_meta:
+            raise SnapshotReadError(
+                "repository identity record at %s does not match the "
+                "host-issued identity bound to this instance"
+                % commit_oid)
+        try:
+            entries = self._read_commit_tree_entries(
+                commit_oid, env_extra=_VERIFY_ENV, context="snapshot tree")
+        except GitRepositoryError as exc:
+            raise SnapshotReadError(
+                "snapshot tree at %s failed validation: %s"
+                % (commit_oid, exc)) from exc
+        # The tree's own path set is the whitelist here: there is no
+        # host-supplied whitelist for a historical commit, so this pass
+        # exists to enforce regular modes, OID shapes, path uniqueness
+        # and canonical JSON bytes, not set membership.
+        try:
+            git_tree_validation.validate_tree_entries(
+                entries,
+                expected_paths=[path for _mode, path, _oid, _content
+                                in entries],
+                object_format=self.object_format)
+        except (TypeError, ValueError) as exc:
+            raise SnapshotReadError(
+                "snapshot tree at %s failed validation: %s"
+                % (commit_oid, exc)) from exc
+        records = tuple(
+            SnapshotRecord(path=path, content=content)
+            for _mode, path, _oid, content in sorted(
+                entries, key=lambda entry: entry[1]))
+        return HistoricalSnapshot(
+            commit_oid=commit_oid, head_oid=head, records=records)
 
     def _verify_reachable_objects(self, head):
         # git fsck re-hashes and re-validates the objects reachable from
