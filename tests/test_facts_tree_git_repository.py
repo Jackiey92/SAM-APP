@@ -4,7 +4,10 @@ Every repository here is a synthetic bare repo created with Git
 plumbing inside pytest tmp_path; nothing touches SAM-APP, SAM-DOCS,
 data/, a real SAM_GIT_DIR, or any remote. The production adapter only
 ever receives OIDs; tests may additionally drive plumbing directly to
-prepare synthetic trees and competing commits.
+prepare synthetic trees and competing commits. The persistent
+maintenance pin tests additionally force refs and run
+``git gc --prune=now``, strictly confined to these synthetic tmp_path
+bare repositories.
 """
 import hashlib
 import os
@@ -16,6 +19,7 @@ import pytest
 from app.facts_tree import git_format
 from app.facts_tree import git_repository
 from app.facts_tree.git_repository import (
+    PIN_REF_NAMESPACE,
     REF_FACTS,
     CasResult,
     FactsGitRepository,
@@ -24,9 +28,16 @@ from app.facts_tree.git_repository import (
     InitializeError,
     IntegrityError,
     IntegrityReport,
+    MaintenancePin,
+    MaintenancePinError,
     OpenError,
+    PinConflictError,
+    PinCreationResult,
+    PinHeadMismatchError,
+    PinTargetError,
     SnapshotReadError,
     StaleBaseError,
+    maintenance_pin_ref,
 )
 
 _IDS = {
@@ -1457,3 +1468,392 @@ def test_read_snapshot_at_creates_no_objects_and_moves_no_ref(tmp_path):
     repo.read_snapshot_at(tip)
     assert _all_object_oids(repo.path) == objects_before
     assert _head(repo.path) == tip
+
+
+# Persistent backup maintenance pins (CHG-066 section 3 step 4 and
+# section 4): the pin is a plain ref under the dedicated refs/sam
+# namespace, created through one atomic update-ref transaction and
+# never moved afterwards.
+
+
+def _raw_pin_value(repo_path, ref):
+    result = _git(
+        repo_path, "rev-parse", "--verify", "--quiet", ref, check=False)
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("ascii").strip()
+
+
+def _raw_refs_under(repo_path, prefix):
+    out = _git_text(repo_path, "for-each-ref", "--format=%(refname)",
+                    prefix)
+    return [line for line in out.splitlines() if line]
+
+
+def test_create_maintenance_pin_freezes_current_head(tmp_path):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    tree_before = _git_text(repo.path, "ls-tree", "-r", h1)
+    objects_before = _all_object_oids(repo.path)
+    result = repo.create_maintenance_pin("bk-0001", "bar-0001", h1)
+    expected_ref = maintenance_pin_ref("bk-0001", "bar-0001")
+    assert result == PinCreationResult(
+        pin=MaintenancePin(
+            backup_id="bk-0001", barrier_id="bar-0001",
+            commit_oid=h1, ref=expected_ref),
+        created=True)
+    # The dedicated namespace: inside refs/sam, disjoint from the
+    # business authority ref.
+    assert expected_ref == PIN_REF_NAMESPACE + "/bk-0001/bar-0001"
+    assert expected_ref.startswith("refs/sam/")
+    assert _raw_pin_value(repo.path, expected_ref) == h1
+    # The business authority is untouched: head, tree and the whole
+    # object set are unchanged; a pin is a ref, never tree content.
+    assert repo.head_oid() == h1
+    assert _head(repo.path) == h1
+    assert _git_text(repo.path, "ls-tree", "-r", h1) == tree_before
+    assert _all_object_oids(repo.path) == objects_before
+    # The query legs report the same pin.
+    assert repo.read_maintenance_pin("bk-0001", "bar-0001") == result.pin
+    assert repo.list_maintenance_pins() == (result.pin,)
+
+
+def test_pin_keeps_original_commit_after_head_advances(tmp_path):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    assert repo.create_maintenance_pin("bk-1", "bar-1", h1).created
+    h2 = _append_commit(repo, tmp_path, "fact-1", "index-pin-advance-1")
+    h3 = _append_commit(repo, tmp_path, "fact-2", "index-pin-advance-2")
+    pin = repo.read_maintenance_pin("bk-1", "bar-1")
+    assert pin.commit_oid == h1
+    assert _raw_pin_value(repo.path, pin.ref) == h1
+    assert repo.head_oid() == h3
+    assert h3 != h1
+    # An idempotent re-assertion of the same pin stays legal after the
+    # head moved past H: the head equality constrains only a new pin.
+    again = repo.create_maintenance_pin("bk-1", "bar-1", h1)
+    assert again.created is False
+    assert again.pin.commit_oid == h1
+    # The new head can be pinned under a different identity.
+    assert repo.create_maintenance_pin("bk-2", "bar-2", h3).created
+    assert repo.read_maintenance_pin("bk-1", "bar-1").commit_oid == h1
+
+
+def test_repeated_identical_pin_request_is_idempotent(tmp_path):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    first = repo.create_maintenance_pin("bk-i", "bar-i", h1)
+    second = repo.create_maintenance_pin("bk-i", "bar-i", h1)
+    assert first.created is True
+    assert second.created is False
+    assert second.pin == first.pin
+    assert _raw_refs_under(repo.path, PIN_REF_NAMESPACE) == [first.pin.ref]
+    assert _head(repo.path) == h1
+
+
+def test_same_identity_different_commit_conflicts_and_never_moves(tmp_path):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    repo.create_maintenance_pin("bk-c", "bar-c", h1)
+    h2 = _append_commit(repo, tmp_path, "fact-1", "index-pin-conflict")
+    ref = maintenance_pin_ref("bk-c", "bar-c")
+    # h2 is a perfectly valid current head, but the identity is already
+    # bound to h1: rebinding fails closed and moves nothing.
+    with pytest.raises(PinConflictError):
+        repo.create_maintenance_pin("bk-c", "bar-c", h2)
+    assert _raw_pin_value(repo.path, ref) == h1
+    assert repo.read_maintenance_pin("bk-c", "bar-c").commit_oid == h1
+    assert _head(repo.path) == h2
+
+
+def test_new_pin_requires_target_equal_current_head(tmp_path):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    h2 = _append_commit(repo, tmp_path, "fact-1", "index-pin-stale")
+    # h1 is a real existing commit, but it is no longer the captured
+    # head: a new pin identity may only freeze the current head.
+    with pytest.raises(PinHeadMismatchError):
+        repo.create_maintenance_pin("bk-old", "bar-old", h1)
+    assert _raw_refs_under(repo.path, "refs/sam/") == []
+    assert repo.read_maintenance_pin("bk-old", "bar-old") is None
+    assert _head(repo.path) == h2
+
+
+@pytest.mark.parametrize("backup_id,barrier_id", [
+    ("", "bar-1"),
+    ("bk-1", ""),
+    (None, "bar-1"),
+    ("bk-1", None),
+    (42, "bar-1"),
+    ("bk-1", 42),
+    ("bk/1", "bar-1"),
+    ("bk..1", "bar-1"),
+    (".bk1", "bar-1"),
+    ("bk1.", "bar-1"),
+    ("bk.lock", "bar-1"),
+    ("bk 1", "bar-1"),
+    ("bk~1", "bar-1"),
+    ("bk^1", "bar-1"),
+    ("bk:1", "bar-1"),
+    ("bk?1", "bar-1"),
+    ("bk*1", "bar-1"),
+    ("bk[1", "bar-1"),
+    ("bk\\1", "bar-1"),
+    ("bk@{1}", "bar-1"),
+    ("bké1", "bar-1"),
+    ("a" * 65, "bar-1"),
+    ("bk-1", "b" * 65),
+])
+def test_pin_rejects_malformed_identifiers(tmp_path, backup_id, barrier_id):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    with pytest.raises(ValueError):
+        repo.create_maintenance_pin(backup_id, barrier_id, h1)
+    with pytest.raises(ValueError):
+        repo.read_maintenance_pin(backup_id, barrier_id)
+    assert _raw_refs_under(repo.path, "refs/sam/") == []
+    assert repo.head_oid() == h1
+
+
+def test_pin_rejects_malformed_oid_input(tmp_path):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    for bad in ("123", "A" * repo.oid_length, repo.zero_oid, 42,
+                "0" * (repo.oid_length - 1)):
+        with pytest.raises(ValueError):
+            repo.create_maintenance_pin("bk-o", "bar-o", bad)
+    assert _raw_refs_under(repo.path, "refs/sam/") == []
+    assert repo.head_oid() == h1
+
+
+def test_pin_rejects_non_commit_and_unknown_objects(tmp_path):
+    repo = _init_repo(tmp_path)
+    tip = _append_commit(repo, tmp_path, "fact-1", "index-pin-noncommit")
+    tree = _tree_oid(repo.path, tip)
+    blob = _git_text(
+        repo.path, "rev-parse",
+        "%s:facts/fact-1/current.json" % tip).strip()
+    unknown = "f" * repo.oid_length
+    before = _head(repo.path)
+    for oid in (tree, blob, unknown):
+        with pytest.raises(PinTargetError):
+            repo.create_maintenance_pin("bk-t", "bar-t", oid)
+    assert _raw_refs_under(repo.path, "refs/sam/") == []
+    assert _head(repo.path) == before == tip
+
+
+def test_pin_creation_requires_bound_identity(tmp_path):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    unbound = FactsGitRepository(repo.path)
+    with pytest.raises(MaintenancePinError, match="not bound"):
+        unbound.create_maintenance_pin("bk-b", "bar-b", h1)
+    assert _raw_refs_under(repo.path, "refs/sam/") == []
+    # The queries are pure ref reads and do not require the binding.
+    assert unbound.read_maintenance_pin("bk-b", "bar-b") is None
+    assert unbound.list_maintenance_pins() == ()
+
+
+def test_pin_creation_rejects_fsync_policy_violation(tmp_path):
+    # The section 10.9.1 durability policy is re-verified immediately
+    # before the pin transaction: a drifted repository never gains a
+    # pin whose persistence cannot be confirmed.
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    _git(repo.path, "config", "--local", "core.fsync", "none")
+    with pytest.raises(GitRepositoryError, match="fsync policy"):
+        repo.create_maintenance_pin("bk-fsync", "bar-fsync", h1)
+    assert _raw_refs_under(repo.path, "refs/sam/") == []
+    assert repo.head_oid() == h1
+    # The refusal was the configuration check: with the exact policy
+    # restored, the same pin request succeeds.
+    _git(repo.path, "config", "--local", "core.fsync",
+         _FSYNC_EXPECTED["core.fsync"])
+    assert repo.create_maintenance_pin("bk-fsync", "bar-fsync", h1).created
+
+
+def test_pin_survives_reopen_by_a_new_instance(tmp_path):
+    # Persistence across a process restart: the pin is a plain ref on
+    # disk, and a freshly opened instance sees the identical value.
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    created = repo.create_maintenance_pin("bk-p", "bar-p", h1)
+    reopened = FactsGitRepository.open(repo.path, **_IDS)
+    pin = reopened.read_maintenance_pin("bk-p", "bar-p")
+    assert pin == created.pin
+    assert reopened.list_maintenance_pins() == (created.pin,)
+    again = reopened.create_maintenance_pin("bk-p", "bar-p", h1)
+    assert again.created is False
+    assert again.pin == created.pin
+
+
+def test_pin_queries_report_absent_pins(tmp_path):
+    repo = _init_repo(tmp_path)
+    assert repo.read_maintenance_pin("bk-none", "bar-none") is None
+    assert repo.list_maintenance_pins() == ()
+    assert _raw_refs_under(repo.path, "refs/sam/") == []
+
+
+def test_list_maintenance_pins_sorts_and_rejects_foreign_refs(tmp_path):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    # The namespace belongs exclusively to the pin primitive: any other
+    # ref shape inside it fails closed instead of being skipped or
+    # guessed at. These fixtures are planted before any pin exists so
+    # the raw refs themselves have no directory/file conflict.
+    _git(repo.path, "update-ref", PIN_REF_NAMESPACE, h1)
+    with pytest.raises(MaintenancePinError):
+        repo.list_maintenance_pins()
+    _git(repo.path, "update-ref", "-d", PIN_REF_NAMESPACE)
+    _git(repo.path, "update-ref", PIN_REF_NAMESPACE + "/junk", h1)
+    with pytest.raises(MaintenancePinError):
+        repo.list_maintenance_pins()
+    _git(repo.path, "update-ref", "-d", PIN_REF_NAMESPACE + "/junk")
+    identities = (("bk-b", "bar-2"), ("bk-a", "bar-9"), ("bk-a", "bar-1"))
+    for backup_id, barrier_id in identities:
+        assert repo.create_maintenance_pin(backup_id, barrier_id, h1).created
+    pins = repo.list_maintenance_pins()
+    assert [(pin.backup_id, pin.barrier_id) for pin in pins] == [
+        ("bk-a", "bar-1"), ("bk-a", "bar-9"), ("bk-b", "bar-2")]
+    assert all(pin.commit_oid == h1 for pin in pins)
+    assert [pin.ref for pin in pins] == [
+        maintenance_pin_ref(backup_id, barrier_id)
+        for backup_id, barrier_id in
+        (("bk-a", "bar-1"), ("bk-a", "bar-9"), ("bk-b", "bar-2"))]
+    # A deeper nesting inside the namespace is equally anomalous.
+    _git(repo.path, "update-ref", PIN_REF_NAMESPACE + "/bk/deep/extra", h1)
+    with pytest.raises(MaintenancePinError):
+        repo.list_maintenance_pins()
+    _git(repo.path, "update-ref", "-d",
+         PIN_REF_NAMESPACE + "/bk/deep/extra")
+    assert len(repo.list_maintenance_pins()) == 3
+    assert _head(repo.path) == h1
+
+
+def test_pin_creation_race_with_head_move_fails_closed(tmp_path,
+                                                       monkeypatch):
+    # The authoritative head moves between the adapter's pre-check read
+    # and the atomic ref write. The transaction's verify leg must abort
+    # every leg together: no pin ref is created and nothing else moves.
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    h2 = _append_commit(repo, tmp_path, "fact-1", "index-pin-race-head")
+    real_ref_value = repo._ref_value
+    calls = []
+
+    def stale_first_read():
+        calls.append("read")
+        if len(calls) == 1:
+            # What a racing pre-check would believe it saw.
+            return h1
+        return real_ref_value()
+
+    monkeypatch.setattr(repo, "_ref_value", stale_first_read)
+    with pytest.raises(PinHeadMismatchError):
+        repo.create_maintenance_pin("bk-race", "bar-race", h1)
+    assert len(calls) >= 2
+    # The aborted transaction created nothing anywhere.
+    assert _raw_refs_under(repo.path, "refs/sam/") == []
+    assert _head(repo.path) == h2
+
+
+def test_pin_creation_race_with_identical_concurrent_pin_is_idempotent(
+        tmp_path, monkeypatch):
+    # A concurrent creator wins the ref between this call's pre-read
+    # and the atomic create. The create leg aborts on the existing ref,
+    # the classification finds exactly the same H, and the call reports
+    # idempotent success without moving anything.
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    first = repo.create_maintenance_pin("bk-conc", "bar-conc", h1)
+    assert first.created
+    real_read = repo._read_ref_oid
+    calls = []
+
+    def blind_first_read(ref):
+        calls.append(ref)
+        if len(calls) == 1:
+            # The pre-read that misses the competitor's ref.
+            return None
+        return real_read(ref)
+
+    monkeypatch.setattr(repo, "_read_ref_oid", blind_first_read)
+    second = repo.create_maintenance_pin("bk-conc", "bar-conc", h1)
+    assert second.created is False
+    assert second.pin == first.pin
+    assert _raw_pin_value(repo.path, first.pin.ref) == h1
+    assert _head(repo.path) == h1
+
+
+def test_pin_creation_race_with_different_existing_pin_conflicts(
+        tmp_path, monkeypatch):
+    # Same race window, but the existing pin holds a different H: the
+    # create leg aborts, the classification sees the foreign value and
+    # fails closed; the existing pin is never moved.
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    repo.create_maintenance_pin("bk-x", "bar-x", h1)
+    h2 = _append_commit(repo, tmp_path, "fact-1", "index-pin-race-conflict")
+    ref = maintenance_pin_ref("bk-x", "bar-x")
+    real_read = repo._read_ref_oid
+    calls = []
+
+    def blind_first_read(ref_name):
+        calls.append(ref_name)
+        if len(calls) == 1:
+            return None
+        return real_read(ref_name)
+
+    monkeypatch.setattr(repo, "_read_ref_oid", blind_first_read)
+    with pytest.raises(PinConflictError):
+        repo.create_maintenance_pin("bk-x", "bar-x", h2)
+    assert _raw_pin_value(repo.path, ref) == h1
+    assert _head(repo.path) == h2
+
+
+def test_pinned_commit_survives_gc_while_dangling_object_is_pruned(
+        tmp_path):
+    # CHG-066 section 4: the persistent pin is a Git reachability root.
+    # After the business ref is forced onto an unrelated history, H is
+    # reachable only through the maintenance pin; an aggressive
+    # gc --prune=now must keep it, while an unpinned dangling control
+    # commit is pruned. Everything stays inside this synthetic
+    # tmp_path bare repository.
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    created = repo.create_maintenance_pin("bk-gc", "bar-gc", h1)
+    assert created.created
+    tree = _tree_oid(repo.path, h1)
+    unrelated = _commit_tree(
+        repo.path, tree, [], "facts: unrelated post-pin history")
+    _git(repo.path, "update-ref", REF_FACTS, unrelated, h1)
+    dangling = _commit_tree(repo.path, tree, [], "facts: dangling control")
+    _git(repo.path, "reflog", "expire", "--expire=now",
+         "--expire-unreachable=now", "--all", check=False)
+    _git(repo.path, "gc", "--prune=now", "--quiet")
+    # The pinned H survived as the pin's reachability root.
+    assert _git_text(repo.path, "cat-file", "-t", h1).strip() == "commit"
+    pin = repo.read_maintenance_pin("bk-gc", "bar-gc")
+    assert pin == created.pin
+    assert _raw_pin_value(repo.path, pin.ref) == h1
+    # The control proves the gc really pruned unreachable objects.
+    assert _git(repo.path, "cat-file", "-t", dangling,
+                check=False).returncode != 0
+    assert _head(repo.path) == unrelated
+
+
+def test_pin_in_sha256_repository_and_cross_format_oid_rejection(tmp_path):
+    repo = _init_repo(
+        tmp_path, name="facts256-pin.git", object_format="sha256")
+    h1 = repo.head_oid()
+    assert len(h1) == 64
+    result = repo.create_maintenance_pin("bk-256", "bar-256", h1)
+    assert result.created
+    assert result.pin.commit_oid == h1
+    assert repo.read_maintenance_pin("bk-256", "bar-256") == result.pin
+    assert repo.list_maintenance_pins() == (result.pin,)
+    # A sha1-shaped OID is not a full OID of this repository's format.
+    with pytest.raises(ValueError):
+        repo.create_maintenance_pin("bk-40", "bar-40", "a" * 40)
+    assert repo.read_maintenance_pin("bk-40", "bar-40") is None
+    assert _raw_pin_value(repo.path, result.pin.ref) == h1
