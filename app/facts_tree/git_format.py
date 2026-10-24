@@ -56,9 +56,12 @@ Path contract:
   the one exception to the opaque rule: per the DEC-030 approved appendix
   97 section 2.1, a revision ordinal is a strictly positive int and its
   path segment is the canonical ASCII decimal string with no leading
-  zeros and no sign. bool is never an int here; str, float, Decimal, 0,
-  negative values and every other non-int type are rejected. Opaque IDs
-  such as version_id, pack_version and event_id keep the encode_id rules
+  zeros and no sign. Only the built-in int type itself is accepted here
+  (type(value) is int): bool and every int subclass are rejected, so a
+  subclass overriding __str__ can never produce a segment that disagrees
+  with the underlying value; str, float, Decimal, 0, negative values and
+  every other non-int type are rejected as well. Opaque IDs such as
+  version_id, pack_version and event_id keep the encode_id rules
   unchanged.
 - The assembled relative path is length-capped (MAX_PATH_BYTES) and
   re-checked for clean relative segments before being returned.
@@ -201,13 +204,17 @@ def encode_revision(value):
     """Encode a numeric revision ordinal into its canonical path segment.
 
     Approved appendix 97 section 2.1: a revision is a strictly positive
-    int and its path token is the canonical decimal string, so bool is
-    never treated as an int, str/float/Decimal/None and every other
-    non-int type raise TypeError, and 0 or negative values raise
-    ValueError. str(value) of a positive int is exactly the ASCII
-    decimal representation with no leading zeros and no sign.
+    int and its path token is the canonical decimal string. Only the
+    built-in int type itself passes (type(value) is int): bool and every
+    int subclass raise TypeError, because a subclass could override
+    __str__ and make str(value) disagree with the underlying integer,
+    yielding a wrong or non-canonical segment; str/float/Decimal/None and
+    every other non-int type raise TypeError as well, and 0 or negative
+    values raise ValueError. For a true built-in positive int, str(value)
+    is exactly the ASCII decimal representation with no leading zeros
+    and no sign.
     """
-    if isinstance(value, bool) or not isinstance(value, int):
+    if type(value) is not int:
         raise TypeError(
             "revision must be a positive int, got %s" % type(value).__name__)
     if value <= 0:

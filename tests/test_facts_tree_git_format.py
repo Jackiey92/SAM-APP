@@ -457,6 +457,39 @@ def test_encode_revision_is_canonical_ascii_decimal():
         git_format.encode_revision(0)
 
 
+def test_encode_revision_rejects_int_subclass_overriding_str():
+    # An int subclass can override __str__ so the generated segment no
+    # longer matches the underlying integer; only the built-in int type
+    # itself may produce a canonical decimal revision segment, so no
+    # wrong or non-canonical path can be formed through a subclass.
+    class LyingInt(int):
+        def __str__(self):
+            return "999"
+
+    class PlainSubclass(int):
+        pass
+
+    lying = LyingInt(3)
+    assert str(lying) == "999"          # the subclass lies about its value
+    assert int.__str__(lying) == "3"    # the underlying integer is 3
+    with pytest.raises(TypeError):
+        git_format.encode_revision(lying)
+    # The rule is the exact built-in type, not "behaves like an int": a
+    # subclass that does not override __str__ is rejected as well.
+    with pytest.raises(TypeError):
+        git_format.encode_revision(PlainSubclass(3))
+    # Every revision-bearing path rejects the subclass through
+    # record_path() too, so no path segment is ever produced from it.
+    for record_type, base, name, _pattern in _REVISION_SAMPLES:
+        with pytest.raises(TypeError):
+            git_format.record_path(record_type, **dict(base, **{name: lying}))
+    # Ordinary built-in ints keep their canonical encoding.
+    assert git_format.encode_revision(3) == "3"
+    assert git_format.record_path(
+        "fact_revision", fact_uid="f-1", revision=3
+    ) == "facts/f-1/revisions/3.json"
+
+
 def test_canonical_record_type_rejects_non_revision_tokens():
     for path in [
         "facts/f-1/revisions/r1.json",      # legacy opaque test token
