@@ -105,6 +105,23 @@ Guarantees enforced here:
   genesis form. Old operation records are append-only, so their original
   base_commit stays valid in every later commit and is never compared
   against the then-current parent.
+- accept() additionally enforces, on that same pre-CAS leg, the
+  bindings/current plan-A closure of approved design 97 §§10.2-10.6:
+  the fixed bindings/current.json pointer, its referenced taxonomy
+  manifest and every binding_initialized/binding_changed event are read
+  from the exact validated bytes of this one commit C, never from HEAD,
+  SQLite or another commit. Paths come from the fixed templates and
+  payload-owned IDs only (record_path("bindings_current"),
+  bindings_current.derive_manifest_path(current taxonomy_path_id) and
+  bindings_current.derive_event_path(event_id)), and each loaded record
+  is bound to that canonical path before
+  bindings_current.validate_current_binding runs under the
+  repo_id/company_id bound to this instance. The approved no-binding
+  state passes: a tree with neither the current pointer nor binding
+  lifecycle events (genesis and unbound repositories included) needs no
+  further records; binding lifecycle events without the current pointer,
+  a missing or wrong manifest at the derived path, or a broken or stale
+  event history all raise GitRepositoryError before the ref can move.
 - build_tree() materializes a caller-assembled complete final snapshot
   of (repository-relative path, canonical JSON bytes) records into Git
   blob and tree objects and returns the root tree OID. Before any
@@ -213,6 +230,7 @@ from pathlib import Path
 import re
 import subprocess
 
+from app.facts_tree import bindings_current
 from app.facts_tree import candidate_reference_closure
 from app.facts_tree import git_append_only
 from app.facts_tree import git_format
@@ -242,6 +260,11 @@ _CANDIDATE_CLOSURE_FAMILIES = (
 # goes through git_format.canonical_record_type, so no path template is
 # duplicated.
 _OPERATION_EVENT_CLOSURE_FAMILIES = frozenset(("operation", "event"))
+# Design 97 §10.2 (plan A of §10.5): the single fixed current-pointer
+# record of the bindings family. Unlike every other identity-bearing
+# record it has no payload ID: its path identity is this fixed template
+# output itself.
+_BINDINGS_CURRENT_PATH = git_format.record_path("bindings_current")
 GIT_TIMEOUT_SECONDS = 30
 _OBJECT_FORMAT_OID_LENGTH = {"sha1": 40, "sha256": 64}
 _HEX_DIGITS = frozenset("0123456789abcdef")
@@ -759,6 +782,24 @@ class FactsGitRepository:
           retention and their original base_commit is deliberately not
           compared to the current parent, so an operation first accepted
           at an earlier commit stays valid in every later commit C.
+        - the bindings/current plan-A closure of design 97 §§10.2-10.6 is
+          enforced next, on the same validated bytes: the tree either
+          carries none of the binding family (no bindings/current.json
+          and no binding_initialized/binding_changed event, the approved
+          no-binding state genesis and unbound repositories keep) or it
+          carries the fixed-path current record, the taxonomy manifest
+          at the path derived from the current payload's own
+          taxonomy_path_id, and every binding lifecycle event of this
+          same tree at the path derived from its own event_id. All three
+          are parsed from content_by_path (never re-read from Git, never
+          filled from HEAD, SQLite or another commit), path-bound and
+          handed as one current, one manifest and the full event history
+          to bindings_current.validate_current_binding under the
+          repo_id/company_id of the identity bound to this instance; a
+          binding event without the current pointer, a manifest missing
+          from the derived path or parked under another pack_version id,
+          a foreign scope or a broken, gapped, non-continuous or stale
+          event history all refuse the commit before the CAS.
         - the repository's effective local fsync configuration is
           re-verified against the exact section 10.9.1 policy
           (_FSYNC_POLICY) immediately before the swap: a missing,
@@ -802,6 +843,7 @@ class FactsGitRepository:
         self._validate_candidate_closure(new_entries, content_by_path)
         self._validate_operation_event_closure(
             expected_old, new_entries, content_by_path, base_entries)
+        self._validate_bindings_current_closure(new_entries, content_by_path)
         # Last guard before the authoritative ref moves: the section
         # 10.9.1 durability configuration is re-read through Git, so a
         # repository whose policy was removed or drifted since open()
@@ -1044,6 +1086,143 @@ class FactsGitRepository:
                     "not the accepted parent expected_old %s; a newly "
                     "accepted operation must build on this commit's own "
                     "parent" % (path, operation["base_commit"], expected_old))
+
+    def _validate_bindings_current_closure(self, new_entries,
+                                            content_by_path):
+        # Design 97 §§10.2-10.6 (plan A of §10.5), the full-tree
+        # integration of the existing pure
+        # bindings_current.validate_current_binding contract: on the
+        # exact bytes the physical leg already validated for the one
+        # accepted commit C, close bindings/current.json, its referenced
+        # taxonomy manifest and every binding lifecycle event inside C
+        # alone. Paths are never read from payloads as strings: the
+        # current path is the fixed record_path("bindings_current")
+        # output, the manifest path is derived from the current
+        # payload's own taxonomy_path_id through
+        # bindings_current.derive_manifest_path, and each binding
+        # event's path is derived from that payload's own event_id
+        # through bindings_current.derive_event_path, so a record parked
+        # at another record's canonical path fails closed. Nothing here
+        # reads HEAD, SQLite or any other commit: every record comes from
+        # content_by_path, i.e. the validated bytes of this one tree, and
+        # a missing referenced record is a refusal, never filled from
+        # another commit. The expected repo_id/company_id are the
+        # repository identity bound to this instance, never the scope a
+        # binding record claims for itself. The approved no-binding state
+        # (genesis and unbound repositories included) passes: no current
+        # pointer and no binding_initialized/binding_changed event in the
+        # same tree is the empty case. Binding lifecycle events without
+        # the current pointer are refused; a current pointer without the
+        # manifest at its derived path, without a continuous event
+        # history or with any manifest/history disagreement is refused
+        # through the pure validator. Everything runs before the fsync
+        # recheck and the REF_FACTS CAS, so any failure leaves the ref at
+        # its previous value.
+        binding_events = []
+        for path, _oid in sorted(new_entries):
+            if git_format.canonical_record_type(path) != "event":
+                continue
+            try:
+                payload = git_format.loads_record(content_by_path[path])
+            except (TypeError, ValueError) as exc:
+                raise GitRepositoryError(
+                    "accepted commit event record at %r is not a valid "
+                    "canonical record: %s" % (path, exc)) from exc
+            event_type = payload.get("event_type")
+            if not isinstance(event_type, str) \
+                    or event_type not in bindings_current.BINDING_EVENT_TYPES:
+                # Other event families (for example fact revision
+                # events) do not participate in the binding history and
+                # must not trigger the binding-present rule; they stay
+                # the generic operation/event closure leg's business.
+                continue
+            # Path identity per §4 item 1 (路径身份), binding event
+            # family: the pure history validator only compares event_id
+            # values, so an event body whose event_id disagrees with its
+            # canonical path is refused here on top of the same binding
+            # the generic event leg already enforces for every event.
+            try:
+                canonical_path = bindings_current.derive_event_path(
+                    payload.get("event_id"))
+            except (TypeError, ValueError) as exc:
+                raise GitRepositoryError(
+                    "accepted commit binding event at %r does not carry "
+                    "a path-derivable event_id: %s" % (path, exc)) from exc
+            if canonical_path != path:
+                raise GitRepositoryError(
+                    "accepted commit binding event record at %r carries "
+                    "event_id %r, whose canonical record_path() is %r; a "
+                    "binding event's path must be rebuilt from its "
+                    "payload's own event_id"
+                    % (path, payload.get("event_id"), canonical_path))
+            binding_events.append((path, payload))
+        current_bytes = content_by_path.get(_BINDINGS_CURRENT_PATH)
+        if current_bytes is None:
+            if binding_events:
+                raise GitRepositoryError(
+                    "accepted commit carries binding lifecycle event(s) "
+                    "at %s without the current bindings record at %s; a "
+                    "binding history without its current pointer cannot "
+                    "close"
+                    % ([path for path, _payload in binding_events],
+                       _BINDINGS_CURRENT_PATH))
+            # The approved no-binding state: no current pointer and no
+            # binding lifecycle events (genesis and unbound repositories
+            # included).
+            return
+        try:
+            current = git_format.loads_record(current_bytes)
+        except (TypeError, ValueError) as exc:
+            raise GitRepositoryError(
+                "accepted commit bindings current record at %r is not a "
+                "valid canonical record: %s"
+                % (_BINDINGS_CURRENT_PATH, exc)) from exc
+        # Validate the record structure first so taxonomy_path_id is
+        # guaranteed present and legal before its owned manifest path is
+        # derived; scope and the full closure are re-checked, not
+        # assumed, by validate_current_binding below.
+        try:
+            bindings_current.validate_bindings_current(current)
+        except (TypeError, ValueError) as exc:
+            raise GitRepositoryError(
+                "accepted commit failed bindings/current validation: %s"
+                % exc) from exc
+        try:
+            manifest_path = bindings_current.derive_manifest_path(
+                current["taxonomy_path_id"])
+        except (TypeError, ValueError) as exc:
+            raise GitRepositoryError(
+                "accepted commit bindings current record at %r does not "
+                "carry a path-derivable taxonomy_path_id: %s"
+                % (_BINDINGS_CURRENT_PATH, exc)) from exc
+        # The referenced manifest must be a record of this same tree at
+        # exactly the derived path; HEAD, a different commit or a manifest
+        # parked under another pack_version id are never substitutes.
+        manifest_bytes = content_by_path.get(manifest_path)
+        if manifest_bytes is None:
+            raise GitRepositoryError(
+                "accepted commit bindings current record at %r references "
+                "the taxonomy manifest at %s, which this commit does not "
+                "carry; the manifest must close inside this same tree at "
+                "the derived path"
+                % (_BINDINGS_CURRENT_PATH, manifest_path))
+        try:
+            manifest = git_format.loads_record(manifest_bytes)
+        except (TypeError, ValueError) as exc:
+            raise GitRepositoryError(
+                "accepted commit taxonomy manifest at %r is not a valid "
+                "canonical record: %s" % (manifest_path, exc)) from exc
+        try:
+            bindings_current.validate_current_binding(
+                current,
+                manifest=manifest,
+                events=[payload for _path, payload in binding_events],
+                repo_id=self._expected_meta["repo_id"],
+                company_id=self._expected_meta["company_id"])
+        except (TypeError, ValueError) as exc:
+            raise GitRepositoryError(
+                "accepted commit failed bindings/current closure: %s"
+                % exc) from exc
 
     def _validate_candidate_closure(self, new_entries, content_by_path):
         # Design 97 §4 item 1 (结构与作用域: 路径身份) and item 5 (操作

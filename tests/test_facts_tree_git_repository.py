@@ -16,8 +16,10 @@ import zlib
 
 import pytest
 
+from app.facts_tree import bindings_current
 from app.facts_tree import git_format
 from app.facts_tree import git_repository
+from app.facts_tree import template_packs
 from app.facts_tree.git_repository import (
     PIN_REF_NAMESPACE,
     REF_FACTS,
@@ -1427,6 +1429,459 @@ def test_accept_with_no_operation_or_event_records_passes_event_closure(
     commit = repo.create_commit(tree, genesis)
     assert repo.accept(
         genesis, commit, expected_paths=_accept_paths(path)).accepted
+    assert repo.head_oid() == commit
+    assert _head(repo.path) == commit
+
+
+# Design 97 §§10.2-10.6 (plan A): the accept-time integration of the
+# pure bindings_current closure. Every fixture record is synthetic and
+# lives in a tmp_path bare repo; the binding event's operation_id is
+# backed by a real operation record of the same commit so the generic
+# operation/event closure leg closes as well.
+_BC_PACK = "synthetic-pack"
+_BC_PATH_ID = "packver-test-0001"
+_BC_OTHER_PATH_ID = "packver-test-0002"
+_BC_VERSION = 3
+_BC_OP_ID = "op-bind-0001"
+_BC_OP2_ID = "op-bind-0002"
+_BC_EVT1_ID = "evt-bind-0001"
+_BC_EVT2_ID = "evt-bind-0002"
+_BC_MANIFEST_PATH = bindings_current.derive_manifest_path(_BC_PATH_ID)
+_BC_OTHER_MANIFEST_PATH = bindings_current.derive_manifest_path(
+    _BC_OTHER_PATH_ID)
+_BC_CURRENT_PATH = git_format.record_path("bindings_current")
+
+
+def _bc_manifest_document():
+    # The minimal deterministic manifest document the pure bindings
+    # tests digest; the taxonomy record adds its full wrapper around it.
+    return {
+        "pack": _BC_PACK,
+        "version": _BC_VERSION,
+        "is_industry_pack": False,
+        "trunks": [{"code": "T1", "order": 1, "directory": "t1"}],
+        "leaves": [{"code": "L-T1-01", "trunk": "T1", "title": "leaf",
+                    "scope": ""}],
+    }
+
+
+def _bc_manifest_digest():
+    return template_packs.manifest_digest(_bc_manifest_document())
+
+
+def _bc_manifest_record(**overrides):
+    record = {
+        "schema_version": 1,
+        "format_version": git_format.FORMAT_VERSION,
+    }
+    record.update(_bc_manifest_document())
+    record["manifest_sha256"] = _bc_manifest_digest()
+    record.update(overrides)
+    return record
+
+
+def _bc_snapshot(revision, **overrides):
+    snapshot = {
+        "schema_version": bindings_current.SCHEMA_VERSION,
+        "format_version": git_format.FORMAT_VERSION,
+        "record_type": "bindings_current",
+        "repo_id": _IDS["repo_id"],
+        "company_id": _IDS["company_id"],
+        "template_pack": _BC_PACK,
+        "template_version": _BC_VERSION,
+        "taxonomy_path_id": _BC_PATH_ID,
+        "manifest_sha256": _bc_manifest_digest(),
+        "binding_revision": revision,
+    }
+    snapshot.update(overrides)
+    return snapshot
+
+
+def _bc_current(revision=1, event_id=_BC_EVT1_ID, **overrides):
+    record = _bc_snapshot(revision)
+    record["change_event_ref"] = {
+        "record_type": "event",
+        "stable_id": event_id,
+    }
+    record.update(overrides)
+    return record
+
+
+def _bc_event_path(event_id):
+    return bindings_current.derive_event_path(event_id)
+
+
+def _bc_event(event_id, revision, *, event_type, before, operation_id,
+              base_commit, ordinal=0, **overrides):
+    event = {
+        "schema_version": bindings_current.EVENT_SCHEMA_VERSION,
+        "format_version": git_format.FORMAT_VERSION,
+        "record_type": "event",
+        "event_id": event_id,
+        "event_type": event_type,
+        "repo_id": _IDS["repo_id"],
+        "company_id": _IDS["company_id"],
+        "before": before,
+        "after": _bc_snapshot(revision),
+        "changed_refs": [{
+            "record_type": "bindings_current",
+            "stable_id": "current",
+            "revision": revision,
+        }],
+        "actor": "installation-owner-test",
+        "reason": "synthetic repository binding test",
+        "operation_id": operation_id,
+        "base_commit": base_commit,
+        "ordinal": ordinal,
+    }
+    event.update(overrides)
+    return event
+
+
+def _bc_init_event(base_commit, *, event_id=_BC_EVT1_ID,
+                   operation_id=_BC_OP_ID, ordinal=0, **overrides):
+    return _bc_event(
+        event_id, 1,
+        event_type=bindings_current.INITIALIZED_EVENT_TYPE, before=None,
+        operation_id=operation_id, base_commit=base_commit, ordinal=ordinal,
+        **overrides)
+
+
+def _bc_changed_event(event_id, before_revision, *, operation_id,
+                      base_commit, ordinal=0, **overrides):
+    # before stays overridable (the non-continuity case rewrites one
+    # snapshot field) without colliding with the explicit keyword.
+    before = overrides.pop("before", _bc_snapshot(before_revision))
+    return _bc_event(
+        event_id, before_revision + 1,
+        event_type=bindings_current.CHANGED_EVENT_TYPE,
+        before=before, operation_id=operation_id,
+        base_commit=base_commit, ordinal=ordinal, **overrides)
+
+
+def _bc_operation_path(operation_id):
+    return git_format.record_path("operation", operation_id=operation_id)
+
+
+def _bc_operation_payload(operation_id, *, base_commit, event_ids,
+                          **overrides):
+    payload = {
+        "schema_version": 1,
+        "record_type": "operation",
+        "operation_id": operation_id,
+        "repo_id": _IDS["repo_id"],
+        "company_id": _IDS["company_id"],
+        "candidate_refs": [],
+        "base_commit": base_commit,
+        "event_ids": list(event_ids),
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _bc_initial_records(base_commit):
+    # The closed revision-1 binding: manifest at the derived path, the
+    # current pointer, and one new operation listing the initialized
+    # event, all bound to base_commit.
+    return [
+        (_BC_MANIFEST_PATH, _bc_manifest_record()),
+        (_BC_CURRENT_PATH, _bc_current()),
+        (_bc_operation_path(_BC_OP_ID),
+         _bc_operation_payload(
+             _BC_OP_ID, base_commit=base_commit,
+             event_ids=[_BC_EVT1_ID])),
+        (_bc_event_path(_BC_EVT1_ID), _bc_init_event(base_commit)),
+    ]
+
+
+def _bc_layer_accept(repo, tmp_path, base_oid, records, expected_paths,
+                     index_name):
+    tree = _tree_with_records(
+        repo.path, _tree_oid(repo.path, base_oid), records, tmp_path,
+        index_name)
+    commit = repo.create_commit(tree, base_oid)
+    result = repo.accept(
+        base_oid, commit,
+        expected_paths=_accept_paths(*expected_paths))
+    return commit, result
+
+
+def _bc_expect_rejected(repo, tmp_path, base_oid, records, match,
+                        index_name):
+    # Drive one acceptance and prove the refusal happened before the CAS:
+    # the raised error plus the unchanged authoritative ref.
+    tree = _tree_with_records(
+        repo.path, _tree_oid(repo.path, base_oid), records, tmp_path,
+        index_name)
+    commit = repo.create_commit(tree, base_oid)
+    paths = [path for path, _payload in records]
+    with pytest.raises(GitRepositoryError, match=match):
+        repo.accept(
+            base_oid, commit, expected_paths=_accept_paths(*paths))
+    assert repo.head_oid() == base_oid
+    assert _head(repo.path) == base_oid
+    assert FactsGitRepository.open(
+        repo.path, **_IDS).head_oid() == base_oid
+
+
+def test_accept_closes_binding_current_manifest_and_init_event(tmp_path):
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = _bc_initial_records(genesis)
+    paths = [path for path, _payload in records]
+    commit, result = _bc_layer_accept(
+        repo, tmp_path, genesis, records, paths, "index-bc-ok")
+    assert result.accepted
+    assert repo.head_oid() == commit
+    assert _head(repo.path) == commit
+    snapshot = repo.read_snapshot_at(commit)
+    assert {record.path for record in snapshot.records} == \
+        set(paths) | {_META_PATH}
+    assert FactsGitRepository.open(repo.path, **_IDS).head_oid() == commit
+
+
+def test_accept_closes_binding_history_across_two_commits(tmp_path):
+    # Revision 1 is established in C1; C2 retains every C1 record
+    # (manifest, op-1, evt-1 stay byte-identical under append-only
+    # retention), advances only the current pointer and adds op-2/evt-2.
+    # The binding leg collects BOTH binding events from C2's complete
+    # tree and closes the continuous 1->2 history there.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    first = _bc_initial_records(genesis)
+    first_paths = [path for path, _payload in first]
+    commit1, result1 = _bc_layer_accept(
+        repo, tmp_path, genesis, first, first_paths, "index-bc-c1")
+    assert result1.accepted
+    assert repo.head_oid() == commit1
+
+    second = [
+        (_BC_CURRENT_PATH, _bc_current(2, _BC_EVT2_ID)),
+        (_bc_operation_path(_BC_OP2_ID),
+         _bc_operation_payload(
+             _BC_OP2_ID, base_commit=commit1, event_ids=[_BC_EVT2_ID])),
+        (_bc_event_path(_BC_EVT2_ID),
+         _bc_changed_event(
+             _BC_EVT2_ID, 1, operation_id=_BC_OP2_ID,
+             base_commit=commit1)),
+    ]
+    # C2 retains current.json with a new blob, so the host whitelist is
+    # the union of both record sets without a duplicated path entry.
+    second_paths = [path for path, _payload in second]
+    commit2, result2 = _bc_layer_accept(
+        repo, tmp_path, commit1, second,
+        sorted(set(first_paths) | set(second_paths)), "index-bc-c2")
+    assert result2.accepted
+    assert repo.head_oid() == commit2
+    assert _head(repo.path) == commit2
+    assert FactsGitRepository.open(repo.path, **_IDS).head_oid() == commit2
+
+
+@pytest.mark.parametrize("case,match", [
+    ("missing", "taxonomy manifest"),
+    ("wrong-path", "taxonomy manifest"),
+])
+def test_accept_rejects_binding_current_without_manifest_at_derived_path(
+        tmp_path, case, match):
+    # The manifest must sit at derive_manifest_path(taxonomy_path_id) in
+    # this same tree: either absent altogether or parked under another
+    # pack_version id fails closed before the CAS.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = [
+        (_BC_CURRENT_PATH, _bc_current()),
+        (_bc_operation_path(_BC_OP_ID),
+         _bc_operation_payload(
+             _BC_OP_ID, base_commit=genesis, event_ids=[_BC_EVT1_ID])),
+        (_bc_event_path(_BC_EVT1_ID), _bc_init_event(genesis)),
+    ]
+    if case == "wrong-path":
+        records.insert(0, (_BC_OTHER_MANIFEST_PATH, _bc_manifest_record()))
+    _bc_expect_rejected(
+        repo, tmp_path, genesis, records, match, "index-bc-manifest-%s"
+        % case)
+
+
+@pytest.mark.parametrize("case,manifest_overrides", [
+    ("pack-mismatch", {"pack": "other-pack"}),
+    ("stale-own-digest", {"manifest_sha256": "0" * 64}),
+])
+def test_accept_rejects_wrong_manifest_content_before_cas(
+        tmp_path, case, manifest_overrides):
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = [
+        (_BC_MANIFEST_PATH, _bc_manifest_record(**manifest_overrides)),
+        (_BC_CURRENT_PATH, _bc_current()),
+        (_bc_operation_path(_BC_OP_ID),
+         _bc_operation_payload(
+             _BC_OP_ID, base_commit=genesis, event_ids=[_BC_EVT1_ID])),
+        (_bc_event_path(_BC_EVT1_ID), _bc_init_event(genesis)),
+    ]
+    _bc_expect_rejected(
+        repo, tmp_path, genesis, records, "bindings/current closure",
+        "index-bc-manifest-content-%s" % case)
+
+
+def test_accept_rejects_gapped_binding_history_before_cas(tmp_path):
+    # Only a revision-2 changed event rides the tree: revision 1 has no
+    # event, so the revisions are not continuous from 1 even though the
+    # event itself is well formed and the current pointer matches its
+    # after snapshot.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = [
+        (_BC_MANIFEST_PATH, _bc_manifest_record()),
+        (_BC_CURRENT_PATH, _bc_current(2, _BC_EVT2_ID)),
+        (_bc_operation_path(_BC_OP2_ID),
+         _bc_operation_payload(
+             _BC_OP2_ID, base_commit=genesis, event_ids=[_BC_EVT2_ID])),
+        (_bc_event_path(_BC_EVT2_ID),
+         _bc_changed_event(
+             _BC_EVT2_ID, 1, operation_id=_BC_OP2_ID,
+             base_commit=genesis)),
+    ]
+    _bc_expect_rejected(
+        repo, tmp_path, genesis, records, "continuous",
+        "index-bc-gap")
+
+
+def test_accept_rejects_stale_change_event_ref_before_cas(tmp_path):
+    # Both revisions exist and close continuously, but the current
+    # pointer names the revision-1 event instead of the latest
+    # revision-2 one: a stale typed reference is refused.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = [
+        (_BC_MANIFEST_PATH, _bc_manifest_record()),
+        (_BC_CURRENT_PATH, _bc_current(2, _BC_EVT1_ID)),
+        (_bc_operation_path(_BC_OP_ID),
+         _bc_operation_payload(
+             _BC_OP_ID, base_commit=genesis,
+             event_ids=[_BC_EVT1_ID, _BC_EVT2_ID])),
+        (_bc_event_path(_BC_EVT1_ID),
+         _bc_init_event(genesis, ordinal=0)),
+        (_bc_event_path(_BC_EVT2_ID),
+         _bc_changed_event(
+             _BC_EVT2_ID, 1, operation_id=_BC_OP_ID,
+             base_commit=genesis, ordinal=1)),
+    ]
+    _bc_expect_rejected(
+        repo, tmp_path, genesis, records, "latest",
+        "index-bc-stale")
+
+
+def test_accept_rejects_non_continuous_binding_transition_before_cas(
+        tmp_path):
+    # The revision chain exists, but the changed event's before snapshot
+    # names another taxonomy path id instead of revision 1's after
+    # snapshot: the history is not continuous and must not close.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = [
+        (_BC_MANIFEST_PATH, _bc_manifest_record()),
+        (_BC_CURRENT_PATH, _bc_current(2, _BC_EVT2_ID)),
+        (_bc_operation_path(_BC_OP_ID),
+         _bc_operation_payload(
+             _BC_OP_ID, base_commit=genesis,
+             event_ids=[_BC_EVT1_ID, _BC_EVT2_ID])),
+        (_bc_event_path(_BC_EVT1_ID),
+         _bc_init_event(genesis, ordinal=0)),
+        (_bc_event_path(_BC_EVT2_ID),
+         _bc_changed_event(
+             _BC_EVT2_ID, 1, operation_id=_BC_OP_ID,
+             base_commit=genesis, ordinal=1,
+             before=_bc_snapshot(1, taxonomy_path_id=_BC_OTHER_PATH_ID))),
+    ]
+    _bc_expect_rejected(
+        repo, tmp_path, genesis, records, "continuous",
+        "index-bc-transition")
+
+
+def test_accept_rejects_current_without_binding_events_before_cas(tmp_path):
+    # The current pointer and its manifest exist, but no binding
+    # lifecycle event backs change_event_ref: the reference is dangling.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = [
+        (_BC_MANIFEST_PATH, _bc_manifest_record()),
+        (_BC_CURRENT_PATH, _bc_current()),
+    ]
+    _bc_expect_rejected(
+        repo, tmp_path, genesis, records, "dangling",
+        "index-bc-noevents")
+
+
+def test_accept_rejects_binding_event_without_current_before_cas(tmp_path):
+    # The inverse asymmetry: a binding lifecycle event without the
+    # current pointer can never close, even with its operation present.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = [
+        (_bc_operation_path(_BC_OP_ID),
+         _bc_operation_payload(
+             _BC_OP_ID, base_commit=genesis, event_ids=[_BC_EVT1_ID])),
+        (_bc_event_path(_BC_EVT1_ID), _bc_init_event(genesis)),
+    ]
+    _bc_expect_rejected(
+        repo, tmp_path, genesis, records, "binding lifecycle event",
+        "index-bc-nocurrent")
+
+
+def test_accept_rejects_binding_event_path_identity_mismatch_before_cas(
+        tmp_path):
+    # The initialized event body names evt-bind-0001 while the blob sits
+    # at the canonical path of evt-bind-other. The generic event path
+    # identity leg already refuses every such event before the CAS; the
+    # binding leg binds the same identity on top of it.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    planted_path = _bc_event_path("evt-bind-other")
+    records = [
+        (_BC_MANIFEST_PATH, _bc_manifest_record()),
+        (_BC_CURRENT_PATH, _bc_current()),
+        (_bc_operation_path(_BC_OP_ID),
+         _bc_operation_payload(
+             _BC_OP_ID, base_commit=genesis, event_ids=[_BC_EVT1_ID])),
+        (planted_path, _bc_init_event(genesis)),
+    ]
+    _bc_expect_rejected(
+        repo, tmp_path, genesis, records, "canonical record_path",
+        "index-bc-badpath")
+
+
+def test_accept_rejects_binding_current_claiming_foreign_scope(tmp_path):
+    # The expected scope is the bound repository identity, never the
+    # scope the current record claims for itself.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = [
+        (_BC_MANIFEST_PATH, _bc_manifest_record()),
+        (_BC_CURRENT_PATH, _bc_current(company_id="co-other")),
+        (_bc_operation_path(_BC_OP_ID),
+         _bc_operation_payload(
+             _BC_OP_ID, base_commit=genesis, event_ids=[_BC_EVT1_ID])),
+        (_bc_event_path(_BC_EVT1_ID), _bc_init_event(genesis)),
+    ]
+    _bc_expect_rejected(
+        repo, tmp_path, genesis, records, "belongs to company",
+        "index-bc-scope")
+
+
+def test_accept_without_binding_family_keeps_passing_with_generic_event(
+        tmp_path):
+    # The approved no-binding state includes a commit carrying ordinary
+    # (non-binding) events: a fact_revision_committed event is not a
+    # binding lifecycle event and must not trigger the
+    # binding-present rule. Genesis itself carries no records at all and
+    # is accepted by initialize() in every fixture above.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = _closed_operation_event_records(genesis)
+    paths = [path for path, _payload in records]
+    commit, result = _bc_layer_accept(
+        repo, tmp_path, genesis, records, paths, "index-bc-nobinding")
+    assert result.accepted
     assert repo.head_oid() == commit
     assert _head(repo.path) == commit
 
