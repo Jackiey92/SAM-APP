@@ -1,18 +1,23 @@
-"""Pure fail-closed candidate reference closure for one fixed commit.
+"""Pure fail-closed candidate reference closure and record path
+identity for one fixed commit.
 
 Approved designs 02-架构与接口设计.md §6 (the ``candidate_refs``
 contract), §10.3–10.5 (commit/consumption semantics) and
 97-业务记录与投影重建设计.md §2 (typed references), §3 (the
 ``input_candidate`` / ``operation`` / ``consumed_candidate`` record
-rows), §4 item 5 (操作闭合), under DEC-030 / CHG-065. The host reads
-every ``input_candidate``, ``operation`` and ``consumed_candidate``
-payload from the same fixed commit C and hands all three collections
-to this validator; that the payloads really come from one and the same
-C is the caller's precondition, not something provable here. The
-validator checks that the candidate references close exactly inside
-that one C, and nothing beyond that closure.
+rows), §4 items 1 (结构与作用域: 路径身份) and 5 (操作闭合), under
+DEC-030 / CHG-065. The host reads every ``input_candidate``,
+``operation`` and ``consumed_candidate`` record from the same fixed
+commit C and hands all three collections to this module, as bare
+payloads or as ``(path, payload)`` items; that the records really come
+from one and the same C is the caller's precondition, not something
+provable here. The payload-only validator checks that the candidate
+references close exactly inside that one C; the path–payload validator
+additionally binds every record to the canonical Git path of its own
+identity — and nothing beyond those closures.
 
-Public entry point (pure, fail closed, never mutates its inputs):
+First public entry point (pure, fail closed, never mutates its
+inputs) — the payload-only reference closure:
 
     validate_candidate_reference_closure(
         input_candidates, operations, consumed_candidates,
@@ -85,36 +90,91 @@ may carry an empty ``candidate_refs`` list and the empty triple of
 input collections passes: this validator checks the closure of what is
 present, never that any candidate was processed at all.
 
-Problems are reported in a fixed order: the caller arguments first
-(expected repo_id, then company_id), then each input_candidate in
-input order, then each operation in input order (own fields first,
-then its references in list order), then each consumed_candidate in
-input order (own fields, duplicate consumption, then the closure
-checks), so the reported problem never depends on dict or set
-iteration luck.
+In the payload-only entry, problems are reported in a fixed order: the
+caller arguments first (expected repo_id, then company_id), then each
+input_candidate in input order, then each operation in input order
+(own fields first, then its references in list order), then each
+consumed_candidate in input order (own fields, duplicate consumption,
+then the closure checks), so the reported problem never depends on
+dict or set iteration luck.
+
+Second public entry point (pure, fail closed, never mutates its
+inputs) — the path–payload identity closure of design 97 §4 item 1
+(路径身份) for exactly the three candidate-related record families:
+
+    validate_candidate_path_payload_identity(
+        input_candidates, operations, consumed_candidates,
+        *, repo_id, company_id)
+
+Here the three positional arguments are iterables of ``(path,
+payload)`` items: ``path`` is the repository-relative Git path the
+record was read from under the same fixed commit C, and ``payload`` is
+the record dict. Each family accepts only its own fixed record type:
+the canonical path is rebuilt from the payload's identity fields alone
+through ``git_format.record_path()`` — ``input_candidate`` from
+``candidate_uid`` + ``candidate_revision``, ``operation`` from
+``operation_id``, ``consumed_candidate`` from ``candidate_uid`` +
+``candidate_revision`` — and the rebuilt canonical path must equal the
+provided path byte for byte (both sides are str and the canonical side
+is pure ASCII, so exact string equality is byte equality). No path
+template is duplicated here and no prefix or substring is ever
+inspected. Rejected are: a payload whose ID or revision disagrees
+with its path; a path from the wrong record family; a non-canonical
+alias path (an escape alias such as "~2D" standing in for "-", a
+revision segment "0" or "01", a raw unencoded non-ASCII token,
+traversal or doubled slashes); an item that is not a tuple of exactly
+two items (a non-tuple item is a TypeError, a wrong-length tuple a
+ValueError — the entry-shape convention of ``git_tree_validation``); a
+non-str path or a non-dict payload (TypeError); a missing path
+identity field (ValueError); and an illegal ID or revision under the
+same strictness as the payload-only entry (``git_format.encode_id``
+and the exact-built-in-int revision rule, plus the ``record_path()``
+budgets themselves, so an identity whose canonical path could not even
+be built is rejected instead of silently passing). Once every item of
+all three families has closed its path identity, the payloads —
+unchanged — are handed to ``validate_candidate_reference_closure()``
+with the same expected ``repo_id``/``company_id``, so every payload
+rule and the full reference closure applies on top: a canonical path
+can never rescue a closure violation and a legal payload can never
+rescue a wrong path. Its problems are reported in a fixed order: the
+caller arguments first (expected repo_id, then company_id), then the
+three collections, then each input_candidate item in input order (item
+shape, path type, payload shape, identity fields, path equality), then
+each operation item in input order, then each consumed_candidate item
+in input order, and finally the payload-only closure in the order
+documented above.
 
 Error contract (same convention as ``repository_meta``,
 ``bindings_current``, ``operation_event_closure`` and
 ``git_tree_validation``): TypeError for wrong types (including bool or
-int subclasses posing as plain ints) and ValueError for wrong values,
-illegal IDs, missing fields, duplicate identities, digest/scope
-disagreements and every closure violation.
+int subclasses posing as plain ints, and in the path–payload entry a
+non-tuple item, a non-str path or a non-dict payload) and ValueError
+for wrong values, illegal IDs, missing fields, wrong-length items,
+non-canonical or identity-mismatched paths, duplicate identities,
+digest/scope disagreements and every closure violation.
 
-Boundary (explicitly NOT done here): this validator checks only the
-candidate reference closure named above. It does not validate the full
-record schemas (schema_version/format_version/record_type wrappers,
-request/effect digests, whitelisted candidate payload fields), fact
-semantics, dispositions or result_ref contents; it never recomputes
-candidate payloads or their digests; it does not check frozen task
-manifests, coverage lists, authorization or approvals; it does not
-verify Git paths or object existence; and it cannot prove that the
-caller really read all payloads from one and the same commit C.
-Additional payload fields beyond the closure set are therefore
-accepted; the full record schema belongs to the record-schema
-validators and the later full-tree card. The module is pure in-memory:
-no Git, file, SQLite, network or model IO, no Commit Broker wiring, no
-feature-gate change, and it is not a full tree validator; every
-rejection happens before the caller could update any Git ref.
+Boundary (explicitly NOT done here): the payload-only entry checks the
+candidate reference closure named above and never looks at Git paths;
+the path–payload entry closes only the three candidate-related record
+families named above onto their canonical paths and does not extend to
+event, fact, entity or any other record family. Neither entry
+validates the full record schemas (schema_version/format_version/
+record_type wrappers, request/effect digests, whitelisted candidate
+payload fields), fact semantics, dispositions or result_ref contents;
+neither recomputes candidate payloads or their digests; neither checks
+frozen task manifests, coverage lists, authorization or approvals;
+neither touches Git — object existence, tree contents, refs and
+commits are never queried, so a passing ``(path, payload)`` item
+proves only that the path is the canonical path of the payload's
+identity, not that commit C really stores that payload at that path —
+and neither entry can prove that the caller really read all records
+from one and the same commit C. Additional payload fields beyond the
+closure set are therefore accepted; the full record schema belongs to
+the record-schema validators and the later full-tree card. The module
+is pure in-memory: no Git, file, SQLite, network or model IO, no
+Commit Broker wiring, no feature-gate change, and it is not a full
+tree validator; every rejection happens before the caller could
+update any Git ref.
 """
 import re
 
@@ -155,6 +215,21 @@ _REFERENCE_KEYS = frozenset({
     "candidate_revision",
     "payload_digest",
 })
+# Item shape of the path–payload entry: every record is handed over as
+# a (path, payload) tuple, following the fixed entry-shape convention
+# of git_tree_validation (a non-tuple item is a TypeError, a
+# wrong-length tuple a ValueError).
+_PATH_ITEM_LABEL = "(path, payload) tuples"
+
+# The payload fields each family's canonical path is rebuilt from,
+# through the one fixed template table in git_format.record_path()
+# (design 97 §3 path rows / §4 item 1); the table is never duplicated
+# here.
+_CANDIDATE_PATH_IDENTITY_FIELDS = frozenset({
+    "candidate_uid",
+    "candidate_revision",
+})
+_OPERATION_PATH_IDENTITY_FIELDS = frozenset({"operation_id"})
 
 
 def validate_candidate_reference_closure(input_candidates, operations,
@@ -207,19 +282,55 @@ def validate_candidate_reference_closure(input_candidates, operations,
     return None
 
 
-def _materialize(kind, records):
+def validate_candidate_path_payload_identity(input_candidates, operations,
+                                             consumed_candidates, *,
+                                             repo_id, company_id):
+    """Close candidate record paths onto their payload identities.
+
+    Every item is a ``(path, payload)`` tuple. Each family's canonical
+    path is rebuilt from the payload identity fields alone through
+    ``git_format.record_path()`` and must equal the provided path
+    exactly; after all three families close, the unchanged payloads go
+    through ``validate_candidate_reference_closure()`` with the same
+    expected scope. See the module docstring for the full contract.
+    Returns None on success; raises TypeError for wrong types and
+    ValueError for wrong-length items, illegal identities,
+    non-canonical or identity-mismatched paths and every closure
+    violation. Never mutates its inputs.
+    """
+    _check_id("expected repo_id", repo_id)
+    _check_id("expected company_id", company_id)
+    input_items = _materialize(
+        "input_candidates", input_candidates, _PATH_ITEM_LABEL)
+    operation_items = _materialize(
+        "operations", operations, _PATH_ITEM_LABEL)
+    consumed_items = _materialize(
+        "consumed_candidates", consumed_candidates, _PATH_ITEM_LABEL)
+    input_payloads = _close_family_paths(
+        "input_candidate", input_items, _candidate_canonical_path)
+    operation_payloads = _close_family_paths(
+        "operation", operation_items, _operation_canonical_path)
+    consumed_payloads = _close_family_paths(
+        "consumed_candidate", consumed_items, _candidate_canonical_path)
+    return validate_candidate_reference_closure(
+        input_payloads, operation_payloads, consumed_payloads,
+        repo_id=repo_id, company_id=company_id)
+
+
+def _materialize(kind, records, item_label="record dicts"):
     # A bare str/bytes would otherwise silently iterate into
     # single-character "records"; it is a caller type error, not an
-    # iterable of payloads.
+    # iterable of payloads. The default label keeps the payload-only
+    # entry's messages byte-identical.
     if isinstance(records, (str, bytes)):
         raise TypeError(
-            "%s must be an iterable of record dicts, not a single %s"
-            % (kind, type(records).__name__))
+            "%s must be an iterable of %s, not a single %s"
+            % (kind, item_label, type(records).__name__))
     try:
         return list(records)
     except TypeError:
         raise TypeError(
-            "%s must be an iterable of record dicts" % kind) from None
+            "%s must be an iterable of %s" % (kind, item_label)) from None
 
 
 def _check_id(name, value):
@@ -439,3 +550,79 @@ def _check_consumed_closure(consumed, inputs_by_identity, operations_by_id):
         "does not reference exactly this candidate revision and digest; a "
         "terminal consumption must close over the consuming operation's "
         "candidate_refs" % (candidate_uid, revision, operation_id))
+
+
+def _close_family_paths(record_type, items, canonical_path):
+    # Path identity before payload closure: every item's canonical path
+    # is rebuilt from the payload identity fields alone through
+    # git_format.record_path() — no duplicated template, no prefix or
+    # substring comparison — and must equal the provided path exactly.
+    # Payloads are collected unchanged; the payload-only closure pass
+    # runs after all three families have closed here.
+    payloads = []
+    for item in items:
+        path, payload = _unpack_path_item(record_type, item)
+        canonical = canonical_path(record_type, payload)
+        if canonical != path:
+            raise ValueError(
+                "%s path %r is not the canonical record_path() output for "
+                "this payload's identity; the identity fields rebuild to %r"
+                % (record_type, path, canonical))
+        payloads.append(payload)
+    return payloads
+
+
+def _unpack_path_item(record_type, item):
+    if not isinstance(item, tuple):
+        raise TypeError(
+            "%s item must be a (path, payload) tuple, got %s"
+            % (record_type, type(item).__name__))
+    if len(item) != 2:
+        raise ValueError(
+            "%s item must be a (path, payload) tuple of exactly two items, "
+            "got %d" % (record_type, len(item)))
+    path, payload = item
+    if not isinstance(path, str):
+        raise TypeError(
+            "%s item path must be a str, got %s"
+            % (record_type, type(path).__name__))
+    if not isinstance(payload, dict):
+        raise TypeError(
+            "%s item payload must be a dict, got %s"
+            % (record_type, type(payload).__name__))
+    return path, payload
+
+
+def _require_path_identity_fields(record_type, payload, fields):
+    missing = fields - set(payload)
+    if missing:
+        raise ValueError(
+            "%s record must carry its path identity fields (missing: %s)"
+            % (record_type, sorted(missing)))
+
+
+def _candidate_canonical_path(record_type, payload):
+    # Rebuilt through the one fixed template table in git_format; the
+    # same _check_id/_check_revision strictness as the payload-only
+    # entry runs first, so a lone surrogate, a bool or an int subclass
+    # can never reach record_path(). record_path()'s own budgets still
+    # apply: an identity whose canonical path would exceed
+    # MAX_PATH_BYTES is rejected with its ValueError.
+    _require_path_identity_fields(
+        record_type, payload, _CANDIDATE_PATH_IDENTITY_FIELDS)
+    _check_id("%s candidate_uid" % (record_type,), payload["candidate_uid"])
+    candidate_uid = payload["candidate_uid"]
+    _check_revision(
+        "%s %r candidate_revision" % (record_type, candidate_uid),
+        payload["candidate_revision"])
+    return git_format.record_path(
+        record_type, candidate_uid=candidate_uid,
+        candidate_revision=payload["candidate_revision"])
+
+
+def _operation_canonical_path(record_type, payload):
+    _require_path_identity_fields(
+        record_type, payload, _OPERATION_PATH_IDENTITY_FIELDS)
+    _check_id("operation_id", payload["operation_id"])
+    return git_format.record_path(
+        record_type, operation_id=payload["operation_id"])
