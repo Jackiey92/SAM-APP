@@ -37,13 +37,25 @@ Guarantees enforced here:
   callers can never supply a file path. The record binds repo_id,
   installation_id and company_id plus serializer and schema versions.
 - open() re-verifies the bare state, the HEAD symref, the absence of
-  remotes and the identity record at the current ref tip; any mismatch
-  is a refusal and the repository is never modified.
+  remotes, the identity record at the current ref tip and the complete
+  authoritative history behind that tip with the same identity,
+  single-parent-chain and fsck rules verify_integrity() uses (F-001 and
+  approved design 97 section 6); any mismatch is a refusal and the
+  repository is never modified.
 - Later commits are built with exactly one parent equal to the current
   ref tip; acceptance happens only through an expected-old compare and
   swap on REF_FACTS. A commit object that exists but whose CAS lost the
   race is never reported as accepted, and no merge or rebase of an old
-  tree is offered.
+  tree is offered. Before candidate validation, accept() gates on the
+  history the swap would actually extend: the ref's current value H is
+  walked with verify_integrity()'s identity, single-parent-chain and
+  fsck rule set (F-001 and approved design 97 section 6), so accepting
+  onto a multi-parent, foreign-identity or object-damaged history fails
+  closed before the CAS. A stale expected_old against a healthy,
+  legitimately advanced H is not corruption: that gate passes and the
+  ordinary lost-CAS result is returned exactly as before. Genesis
+  acceptance (all-zero expected_old) has no prior history to gate and
+  leaves the arbitration to the CAS itself.
 - The identity record verified at initialize()/open() time is bound to
   the instance, and accept() refuses any commit whose tree lacks that
   record or carries a different one before the CAS is attempted, so
@@ -166,8 +178,13 @@ Guarantees enforced here:
   object store, for example a commit that lost its CAS race, is never
   treated as part of the authoritative history), re-verifies the
   repository identity record at C against the identity bound to this
-  instance, and validates the complete physical tree of C with the
-  same structural and canonical-JSON rules accept() enforces. Every
+  instance, and additionally walks the captured H's complete history
+  with verify_integrity()'s identity, single-parent-chain and fsck rule
+  set before any tree byte is returned (the reachability proof puts C
+  on that chain, so a merge, an identity drift or a missing/damaged
+  ancestor anywhere behind H fails the read closed), and validates the
+  complete physical tree of C with the same structural and
+  canonical-JSON rules accept() enforces. Every
   returned byte comes from the single pinned C: a later move of H is
   never spliced into the result, and the captured H is reported only
   as the reachability proof. The read creates no Git object, moves no
@@ -189,8 +206,14 @@ Guarantees enforced here:
   authority ref: it enters no business tree, and creating, reading or
   listing pins never moves REF_FACTS. Only a full, non-zero OID of the
   repository object format that names an existing commit object can be
-  pinned, and a new pin additionally requires H to equal the
-  authoritative head at creation time; the ref is written inside one
+  pinned, and both a new pin and an idempotent same-OID re-assertion
+  additionally pass the pinned commit's complete history through
+  verify_integrity()'s identity, single-parent-chain and fsck rule set
+  (F-001/design 97 section 6): a pin behind an advanced but healthy
+  head keeps re-asserting, while a merge, foreign identity or
+  missing/damaged ancestor is refused with PinTargetError and adds no
+  pin; a new pin additionally requires H to equal the authoritative
+  head at creation time; the ref is written inside one
   atomic git update-ref --stdin transaction that simultaneously
   re-verifies REF_FACTS == H and creates the pin ref only if it is
   absent, so a head that moves or a concurrent creation that wins
@@ -731,13 +754,18 @@ class FactsGitRepository:
 
         The repository must be bare, remote-less, with HEAD fixed to
         REF_FACTS, carry the exact section 10.9.1 local fsync
-        configuration (_FSYNC_POLICY), and the identity record at the
-        current ref tip must match the host-issued identity exactly;
-        any mismatch refuses the open and leaves the repository
-        untouched. A missing, duplicated or drifted fsync value fails
-        closed: a missing, duplicated or drifted local configuration
-        value is refused. This check does not detect whether the
-        running Git supports these settings at runtime.
+        configuration (_FSYNC_POLICY), the identity record at the
+        current ref tip must match the host-issued identity exactly,
+        and the complete history behind that tip must pass
+        verify_integrity()'s identity, single-parent-chain and fsck
+        rule set (F-001/design 97 section 6); any mismatch refuses the
+        open and leaves the repository untouched. A missing, duplicated
+        or drifted fsync value fails closed: a missing, duplicated or
+        drifted local configuration value is refused, and so is a
+        merge commit, an ancestor carrying another identity record, a
+        missing ancestor object or any fsck-damaged reachable object.
+        This check does not detect whether the running Git supports
+        these settings at runtime.
         """
         _require_id("repo_id", repo_id)
         _require_id("installation_id", installation_id)
@@ -788,7 +816,21 @@ class FactsGitRepository:
             raise IdentityMismatchError(
                 "repository identity record does not match the host-issued "
                 "repo_id, installation_id and company_id")
+        # Bind the host identity before the chain walk so every ancestor
+        # is compared against it, not just the tip. F-001/design 97 §6:
+        # a valid tip is not enough — the whole authoritative history
+        # must be one bound-identity, single-parent chain with every
+        # reachable object intact, the same gate verify_integrity()
+        # runs. The walk and fsck are strictly read-only, so a refused
+        # open leaves the repository exactly as it was found.
         repo._expected_meta = expected
+        try:
+            repo._verify_identity_chain(head)
+        except GitRepositoryError as exc:
+            raise OpenError(
+                "repository authoritative history failed the bound-"
+                "identity, single-parent chain and object integrity "
+                "checks: %s" % exc) from exc
         return repo
 
     def head_oid(self):
@@ -830,6 +872,20 @@ class FactsGitRepository:
         identity record plus every record path of the full snapshot),
         matching the build_tree() contract. Before the swap:
 
+        - after the candidate's own object-type, identity-record and
+          direct-parentage checks, the current authoritative history H
+          (the ref value captured at this point, not expected_old) is
+          validated with verify_integrity()'s identity,
+          single-parent-chain and fsck rule set (F-001/design 97
+          section 6), before the physical tree validation: the ref must
+          not be extended onto a multi-parent, identity-drifted or
+          object-damaged baseline, which raises IntegrityError before
+          the CAS. When a competitor has already advanced H cleanly
+          past a stale expected_old, that history passes this gate and
+          the call keeps the ordinary lost-CAS result below instead of
+          misreporting the competition as corruption. The gate is
+          skipped only for genesis acceptance (all-zero expected_old),
+          which has no prior history;
         - the new object must be a commit whose parentage matches the
           claim: zero parents when expected_old is the all-zero OID
           (genesis), otherwise exactly one parent equal to expected_old;
@@ -949,6 +1005,19 @@ class FactsGitRepository:
             raise GitRepositoryError(
                 "accepted commit must have exactly one parent equal to "
                 "expected_old %s, got %s" % (expected_old, parents))
+        # F-001/design 97 §6: gate the history this swap would actually
+        # extend, i.e. the ref's current value — never expected_old.
+        # When a competitor already advanced H cleanly, this passes and
+        # the lost-CAS result at the end stands as before; a
+        # multi-parent, identity-drifted or object-damaged current
+        # history fails closed here, before the physical tree work and
+        # the fsync recheck, and the ref keeps its value. Every check in
+        # the walk is read-only. A genesis acceptance (all-zero base)
+        # has no prior history; the CAS itself arbitrates that case.
+        if expected_old != self.zero_oid:
+            current_base = self._ref_value()
+            if current_base is not None:
+                self._verify_identity_chain(current_base)
         new_entries, content_by_path = self._validate_commit_tree(
             new_oid, expected_paths)
         base_entries = self._validate_append_only_retention(
@@ -1603,10 +1672,13 @@ class FactsGitRepository:
         genesis exactly zero, and a revisited oid refuses a cyclic
         history. Afterwards git fsck runs with head as its only
         reachability root. Returns (genesis_oid, commit_count). This is
-        the one identity/history rule set, shared by verify_integrity()
-        and the maintenance pin export: the export leg validates the
-        exact frozen H in the source repository before bundling it
-        instead of inventing a second identity format.
+        the one identity/history rule set (F-001/design 97 section 6),
+        shared by verify_integrity(), the open() history gate, the
+        accept() baseline gate, the read_snapshot_at() history gate,
+        maintenance pin creation and same-OID re-assertion, and the
+        maintenance pin export: every consumer validates the exact
+        commit it freezes or reads with this one walk instead of
+        inventing a second identity format.
         """
         bound_meta = self._expected_meta
         chain_meta = None
@@ -1657,6 +1729,26 @@ class FactsGitRepository:
         self._verify_reachable_objects(head)
         return genesis, count
 
+    def _require_pinned_history(self, pin_ref, commit_oid):
+        # CHG-066 section 3 step 4/section 4 and design 97 section 6:
+        # a pin freezes one exact commit together with the whole history
+        # behind it, so pin creation and same-OID idempotent
+        # re-assertion (and the bundle export leg) all pass that history
+        # through the single shared _verify_identity_chain rule set. A
+        # forked/merge, foreign-identity or object-damaged pinned history
+        # fails as PinTargetError — the same family a non-commit/missing
+        # pin target already raises. The walk and fsck are strictly
+        # read-only; no refusal path here moves any ref or writes an
+        # object.
+        try:
+            self._verify_identity_chain(commit_oid)
+        except GitRepositoryError as exc:
+            raise PinTargetError(
+                "maintenance pin %s freezes %s, whose history fails the "
+                "bound-identity, single-parent chain and object "
+                "integrity checks: %s" % (pin_ref, commit_oid, exc)) \
+                from exc
+
     def read_snapshot_at(self, commit_oid):
         """Read the record paths and raw canonical bytes of one commit.
 
@@ -1679,6 +1771,15 @@ class FactsGitRepository:
         - commit_oid must name an existing commit object (an object id
           that merely exists in the local store, for example a commit
           that lost its CAS race, is not proof of history membership);
+        - the captured H's complete history passes verify_integrity()'s
+          identity, single-parent-chain and fsck rule set
+          (F-001/design 97 section 6) before any reachability probe:
+          the probe itself walks H's ancestry and would exit with a raw
+          non-0/non-1 Git failure on a missing or damaged object, so a
+          merge commit, an ancestor carrying another identity record, a
+          missing ancestor or a damaged reachable object anywhere
+          behind H must fail here as SnapshotReadError before the probe
+          (and before any record byte is returned);
         - the target must be reachable from the captured H;
         - the repository identity record at C must exactly match the
           identity bound to this instance;
@@ -1725,10 +1826,32 @@ class FactsGitRepository:
             raise SnapshotReadError(
                 "snapshot target %s is a %s, not a commit"
                 % (commit_oid, target_type))
+        # F-001/design 97 §6: prove the captured H is one bound-
+        # identity, single-parent chain with every reachable object
+        # intact BEFORE the reachability probe below. git merge-base
+        # --is-ancestor itself walks H's ancestry, and on a missing or
+        # damaged ancestor it exits with a raw non-0/non-1 failure that
+        # would otherwise escape as GitCommandError; running the shared
+        # gate first maps every such history defect to
+        # SnapshotReadError. Once C is proven reachable afterwards it is
+        # on this verified chain, so a merge, identity drift or a
+        # missing/damaged ancestor anywhere behind H fails the read
+        # closed before any tree byte is returned. All checks are
+        # read-only.
+        try:
+            self._verify_identity_chain(head)
+        except GitRepositoryError as exc:
+            raise SnapshotReadError(
+                "authoritative history behind the captured head %s fails "
+                "the bound-identity, single-parent chain and object "
+                "integrity checks: %s" % (head, exc)) from exc
         # Reachability against the single H captured above: only commits
         # on the authoritative history may be read. merge-base with
         # --is-ancestor is a pure read and treats a commit as an
         # ancestor of itself, so reading the current head is allowed.
+        # H's whole ancestry was just verified intact above, so this
+        # probe can only answer 0/1 instead of tripping over a missing
+        # object.
         result = self._git(
             ["merge-base", "--is-ancestor", commit_oid, head],
             check=False, env_extra=_VERIFY_ENV)
@@ -1805,12 +1928,21 @@ class FactsGitRepository:
           freezes exactly commit_oid, in which case the call is
           idempotent and reports created=False without requiring H to
           still be the current head (the head legitimately advances
-          past a pin after the barrier), or it freezes a different
-          commit and PinConflictError is raised: an existing pin is
-          never moved, overwritten or deleted;
+          past a pin after the barrier), but the frozen commit's
+          complete history is still re-validated on every such
+          re-assertion with verify_integrity()'s identity,
+          single-parent-chain and fsck rule set (F-001/design 97
+          section 6): a merge, foreign identity or missing/damaged
+          ancestor raises PinTargetError instead of reporting the pin
+          healthy; or it freezes a different commit and
+          PinConflictError is raised: an existing pin is never moved,
+          overwritten or deleted;
         - a new pin requires commit_oid to equal the current
-          authoritative head, and the ref itself is written inside one
-          atomic git update-ref --stdin transaction that simultaneously
+          authoritative head and that commit's complete history to
+          pass that same identity, single-parent-chain and fsck gate
+          (PinTargetError otherwise), and the ref itself is written
+          inside one atomic git update-ref --stdin transaction that
+          simultaneously
           re-verifies REF_FACTS == commit_oid and creates the pin ref
           only if it is absent. A head that moves, or a concurrent
           creation that wins between the checks above and this write,
@@ -1855,6 +1987,14 @@ class FactsGitRepository:
         existing = self._read_ref_oid(pin_ref)
         if existing is not None:
             if existing == commit_oid:
+                # Idempotent re-assertion writes nothing and does not
+                # require H to still be the current head, but the frozen
+                # history is re-validated every time: a pin whose commit
+                # later turns out to sit on a merge, a foreign identity
+                # record or a missing/damaged ancestor must not report
+                # success just because the ref already exists
+                # (F-001/design 97 section 6).
+                self._require_pinned_history(pin_ref, commit_oid)
                 return PinCreationResult(pin=pin, created=False)
             raise PinConflictError(
                 "maintenance pin %s already freezes %s; refusing to bind "
@@ -1865,6 +2005,10 @@ class FactsGitRepository:
                 "pin target %s is not the current authoritative head %s; "
                 "a new pin may only freeze the head the host captured"
                 % (commit_oid, head))
+        # A new pin freezes exactly H together with the complete history
+        # behind it: same bound-identity, single-parent chain and fsck
+        # gate verify_integrity() runs, before anything is written.
+        self._require_pinned_history(pin_ref, commit_oid)
         # Last guard before the ref write: the section 10.9.1 durability
         # configuration is re-read through Git, so a drifted repository
         # never gains a pin whose persistence cannot be confirmed.
@@ -2123,16 +2267,10 @@ class FactsGitRepository:
         self._require_pin_target_commit(pin_ref, commit_oid)
         # Validate H's identity and single-parent history in the source
         # repository before bundling, with the same rule set as
-        # verify_integrity(); a pin behind the current head is fine, a
-        # forked/foreign/damaged pinned history is not.
-        try:
-            self._verify_identity_chain(commit_oid)
-        except GitRepositoryError as exc:
-            raise PinTargetError(
-                "maintenance pin %s freezes %s, whose history fails the "
-                "bound-identity, single-parent chain and object "
-                "integrity checks: %s" % (pin_ref, commit_oid, exc)) \
-                from exc
+        # verify_integrity() and the pin creation leg; a pin behind the
+        # current head is fine, a forked/foreign/damaged pinned history
+        # is not.
+        self._require_pinned_history(pin_ref, commit_oid)
         pin = MaintenancePin(
             backup_id=backup_id, barrier_id=barrier_id,
             commit_oid=commit_oid, ref=pin_ref)
