@@ -18,6 +18,7 @@ from app.facts_tree.backup_manifest import (
     compute_report_digest,
     verify_final_manifest,
 )
+from app.facts_tree.git_format import MAX_DEPTH
 
 
 def _core(backup_id="bk-0001"):
@@ -195,6 +196,123 @@ def test_final_manifest_rejects_nested_manifest_digest_but_keeps_report_referenc
     buried["verification"]["detail"] = {"report_digest": bad}
     with pytest.raises(BackupManifestError, match="report_digest"):
         verify_final_manifest(buried, report)
+
+
+def test_unknown_top_level_manifest_keys_are_rejected():
+    _, report, manifest = _chain()
+    tampered = dict(manifest, signature="sha256:" + "ab" * 32)
+    with pytest.raises(BackupManifestError, match="unknown key"):
+        verify_final_manifest(tampered, report)
+    # A missing envelope key is refused as well (no implicit optional keys).
+    incomplete = {key: value for key, value in manifest.items() if key != "core"}
+    with pytest.raises(BackupManifestError, match="required key"):
+        verify_final_manifest(incomplete, report)
+
+
+def test_mixed_type_unknown_envelope_keys_fail_closed():
+    _, report, manifest = _chain()
+    # An int key beside a string key used to leak TypeError from sorted()
+    # while formatting the unknown-key error.
+    tampered = {**manifest, 7: True, "rogue": True}
+    with pytest.raises(BackupManifestError, match="non-string key"):
+        verify_final_manifest(tampered, report)
+    # Same edge inside the verification block.
+    bad_block = {
+        **manifest,
+        "verification": {**manifest["verification"], 3: "x", "extra": 1},
+    }
+    with pytest.raises(BackupManifestError, match="non-string key"):
+        verify_final_manifest(bad_block, report)
+    # A lone non-string key at the report envelope fails closed as well.
+    with pytest.raises(BackupManifestError, match="non-string key"):
+        compute_report_digest({**report, 9: 1})
+    # A normal string unknown key still produces the original message.
+    with pytest.raises(BackupManifestError, match="unknown key: 'rogue'"):
+        verify_final_manifest({**manifest, "rogue": True}, report)
+
+
+def test_unknown_verification_block_keys_are_rejected():
+    _, report, manifest = _chain()
+    tampered = {**manifest, "verification": {**manifest["verification"], "extra": True}}
+    with pytest.raises(BackupManifestError, match="unknown key"):
+        verify_final_manifest(tampered, report)
+    missing = {**manifest, "verification": {"core_digest": manifest["verification"]["core_digest"]}}
+    with pytest.raises(BackupManifestError, match="required key"):
+        verify_final_manifest(missing, report)
+
+
+def test_unknown_report_envelope_keys_are_rejected():
+    core, report, _ = _chain()
+    with pytest.raises(BackupManifestError, match="unknown key"):
+        compute_report_digest(dict(report, rogue=1))
+    with pytest.raises(BackupManifestError, match="unknown key"):
+        build_final_manifest(core, dict(report, rogue=1))
+    # The checks envelope key is mandatory; fields inside it stay caller-defined.
+    missing_checks = {key: value for key, value in report.items() if key != "checks"}
+    with pytest.raises(BackupManifestError, match="required key"):
+        compute_report_digest(missing_checks)
+    rich_report = build_verification_report(
+        core, checks={"h_reachable": True, "summary": {"rows": [1, 2], "ok": None}}
+    )
+    assert compute_report_digest(rich_report).startswith("sha256:")
+
+
+def test_cyclic_containers_fail_closed_as_backup_manifest_error():
+    cyclic_core = {}
+    cyclic_core["self"] = cyclic_core
+    with pytest.raises(BackupManifestError, match="cyclic"):
+        compute_core_digest(cyclic_core)
+    # A self-referencing list nested in checks fails at construction time.
+    loop = []
+    loop.append(loop)
+    with pytest.raises(BackupManifestError, match="cyclic"):
+        build_verification_report(_core(), checks={"loop": loop})
+    # A cyclic core embedded in a presented manifest fails at verification.
+    _, report, manifest = _chain()
+    cyclic_manifest = dict(manifest)
+    cyclic_manifest["core"] = cyclic_core
+    with pytest.raises(BackupManifestError, match="cyclic"):
+        verify_final_manifest(cyclic_manifest, report)
+
+
+def test_nesting_deeper_than_max_depth_fails_closed():
+    deep = "leaf"
+    for _ in range(MAX_DEPTH + 1):
+        deep = {"n": deep}
+    with pytest.raises(BackupManifestError, match="MAX_DEPTH"):
+        compute_core_digest(deep)
+    with pytest.raises(BackupManifestError, match="MAX_DEPTH"):
+        build_verification_report(deep)
+    # Exactly at the serializer bound stays valid.
+    at_limit = "leaf"
+    for _ in range(MAX_DEPTH):
+        at_limit = {"n": at_limit}
+    assert compute_core_digest(at_limit).startswith("sha256:")
+
+
+def test_unserializable_values_fail_closed_as_backup_manifest_error():
+    # float, arbitrary objects and non-str keys are serializer TypeErrors.
+    for bad in (1.5, object()):
+        with pytest.raises(BackupManifestError, match="serialization"):
+            compute_core_digest({"bad": bad})
+    with pytest.raises(BackupManifestError, match="serialization"):
+        compute_core_digest({("tuple", "key"): 1})
+    # Same normalization on the report path, including post-build tampering.
+    with pytest.raises(BackupManifestError, match="serialization"):
+        build_verification_report(_core(), checks={"ratio": 0.5})
+    _, report, _ = _chain()
+    report["checks"]["object"] = object()
+    with pytest.raises(BackupManifestError, match="serialization"):
+        compute_report_digest(report)
+
+
+def test_shared_but_acyclic_nested_containers_stay_valid():
+    shared = {"x": 1, "y": [1, 2]}
+    core = _core()
+    core["refs"] = {"a": shared, "b": shared}
+    report = build_verification_report(core, checks={"s1": shared, "s2": shared})
+    manifest = build_final_manifest(core, report)
+    assert verify_final_manifest(manifest, report) is None
 
 
 def test_digest_format_and_schema_constants():

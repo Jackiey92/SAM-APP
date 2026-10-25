@@ -20,12 +20,24 @@ collection, backup, persistence, barrier or restore behaviour.
 import hashlib
 import re
 
-from app.facts_tree.git_format import dumps_record
+from app.facts_tree.git_format import MAX_DEPTH, dumps_record
 
 DIGEST_ALGORITHM = "sha256"
 SCHEMA_VERSION = 1
 REPORT_SCHEMA = "sam.f001.backup_verification_report"
 MANIFEST_SCHEMA = "sam.f001.backup_manifest"
+
+# Exact authenticated envelopes: any key outside these sets is not part of
+# the digest chain and must never be accepted as manifest metadata. Fields
+# inside ``core`` and ``checks`` stay caller-defined and digest-bound.
+_REPORT_ENVELOPE_KEYS = frozenset(("schema", "version", "core_digest", "checks"))
+_MANIFEST_ENVELOPE_KEYS = frozenset(("schema", "version", "core", "verification"))
+_VERIFICATION_BLOCK_KEYS = frozenset(("core_digest", "report_digest"))
+
+# The traversal below also covers the manifest envelope (core sits one level
+# below the root), so the walk bound is the serializer bound plus that
+# offset; anything past it fails closed before reaching serialization.
+_SCAN_DEPTH_LIMIT = MAX_DEPTH + 2
 
 # Field names that would create a self-referencing digest; they are
 # forbidden at every nesting level of the chain, inside dicts and
@@ -56,24 +68,102 @@ def _require_digest(value, label):
 
 
 def _reject_nested_fields(value, fields, label, allowed_paths=(), path=()):
-    """Recursively refuse forbidden keys inside nested dicts and lists.
+    """Refuse forbidden keys inside nested dicts and lists, fail closed.
 
-    Traverses every dict and list level of ``value``; a key listed in
-    ``fields`` raises :class:`BackupManifestError` unless its exact
-    location appears in ``allowed_paths``.
+    Traverses every dict and list level of ``value`` with an explicit
+    stack; a key listed in ``fields`` raises :class:`BackupManifestError`
+    unless its exact location appears in ``allowed_paths``. The walk is
+    depth-bounded and cycle-safe: over-deep or self-referential untrusted
+    input raises :class:`BackupManifestError` here instead of leaking a
+    :class:`RecursionError` out of a recursive walk. A container shared by
+    two acyclic branches is not a cycle and stays accepted.
     """
-    if isinstance(value, dict):
-        for key, item in value.items():
-            key_path = path + (key,)
-            if key in fields and key_path not in allowed_paths:
-                where = " at " + "/".join(str(part) for part in key_path) if key_path else ""
+    # Frames are ("enter", container, depth, path) / ("exit", id, ...).
+    stack = [("enter", value, 1, path)]
+    on_path = set()
+    while stack:
+        state, node, depth, node_path = stack.pop()
+        if state == "exit":
+            on_path.discard(node)
+            continue
+        if isinstance(node, dict):
+            if depth > _SCAN_DEPTH_LIMIT:
                 raise BackupManifestError(
-                    f"{label} must not carry a self-referencing '{key}' field{where}"
+                    f"{label} nesting exceeds the canonical serializer depth bound"
                 )
-            _reject_nested_fields(item, fields, label, allowed_paths, key_path)
-    elif isinstance(value, (list, tuple)):
-        for index, item in enumerate(value):
-            _reject_nested_fields(item, fields, label, allowed_paths, path + (index,))
+            node_id = id(node)
+            if node_id in on_path:
+                raise BackupManifestError(
+                    f"{label} contains a cyclic container reference"
+                )
+            on_path.add(node_id)
+            stack.append(("exit", node_id, depth, node_path))
+            for key, item in node.items():
+                key_path = node_path + (key,)
+                if key in fields and key_path not in allowed_paths:
+                    where = (
+                        " at " + "/".join(str(part) for part in key_path)
+                        if key_path else ""
+                    )
+                    raise BackupManifestError(
+                        f"{label} must not carry a self-referencing '{key}' "
+                        f"field{where}"
+                    )
+                stack.append(("enter", item, depth + 1, key_path))
+        elif isinstance(node, (list, tuple)):
+            if depth > _SCAN_DEPTH_LIMIT:
+                raise BackupManifestError(
+                    f"{label} nesting exceeds the canonical serializer depth bound"
+                )
+            node_id = id(node)
+            if node_id in on_path:
+                raise BackupManifestError(
+                    f"{label} contains a cyclic container reference"
+                )
+            on_path.add(node_id)
+            stack.append(("exit", node_id, depth, node_path))
+            for index, item in enumerate(node):
+                stack.append(("enter", item, depth + 1, node_path + (index,)))
+
+
+def _require_exact_keys(value, expected, label):
+    # Non-string keys must be rejected before sorting/formatting the key
+    # set: mixed types (e.g. an int beside str keys) would make sorted()
+    # raise TypeError while building the error message.
+    non_string = [key for key in value if not isinstance(key, str)]
+    if non_string:
+        raise BackupManifestError(
+            f"{label} carries a non-string key: {non_string[0]!r}"
+        )
+    actual = set(value)
+    unknown = actual - expected
+    if unknown:
+        raise BackupManifestError(
+            f"{label} carries an unknown key: {sorted(unknown)[0]!r}"
+        )
+    missing = expected - actual
+    if missing:
+        raise BackupManifestError(
+            f"{label} is missing a required key: {sorted(missing)[0]!r}"
+        )
+
+
+def _canonical_record(value, label):
+    """Serialize via git_format, normalizing every failure mode.
+
+    Public APIs document :class:`BackupManifestError` on malformed input,
+    so the serializer's TypeError/ValueError (and any residual
+    RecursionError) are wrapped instead of escaping. Existing
+    BackupManifestError passes through unchanged.
+    """
+    try:
+        return dumps_record(value)
+    except BackupManifestError:
+        raise
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise BackupManifestError(
+            f"{label} fails canonical record serialization: {exc}"
+        ) from exc
 
 
 def compute_core_digest(core_payload):
@@ -85,7 +175,7 @@ def compute_core_digest(core_payload):
     """
     _require_mapping(core_payload, "core payload")
     _reject_nested_fields(core_payload, _SELF_DIGEST_FIELDS, "core payload")
-    canonical = dumps_record(core_payload)
+    canonical = _canonical_record(core_payload, "core payload")
     return f"{DIGEST_ALGORITHM}:{hashlib.sha256(canonical).hexdigest()}"
 
 
@@ -98,7 +188,7 @@ def compute_report_digest(report):
     digest. Anything else is rejected instead of digested.
     """
     _require_report_shape(report)
-    canonical = dumps_record(report)
+    canonical = _canonical_record(report, "verification report")
     return f"{DIGEST_ALGORITHM}:{hashlib.sha256(canonical).hexdigest()}"
 
 
@@ -129,6 +219,7 @@ def build_verification_report(core_payload, checks=None):
 def _require_report_shape(report):
     _require_mapping(report, "verification report")
     _reject_nested_fields(report, _SELF_DIGEST_FIELDS, "verification report")
+    _require_exact_keys(report, _REPORT_ENVELOPE_KEYS, "verification report")
     if report.get("schema") != REPORT_SCHEMA:
         raise BackupManifestError("verification report has an unknown schema")
     if report.get("version") != SCHEMA_VERSION:
@@ -185,14 +276,16 @@ def verify_final_manifest(manifest, report):
         "final manifest",
         allowed_paths=_ALLOWED_MANIFEST_DIGEST_PATHS,
     )
+    _require_exact_keys(manifest, _MANIFEST_ENVELOPE_KEYS, "final manifest")
     if manifest.get("schema") != MANIFEST_SCHEMA:
         raise BackupManifestError("final manifest has an unknown schema")
     if manifest.get("version") != SCHEMA_VERSION:
         raise BackupManifestError("final manifest has an unsupported version")
-    if "core" not in manifest:
-        raise BackupManifestError("final manifest carries no core payload")
     verification = manifest.get("verification")
     _require_mapping(verification, "final manifest verification block")
+    _require_exact_keys(
+        verification, _VERIFICATION_BLOCK_KEYS, "final manifest verification block"
+    )
     _require_digest(verification.get("core_digest"), "manifest core_digest")
     _require_digest(verification.get("report_digest"), "manifest report_digest")
 
