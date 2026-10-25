@@ -69,6 +69,20 @@ Guarantees enforced here:
   versions and advancing the *_current pointers stay legal. A commit
   assembled outside build_tree() is held to exactly the same physical
   contract.
+- accept() additionally enforces the candidate closure of approved
+  design 97 §4 item 1 (结构与作用域: 路径身份) and item 5 (操作闭合)
+  after that physical validation and before the CAS: every
+  input_candidate, operation and consumed_candidate record of the
+  candidate commit must sit at the canonical git_format.record_path()
+  path its own payload identity rebuilds, and typed candidate_refs,
+  payload digests and terminal consumptions must close exactly inside
+  that one commit, under the repo_id/company_id bound to this instance
+  at initialize()/open() time (the records' self-reported scope is
+  never the expected scope), through
+  candidate_reference_closure.validate_candidate_path_payload_identity.
+  A tree carrying none of the three families passes with three empty
+  collections; any closure failure raises GitRepositoryError before the
+  ref can move.
 - build_tree() materializes a caller-assembled complete final snapshot
   of (repository-relative path, canonical JSON bytes) records into Git
   blob and tree objects and returns the root tree OID. Before any
@@ -177,6 +191,7 @@ from pathlib import Path
 import re
 import subprocess
 
+from app.facts_tree import candidate_reference_closure
 from app.facts_tree import git_append_only
 from app.facts_tree import git_format
 from app.facts_tree import git_tree_validation
@@ -190,6 +205,15 @@ REF_FACTS = "refs/heads/facts"
 # namespace.
 PIN_REF_NAMESPACE = "refs/sam/maintenance/backup-pins"
 REPOSITORY_META_SCHEMA_VERSION = 1
+# Design 97 §4 item 1 (结构与作用域: 路径身份) and item 5 (操作闭合):
+# the three candidate-related record families accept() must close
+# inside the one candidate commit C. Classification goes through
+# git_format.canonical_record_type, so no path template is duplicated.
+_CANDIDATE_CLOSURE_FAMILIES = (
+    "input_candidate",
+    "operation",
+    "consumed_candidate",
+)
 GIT_TIMEOUT_SECONDS = 30
 _OBJECT_FORMAT_OID_LENGTH = {"sha1": 40, "sha256": 64}
 _HEX_DIGITS = frozenset("0123456789abcdef")
@@ -666,6 +690,21 @@ class FactsGitRepository:
           appending new revisions and advancing the *_current pointers
           stay legal. A commit assembled outside
           build_tree() is held to exactly the same physical contract.
+        - after the physical tree validation and the append-only
+          retention comparison, the candidate closure of design 97 §4
+          items 1 (路径身份) and 5 (操作闭合) is enforced on the same
+          tree through
+          candidate_reference_closure.validate_candidate_path_payload_identity:
+          every input_candidate, operation and consumed_candidate record
+          is parsed with git_format.loads_record from the exact bytes the
+          physical tree-validation leg already read and validated, its
+          path must equal the canonical
+          record_path() rebuilt from its payload identity, and typed
+          candidate_refs, digests and terminal consumptions must resolve
+          inside this one commit under the repo_id/company_id of the
+          identity bound to this instance (the records' own scope fields
+          are never trusted as the expected scope). A tree carrying none
+          of the three families passes with three empty collections.
         - the repository's effective local fsync configuration is
           re-verified against the exact section 10.9.1 policy
           (_FSYNC_POLICY) immediately before the swap: a missing,
@@ -702,8 +741,10 @@ class FactsGitRepository:
             raise GitRepositoryError(
                 "accepted commit must have exactly one parent equal to "
                 "expected_old %s, got %s" % (expected_old, parents))
-        new_entries = self._validate_commit_tree(new_oid, expected_paths)
+        new_entries, content_by_path = self._validate_commit_tree(
+            new_oid, expected_paths)
         self._validate_append_only_retention(expected_old, new_entries)
+        self._validate_candidate_closure(new_entries, content_by_path)
         # Last guard before the authoritative ref moves: the section
         # 10.9.1 durability configuration is re-read through Git, so a
         # repository whose policy was removed or drifted since open()
@@ -733,7 +774,10 @@ class FactsGitRepository:
         # authoritative ref must never advance onto such a tree.
         # Returns the tree's actual blob entries as (path, oid) tuples
         # so the append-only retention check compares exactly the
-        # physical snapshot that passed validation here.
+        # physical snapshot that passed validation here, together with a
+        # {path: content_bytes} map of the exact bytes that passed
+        # validation: later legs (candidate closure) consume those bytes
+        # instead of re-reading the blobs from Git.
         entries = self._read_commit_tree_entries(
             commit_oid, context="accepted commit tree")
         try:
@@ -743,7 +787,10 @@ class FactsGitRepository:
         except (TypeError, ValueError) as exc:
             raise GitRepositoryError(
                 "accepted commit tree failed validation: %s" % exc) from exc
-        return [(path, oid) for _mode, path, oid, _content in entries]
+        new_entries = [(path, oid) for _mode, path, oid, _content in entries]
+        content_by_path = {
+            path: content for _mode, path, _oid, content in entries}
+        return new_entries, content_by_path
 
     def _read_commit_tree_entries(self, commit_oid, env_extra=None,
                                   context="accepted commit tree"):
@@ -846,6 +893,54 @@ class FactsGitRepository:
             raise GitRepositoryError(
                 "accepted commit violates append-only retention: %s"
                 % exc) from exc
+
+    def _validate_candidate_closure(self, new_entries, content_by_path):
+        # Design 97 §4 item 1 (结构与作用域: 路径身份) and item 5 (操作
+        # 闭合): after the complete physical tree has passed
+        # git_tree_validation's structure/path/canonical-JSON checks and
+        # the append-only retention comparison, every input_candidate,
+        # operation and consumed_candidate record of this one candidate
+        # commit C is collected as a (path, payload) item and handed to
+        # the pure closure validator: each path must be the canonical
+        # record_path() output rebuilt from that payload's own identity,
+        # and typed candidate references, digests and terminal
+        # consumptions must close exactly inside C. This leg always
+        # runs before the REF_FACTS CAS (the fsync re-verification and
+        # update-ref are the only later steps), so a closure failure
+        # leaves the authoritative ref at its previous value. The
+        # expected repo_id/company_id come from the repository identity
+        # bound at initialize()/open() time, never from scope fields the
+        # candidate records claim for themselves; a tree carrying none
+        # of the three families (genesis and ordinary snapshots) passes
+        # with three empty collections. Payload bytes are the exact
+        # validated contents handed over from _validate_commit_tree via
+        # content_by_path, never re-read from Git, so loads_record and
+        # the closure check consume exactly the bytes that passed
+        # canonical JSON validation on the physical leg.
+        items = {family: [] for family in _CANDIDATE_CLOSURE_FAMILIES}
+        for path, _oid in sorted(new_entries):
+            family = git_format.canonical_record_type(path)
+            if family not in _CANDIDATE_CLOSURE_FAMILIES:
+                continue
+            try:
+                payload = git_format.loads_record(content_by_path[path])
+            except (TypeError, ValueError) as exc:
+                raise GitRepositoryError(
+                    "accepted commit candidate record at %r is not a valid "
+                    "canonical record: %s" % (path, exc)) from exc
+            items[family].append((path, payload))
+        try:
+            candidate_reference_closure.\
+                validate_candidate_path_payload_identity(
+                    items["input_candidate"],
+                    items["operation"],
+                    items["consumed_candidate"],
+                    repo_id=self._expected_meta["repo_id"],
+                    company_id=self._expected_meta["company_id"])
+        except (TypeError, ValueError) as exc:
+            raise GitRepositoryError(
+                "accepted commit failed candidate path/reference closure: "
+                "%s" % exc) from exc
 
     def _list_tree_entries(self, commit_oid, env_extra=None):
         # -z keeps paths raw (no quoting) with NUL terminators; -r

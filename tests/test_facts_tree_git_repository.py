@@ -858,6 +858,281 @@ def test_accept_rejects_rewritten_append_only_record_and_keeps_ref(
     assert FactsGitRepository.open(repo.path, **_IDS).head_oid() == tip
 
 
+# Design 97 §4 items 1 (路径身份) and 5 (操作闭合): the candidate
+# path-identity and reference closure enforced on accept(). The fixture
+# payloads carry only the fields the closure validator needs plus
+# schema_version/record_type as permitted extra fields; this card is not
+# the full business schema gate.
+_CAND1_UID = "cand-1"
+_CAND1_REVISION = 1
+# A legal 64-character lowercase hexadecimal SHA-256 digest shape; the
+# closure validator compares digests for equality and never recomputes
+# them.
+_CAND1_DIGEST = "a" * 64
+_CAND1_REF = {
+    "candidate_uid": _CAND1_UID,
+    "candidate_revision": _CAND1_REVISION,
+    "payload_digest": _CAND1_DIGEST,
+}
+
+
+def _candidate_input_path(candidate_uid=_CAND1_UID,
+                          candidate_revision=_CAND1_REVISION):
+    return git_format.record_path(
+        "input_candidate", candidate_uid=candidate_uid,
+        candidate_revision=candidate_revision)
+
+
+def _candidate_operation_path(operation_id="op-1"):
+    return git_format.record_path("operation", operation_id=operation_id)
+
+
+def _candidate_consumed_path(candidate_uid=_CAND1_UID,
+                             candidate_revision=_CAND1_REVISION):
+    return git_format.record_path(
+        "consumed_candidate", candidate_uid=candidate_uid,
+        candidate_revision=candidate_revision)
+
+
+def _candidate_input_payload(candidate_uid=_CAND1_UID,
+                             candidate_revision=_CAND1_REVISION,
+                             digest=_CAND1_DIGEST, **overrides):
+    payload = {
+        "schema_version": 1,
+        "record_type": "input_candidate",
+        "candidate_uid": candidate_uid,
+        "candidate_revision": candidate_revision,
+        "payload_digest": digest,
+        "repo_id": _IDS["repo_id"],
+        "company_id": _IDS["company_id"],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _candidate_operation_payload(operation_id="op-1", refs=(_CAND1_REF,),
+                                 **overrides):
+    payload = {
+        "schema_version": 1,
+        "record_type": "operation",
+        "operation_id": operation_id,
+        "repo_id": _IDS["repo_id"],
+        "company_id": _IDS["company_id"],
+        "candidate_refs": list(refs),
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _candidate_consumed_payload(candidate_uid=_CAND1_UID,
+                                candidate_revision=_CAND1_REVISION,
+                                digest=_CAND1_DIGEST, operation_id="op-1",
+                                **overrides):
+    payload = {
+        "schema_version": 1,
+        "record_type": "consumed_candidate",
+        "candidate_uid": candidate_uid,
+        "candidate_revision": candidate_revision,
+        "payload_digest": digest,
+        "operation_id": operation_id,
+        "repo_id": _IDS["repo_id"],
+        "company_id": _IDS["company_id"],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _closed_candidate_records():
+    # One of each family, mutually closed inside one commit: the input
+    # is referenced by the operation and terminally consumed through
+    # that same operation's typed reference.
+    return [
+        (_candidate_input_path(), _candidate_input_payload()),
+        (_candidate_operation_path(), _candidate_operation_payload()),
+        (_candidate_consumed_path(), _candidate_consumed_payload()),
+    ]
+
+
+def _tree_with_records(repo_path, base_tree, records, tmp_path, index_name):
+    # Layer each (path, payload) record onto the tree with its own index
+    # file, exactly as the append-only fixtures do.
+    tree = base_tree
+    for number, (path, payload) in enumerate(records):
+        tree = _tree_with_added_file(
+            repo_path, tree, path,
+            _write_blob(repo_path, git_format.dumps_record(payload)),
+            tmp_path, "%s-%d" % (index_name, number))
+    return tree
+
+
+def test_accept_closes_candidate_records_and_advances_ref(tmp_path):
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = _closed_candidate_records()
+    paths = [path for path, _payload in records]
+    tree = _tree_with_records(
+        repo.path, _tree_oid(repo.path, genesis), records, tmp_path,
+        "index-cand-ok")
+    commit = repo.create_commit(tree, genesis)
+    assert repo.accept(
+        genesis, commit,
+        expected_paths=_accept_paths(*paths)).accepted
+    assert repo.head_oid() == commit
+    assert _head(repo.path) == commit
+    # The closure gate lives on the accept path only: the storage-only
+    # read still returns every record of the pinned commit as raw bytes.
+    snapshot = repo.read_snapshot_at(commit)
+    assert {record.path for record in snapshot.records} == \
+        set(paths) | {_META_PATH}
+    assert FactsGitRepository.open(repo.path, **_IDS).head_oid() == commit
+
+
+def test_accept_rejects_candidate_path_payload_identity_mismatch(tmp_path):
+    # The input payload identifies cand-1 rev 1, but the blob is parked
+    # at cand-2's canonical path. The physical tree is well-formed
+    # (canonical path, canonical JSON, matching whitelist), so only the
+    # accept-time path-identity leg can refuse it, before the CAS.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    planted_path = _candidate_input_path(candidate_uid="cand-2")
+    records = [
+        (planted_path, _candidate_input_payload()),
+        (_candidate_operation_path(), _candidate_operation_payload()),
+        (_candidate_consumed_path(), _candidate_consumed_payload()),
+    ]
+    paths = [path for path, _payload in records]
+    tree = _tree_with_records(
+        repo.path, _tree_oid(repo.path, genesis), records, tmp_path,
+        "index-cand-pathmismatch")
+    commit = repo.create_commit(tree, genesis)
+    with pytest.raises(
+            GitRepositoryError,
+            match="candidate path/reference closure"):
+        repo.accept(genesis, commit, expected_paths=_accept_paths(*paths))
+    assert repo.head_oid() == genesis
+    assert _head(repo.path) == genesis
+    assert FactsGitRepository.open(repo.path, **_IDS).head_oid() == genesis
+
+
+@pytest.mark.parametrize("case,refs,reason", [
+    ("dangling", [{
+        "candidate_uid": "cand-9",
+        "candidate_revision": 1,
+        "payload_digest": _CAND1_DIGEST,
+    }], "dangling reference"),
+    ("digest", [{
+        "candidate_uid": _CAND1_UID,
+        "candidate_revision": _CAND1_REVISION,
+        "payload_digest": "b" * 64,
+    }], "digest mismatch"),
+])
+def test_accept_rejects_unclosed_candidate_reference_without_moving_ref(
+        tmp_path, case, refs, reason):
+    # Path identity matches for all three families; the operation's
+    # typed candidate_refs either name an input this commit does not
+    # carry or disagree with the input digest. The refusal must happen
+    # before update-ref.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = [
+        (_candidate_input_path(), _candidate_input_payload()),
+        (_candidate_operation_path(),
+         _candidate_operation_payload(refs=refs)),
+        (_candidate_consumed_path(), _candidate_consumed_payload()),
+    ]
+    paths = [path for path, _payload in records]
+    tree = _tree_with_records(
+        repo.path, _tree_oid(repo.path, genesis), records, tmp_path,
+        "index-cand-ref-%s" % case)
+    commit = repo.create_commit(tree, genesis)
+    with pytest.raises(GitRepositoryError, match=reason):
+        repo.accept(genesis, commit, expected_paths=_accept_paths(*paths))
+    assert repo.head_oid() == genesis
+    assert _head(repo.path) == genesis
+    assert FactsGitRepository.open(repo.path, **_IDS).head_oid() == genesis
+
+
+def test_accept_rejects_candidate_record_claiming_foreign_scope(tmp_path):
+    # The expected scope is the bound repository identity, never the
+    # scope a candidate record self-reports: three mutually consistent
+    # records under another company still cannot close.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = [
+        (_candidate_input_path(),
+         _candidate_input_payload(company_id="co-other")),
+        (_candidate_operation_path(),
+         _candidate_operation_payload(company_id="co-other")),
+        (_candidate_consumed_path(),
+         _candidate_consumed_payload(company_id="co-other")),
+    ]
+    paths = [path for path, _payload in records]
+    tree = _tree_with_records(
+        repo.path, _tree_oid(repo.path, genesis), records, tmp_path,
+        "index-cand-scope")
+    commit = repo.create_commit(tree, genesis)
+    with pytest.raises(GitRepositoryError, match="expected company"):
+        repo.accept(genesis, commit, expected_paths=_accept_paths(*paths))
+    assert repo.head_oid() == genesis
+    assert _head(repo.path) == genesis
+    assert FactsGitRepository.open(repo.path, **_IDS).head_oid() == genesis
+
+
+def test_accept_with_no_candidate_families_passes_closure_leg(tmp_path):
+    # Three empty candidate collections must stay legal: an ordinary
+    # snapshot carrying no candidate-family records accepts exactly as
+    # before, and so does the genesis acceptance exercised by
+    # initialize() in every fixture above.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    path = "facts/fact-1/current.json"
+    tree = _tree_with_added_file(
+        repo.path, _tree_oid(repo.path, genesis), path,
+        _write_blob(repo.path, git_format.dumps_record({"fact": 1})),
+        tmp_path, "index-cand-empty")
+    commit = repo.create_commit(tree, genesis)
+    assert repo.accept(
+        genesis, commit, expected_paths=_accept_paths(path)).accepted
+    assert repo.head_oid() == commit
+    assert _head(repo.path) == commit
+
+
+def test_accept_closure_consumes_validated_tree_bytes_without_reread(
+        tmp_path, monkeypatch):
+    # The closure leg must consume the exact blob bytes the physical
+    # tree-validation leg already read and validated, never issue its
+    # own second ``cat-file blob`` by OID. Count bare-OID blob reads
+    # during one successful accept: the candidate tree holds four blobs
+    # (repository_meta plus the three candidate records), so the total
+    # must be exactly four, each OID read once. The meta read earlier in
+    # accept uses the <commit>:<path> form and is not a bare-OID read.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = _closed_candidate_records()
+    paths = [path for path, _payload in records]
+    tree = _tree_with_records(
+        repo.path, _tree_oid(repo.path, genesis), records, tmp_path,
+        "index-cand-noreread")
+    commit = repo.create_commit(tree, genesis)
+
+    blob_reads = []
+    real_git_bytes = repo._git_bytes
+
+    def counting_git_bytes(args, env_extra=None):
+        if len(args) == 3 and args[:2] == ["cat-file", "blob"] \
+                and ":" not in args[2]:
+            blob_reads.append(args[2])
+        return real_git_bytes(args, env_extra=env_extra)
+
+    monkeypatch.setattr(repo, "_git_bytes", counting_git_bytes)
+    assert repo.accept(
+        genesis, commit,
+        expected_paths=_accept_paths(*paths)).accepted
+    assert len(blob_reads) == 4
+    assert len(set(blob_reads)) == len(blob_reads)
+    assert repo.head_oid() == commit
+
+
 def test_accept_with_zero_expected_old_has_empty_retention_base(tmp_path):
     # Genesis boundary: with the all-zero expected_old there is no
     # accepted history, so the retention base is empty and a
