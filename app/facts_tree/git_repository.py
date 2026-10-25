@@ -217,18 +217,63 @@ Guarantees enforced here:
   substitutes an object and never fetches over the network; the
   section 10.9.1 fsync policy is re-verified immediately before the
   pin transaction. Barrier participation, backup job state, W
-  checkpoints, R retention, export, restore, authorization and pin
+  checkpoints, R retention, restore, authorization and pin
   release all remain out of scope for this primitive.
+- export_maintenance_pin_bundle() is the section 4 Git-only export leg:
+  from exactly one persistent maintenance pin it builds a
+  self-contained bundle advertising exactly that one pin ref together
+  with the complete history reachable from its frozen commit H. The
+  instance must be bound to a repository identity, and H's history is
+  validated in the source with the same identity-record, single-parent
+  chain and fsck rules as verify_integrity() before a byte is staged, so
+  a forked/merge or foreign-identity pinned history fails closed. The
+  pin is read by its exact backup_id/barrier_id name only; there is
+  deliberately no fallback to REF_FACTS, HEAD, reflogs or any other ref,
+  and bundle creation never uses --all (nor --branches/--tags/--glob),
+  so a head that advanced past the pin after the barrier is never
+  spliced in and no other ref is advertised. The source repository is
+  never modified. The generated file is first written to a private
+  staging path beside the requested output and is published only after
+  it passes, inside a brand-new empty bare repository created for that
+  one call with --object-format matching this repository explicitly:
+  git bundle verify (which, in an empty repository, proves the bundle
+  self-contained with no prerequisite commits and no pre-existing
+  objects), bundle list-heads showing exactly the one pin ref at H, a
+  fetch of that one ref from the local bundle file, confirmation of the
+  fetched commit and its single zero-parent root, an fsck of the fetched
+  closure and a non-empty file size. Every verification git process runs
+  with the same replacement-ref and promisor lazy-fetch guards as the
+  other read legs. Publication is a no-clobber hard link, so an output
+  that already exists (including a symbolic link) is refused and never
+  replaced; a generation or verification failure removes only this
+  call's own staging file and verification directory. A staging cleanup
+  failure after successful publication is reported explicitly
+  (BundleStagingCleanupError, published=True) instead of being
+  swallowed, so the already-published output is never mistaken for a
+  safe-to-retry failure. The result records the published file's size,
+  SHA-256 digest and object format for a later manifest; the bundle
+  carries Git history alone: no W/R components, repository
+  configuration, manifest, coordinator, restore flow or remote is
+  included, and this leg does not claim a complete H/W/R backup. The
+  output parent directory is a trusted, host-provided precondition
+  (existing and not concurrently replaced during the call); this leg
+  does not defend against racing parent-path replacement and local
+  rename/hard-link success is not deployment-verified persistence.
 
 All Git invocations use argv lists without a shell, the fixed ref and a
-timeout; no remote, push or network command is ever issued, and no
-Git command text comes from a model.
+timeout; the facts repository itself never configures or contacts a
+remote, never pushes and never issues a network command, and no Git
+command text comes from a model. The export verifier's ``git fetch``
+takes the local bundle file as its only source inside a throwaway empty
+repository; it is never given a remote URL.
 """
 from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 
 from app.facts_tree import bindings_current
 from app.facts_tree import candidate_reference_closure
@@ -366,6 +411,52 @@ class PinConflictError(MaintenancePinError):
     """
 
 
+class PinNotFoundError(MaintenancePinError):
+    """The named maintenance pin does not exist at export time.
+
+    Unlike the read query (which reports a missing pin as None so its
+    caller can distinguish absence from corruption), an export has no
+    legal object to produce for a missing pin and refuses.
+    """
+
+
+class BundleExportError(GitRepositoryError):
+    """A maintenance pin bundle could not be generated or verified.
+
+    No output is published on this failure: the staging bundle and the
+    throwaway verification repository are the only things removed, and
+    the source repository is never modified.
+    """
+
+
+class BundleOutputExistsError(BundleExportError):
+    """The requested bundle output already exists and is never replaced."""
+
+
+class BundleStagingCleanupError(GitRepositoryError):
+    """This call's private staging file could not be removed.
+
+    This deliberately is not a BundleExportError subclass: a caller
+    catching the export failure family must not mistake it for
+    "nothing was published". published is True exactly when the verified
+    bundle had already reached output_path through the no-clobber hard
+    link; the published file is then intact (the staging name is only a
+    second directory entry for the same inode) and a retry against the
+    same output path is guaranteed to meet BundleOutputExistsError, so
+    the caller must not re-run the export "to be safe": host cleanup of
+    staging_path is the only remaining action. published is False when
+    the export itself failed before publication and the staging cleanup
+    additionally failed; output_path was never created and the original
+    export failure remains chained as this exception's context.
+    """
+
+    def __init__(self, message, *, published, output_path, staging_path):
+        super().__init__(message)
+        self.published = published
+        self.output_path = output_path
+        self.staging_path = staging_path
+
+
 @dataclass(frozen=True)
 class IntegrityReport:
     """Result of one successful verify_integrity() pass."""
@@ -425,6 +516,28 @@ class MaintenancePin:
     barrier_id: str
     commit_oid: str
     ref: str
+
+
+@dataclass(frozen=True)
+class MaintenancePinBundle:
+    """One successfully published maintenance pin bundle.
+
+    pin is the exact frozen maintenance ref and commit H the bundle
+    advertises and contains; output_path is the absolute no-clobber
+    publication target holding a self-contained Git bundle. size_bytes
+    and sha256_digest describe that file's bytes (the staging file is
+    published as a hard link, so output holds exactly those bytes) and
+    are the values a later CHG-066 section 4 manifest can record without
+    re-reading the file; object_format is the source repository's
+    object format ("sha1"/"sha256"), which the verification repository
+    matched explicitly.
+    """
+
+    pin: MaintenancePin
+    output_path: Path
+    size_bytes: int
+    sha256_digest: str
+    object_format: str
 
 
 @dataclass(frozen=True)
@@ -1475,6 +1588,26 @@ class FactsGitRepository:
             raise IntegrityError(
                 "expected head %s does not match authoritative ref %s "
                 "pointing at %s" % (expected_head, REF_FACTS, head))
+        genesis, count = self._verify_identity_chain(head)
+        return IntegrityReport(
+            head_oid=head, genesis_oid=genesis, commit_count=count,
+            object_format=self.object_format)
+
+    def _verify_identity_chain(self, head):
+        """Walk head->genesis enforcing identity and single-parent shape.
+
+        Every object on the walk must be a commit carrying the identical
+        repository identity record (also matching the host-issued
+        identity when this instance was bound by initialize()/open()),
+        every non-genesis commit must have exactly one parent, the
+        genesis exactly zero, and a revisited oid refuses a cyclic
+        history. Afterwards git fsck runs with head as its only
+        reachability root. Returns (genesis_oid, commit_count). This is
+        the one identity/history rule set, shared by verify_integrity()
+        and the maintenance pin export: the export leg validates the
+        exact frozen H in the source repository before bundling it
+        instead of inventing a second identity format.
+        """
         bound_meta = self._expected_meta
         chain_meta = None
         current = head
@@ -1510,7 +1643,7 @@ class FactsGitRepository:
             elif meta != chain_meta:
                 raise IntegrityError(
                     "repository identity record at %s differs from the "
-                    "record at the authoritative tip" % current)
+                    "record at the starting commit" % current)
             count += 1
             if not parents:
                 genesis = current
@@ -1522,9 +1655,7 @@ class FactsGitRepository:
                                                        len(parents)))
             current = parents[0]
         self._verify_reachable_objects(head)
-        return IntegrityReport(
-            head_oid=head, genesis_oid=genesis, commit_count=count,
-            object_format=self.object_format)
+        return genesis, count
 
     def read_snapshot_at(self, commit_oid):
         """Read the record paths and raw canonical bytes of one commit.
@@ -1841,6 +1972,391 @@ class FactsGitRepository:
                 commit_oid=oid, ref=refname))
         pins.sort(key=lambda pin: (pin.backup_id, pin.barrier_id))
         return tuple(pins)
+
+    def export_maintenance_pin_bundle(self, backup_id, barrier_id,
+                                      output_path):
+        """Export one frozen maintenance pin as a self-contained bundle.
+
+        The CHG-066 section 4 Git-only export leg: after the maintenance
+        barrier has been released, the exact commit H captured under the
+        named pin is exported from the pin itself, never from a ref that
+        could have advanced since. The resulting bundle advertises
+        exactly the one pin ref
+        (maintenance_pin_ref(backup_id, barrier_id)) and carries every
+        object reachable from H, so it imports into a repository that
+        has neither a remote configured nor any pre-existing object.
+
+        Fail-closed contract, in order:
+
+        - backup_id and barrier_id must pass maintenance_pin_ref()
+          (ValueError otherwise), and output_path must be a non-empty
+          str/os.PathLike naming a file (TypeError/ValueError otherwise);
+        - the instance must be bound to a repository identity by
+          initialize()/open(): a pin bundle has no legitimate producer
+          that cannot prove the repo_id/installation_id/company_id of H,
+          so an unbound instance is refused (MaintenancePinError) and no
+          output is created;
+        - the output is refused while it already exists in any form,
+          including a symbolic link or a directory
+          (BundleOutputExistsError), so an existing file or a previously
+          completed backup is never overwritten, and the parent
+          directory must already exist (BundleExportError);
+        - the exact named pin ref is read and its recorded target is
+          verified to be an existing commit object with replacement
+          refs ignored and promisor lazy fetch disabled: a missing pin
+          raises PinNotFoundError and a corrupted or non-commit pin
+          raises MaintenancePinError/PinTargetError. There is
+          deliberately no fallback to REF_FACTS, HEAD, reflogs or any
+          other ref;
+        - before anything is bundled, H's complete history is validated
+          in the source repository with the same rule set as
+          verify_integrity(): every object from H back to the genesis is
+          a commit carrying this instance's bound identity record, every
+          non-genesis commit has exactly one parent and the genesis
+          none, and git fsck passes with H as its only root. A forked or
+          merge history, a foreign identity record or damaged object
+          therefore fails closed as PinTargetError before a byte is
+          staged;
+        - the bundle is created from the full pin ref name only (never
+          --all, --branches, --tags or a glob) into a private staging
+          file next to the requested output;
+        - publication happens only after the staging bundle passes, in a
+          brand-new empty bare repository created beside the output for
+          this one call and removed afterwards. That verification
+          repository is initialized with
+          ``--object-format=<this repository's format>`` explicitly, so
+          a SHA-256 bundle is never checked against a host whose
+          init.defaultObjectFormat happens to be SHA-1: the checks are
+          ``git bundle verify`` (which fails on any prerequisite commit
+          the empty repository does not have, proving the bundle
+          self-contained), ``git bundle list-heads`` reporting exactly
+          the one pin ref at exactly H, a fetch of that one ref from the
+          local bundle file, the fetched commit resolving to H with
+          exactly one zero-parent root, and an fsck of the fetched
+          closure;
+        - the verified bundle is published with a no-clobber hard link
+          (os.link), so an output that appears concurrently is not
+          replaced. Any generation or verification failure removes only
+          this call's own staging file and verification directory, and
+          never publishes an output.
+
+        The returned MaintenancePinBundle additionally carries the
+        published file's non-empty size_bytes and SHA-256 digest
+        (computed over the verified staging bytes, which the hard link
+        publishes byte-identically) and this repository's object
+        format, ready for a later section 4 manifest to record; this
+        leg itself writes no manifest.
+
+        Post-publication cleanup is a separate, explicit failure: if
+        removing this call's private staging name fails after the hard
+        link succeeded, BundleStagingCleanupError is raised with
+        published=True. The bundle file is already complete at
+        output_path and must not be re-exported over the same path (a
+        retry is refused with BundleOutputExistsError); the leftover
+        staging path is reported for host cleanup. A cleanup failure on
+        a path where publication never happened is reported with
+        published=False, chained after the original export failure.
+
+        Trusted-directory precondition: the output's parent directory is
+        taken as host-provided, already existing, trusted and not
+        concurrently replaced (including a swap to a symlinked or
+        attacker-controlled directory) for the duration of the call. The
+        pre-existing output and output-symlink cases are refused, but
+        this leg does not attempt to prevent a racing replacement of a
+        parent path component and must not be read as claiming that
+        defense. Likewise, local rename/hard-link success and the
+        repository's fsync policy do not constitute deployment-verified
+        persistence of the output file or its directory; that remains a
+        host/deployment concern.
+
+        The source repository is strictly read-only on every leg: no
+        object is written into it, no ref (REF_FACTS, the pin or any
+        other), HEAD or configuration is moved, and the fetch used in
+        verification reads the local bundle file inside the throwaway
+        repository rather than contacting a remote. This is the Git
+        component of the backup only: W/R components, manifests, the
+        backup coordinator, restore and authorization are out of scope,
+        and a successful export is not a complete H/W/R backup.
+        Returns a MaintenancePinBundle.
+        """
+        pin_ref = maintenance_pin_ref(backup_id, barrier_id)
+        try:
+            output = Path(os.fspath(output_path))
+        except TypeError:
+            raise TypeError(
+                "output_path must be a str or os.PathLike, got %s"
+                % type(output_path).__name__) from None
+        if not output.name or output.name in (".", ".."):
+            raise ValueError(
+                "output_path must name a file, got %r" % (output_path,))
+        if self._expected_meta is None:
+            raise MaintenancePinError(
+                "repository identity is not bound to this instance; "
+                "use initialize() or open()")
+        # Refuse a symbolic link before its target is inspected and
+        # refuse any existing path, exactly as initialize() does: an
+        # existing output is never overwritten or truncated.
+        if output.is_symlink():
+            raise BundleOutputExistsError(
+                "bundle output path must not be a symbolic link: %s"
+                % output)
+        if output.exists():
+            raise BundleOutputExistsError(
+                "bundle output path already exists; an existing output "
+                "is never overwritten: %s" % output)
+        if not output.is_absolute():
+            output = Path.cwd() / output
+        parent = output.parent
+        if not parent.is_dir():
+            raise BundleExportError(
+                "bundle output parent directory does not exist: %s"
+                % parent)
+        # The only source ref this leg ever reads: the exact named pin.
+        # None means precisely that the pin ref is absent; anything
+        # recorded but not a full object id naming an existing commit is
+        # corruption and fails closed inside the target check.
+        commit_oid = self._pin_ref_oid(pin_ref)
+        if commit_oid is None:
+            raise PinNotFoundError(
+                "maintenance pin %s does not exist; refusing to export "
+                "any other ref in its name" % pin_ref)
+        self._require_pin_target_commit(pin_ref, commit_oid)
+        # Validate H's identity and single-parent history in the source
+        # repository before bundling, with the same rule set as
+        # verify_integrity(); a pin behind the current head is fine, a
+        # forked/foreign/damaged pinned history is not.
+        try:
+            self._verify_identity_chain(commit_oid)
+        except GitRepositoryError as exc:
+            raise PinTargetError(
+                "maintenance pin %s freezes %s, whose history fails the "
+                "bound-identity, single-parent chain and object "
+                "integrity checks: %s" % (pin_ref, commit_oid, exc)) \
+                from exc
+        pin = MaintenancePin(
+            backup_id=backup_id, barrier_id=barrier_id,
+            commit_oid=commit_oid, ref=pin_ref)
+        # Stage beside the final target so publication is one
+        # filesystem's atomic no-clobber link; the random name is
+        # private to this call and never user-controlled.
+        staging_fd, staging_name = tempfile.mkstemp(
+            dir=str(parent), prefix=".sam-bundle-", suffix=".staging")
+        os.close(staging_fd)
+        staging = Path(staging_name)
+        published = False
+        original_failure = None
+        try:
+            try:
+                self._git(
+                    ["bundle", "create", str(staging), pin_ref],
+                    env_extra=_VERIFY_ENV)
+            except GitCommandError as exc:
+                raise BundleExportError(
+                    "failed to create the maintenance pin bundle: %s"
+                    % exc) from exc
+            self._verify_bundle_in_fresh_repository(
+                staging, parent, pin)
+            try:
+                size = staging.stat().st_size
+            except OSError as exc:
+                raise BundleExportError(
+                    "the generated staging bundle is unreadable: %s"
+                    % exc) from exc
+            if size <= 0:
+                raise BundleExportError(
+                    "the generated bundle at %s is empty" % staging)
+            digest = hashlib.sha256()
+            try:
+                with staging.open("rb") as staged:
+                    while True:
+                        chunk = staged.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+            except OSError as exc:
+                raise BundleExportError(
+                    "the generated staging bundle is unreadable: %s"
+                    % exc) from exc
+            try:
+                os.link(staging, output)
+            except FileExistsError as exc:
+                raise BundleOutputExistsError(
+                    "bundle output path appeared before publication; an "
+                    "existing output is never overwritten: %s" % output
+                ) from exc
+            except OSError as exc:
+                raise BundleExportError(
+                    "failed to publish the verified bundle to %s: %s"
+                    % (output, exc)) from exc
+            published = True
+            return MaintenancePinBundle(
+                pin=pin, output_path=output, size_bytes=size,
+                sha256_digest=digest.hexdigest(),
+                object_format=self.object_format)
+        except BaseException as exc:
+            # Remember the export's own failure so a staging cleanup
+            # failure in the finally chains after it rather than masking
+            # why the export aborted.
+            original_failure = exc
+            raise
+        finally:
+            # Always remove only this call's private staging name. The
+            # publication is a separate hard-linked directory entry, so
+            # unlinking the staging name after success leaves the
+            # published output intact; on failure there is nothing else
+            # to clean up here (the verification directory is removed by
+            # its own TemporaryDirectory context). A cleanup failure is
+            # reported explicitly instead of swallowed: after a
+            # successful publication the caller must not read it as
+            # "export failed, safe to retry" (the no-clobber link makes
+            # a retry meet BundleOutputExistsError), and before
+            # publication it means the staging path leaked.
+            try:
+                staging.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                if published:
+                    raise BundleStagingCleanupError(
+                        "the verified bundle was already published at %s, "
+                        "but removing this call's private staging file %s "
+                        "failed: %s. The output is complete; do not retry "
+                        "the export against this path (it is refused as an "
+                        "existing output), remove the leftover staging file "
+                        "through host cleanup"
+                        % (output, staging, exc),
+                        published=True, output_path=output,
+                        staging_path=staging) from exc
+                raise BundleStagingCleanupError(
+                    "the bundle export failed before publication and "
+                    "removing the private staging file %s also failed: %s; "
+                    "no bundle was published at %s and the leftover staging "
+                    "file requires host cleanup"
+                    % (staging, exc, output),
+                    published=False, output_path=output,
+                    staging_path=staging) from (original_failure or exc)
+
+    def _verify_bundle_in_fresh_repository(self, staging, scratch_parent,
+                                           pin):
+        # Section 4 empty-environment verification. Every command below
+        # targets either the throwaway bare repository or the local
+        # staging bundle file, never this facts repository and never a
+        # remote; _VERIFY_ENV keeps replacement objects and promisor lazy
+        # fetch out of every read. A failure at any step raises
+        # BundleExportError before the caller publishes anything.
+        with tempfile.TemporaryDirectory(
+                dir=str(scratch_parent),
+                prefix=".sam-bundle-verify-") as scratch_name:
+            fresh = Path(scratch_name) / "import.git"
+            try:
+                # Match the source object format explicitly: depending on
+                # the host's init.defaultObjectFormat would make a
+                # SHA-256 bundle fail import (or, with a SHA-256
+                # default, a SHA-1 bundle) for a reason unrelated to the
+                # bundle's own self-containment.
+                _run_git([
+                    "init", "--bare",
+                    "--object-format=" + self.object_format,
+                    str(fresh)])
+                verify = _run_git(
+                    ["-C", str(fresh), "bundle", "verify", str(staging)],
+                    check=False, env_extra=_VERIFY_ENV)
+                if verify.returncode != 0:
+                    detail = (verify.stdout + verify.stderr).decode(
+                        "utf-8", "replace").strip()
+                    raise BundleExportError(
+                        "bundle verification failed inside a brand-new "
+                        "empty bare repository, so the bundle is not "
+                        "self-contained: %s" % detail)
+                heads_data = _run_git(
+                    ["-C", str(fresh), "bundle", "list-heads",
+                     str(staging)],
+                    env_extra=_VERIFY_ENV).stdout
+                heads = []
+                for line in heads_data.decode("utf-8", "replace") \
+                        .splitlines():
+                    if not line:
+                        continue
+                    advertised_oid, advertised_ref = line.split(" ", 1)
+                    heads.append((advertised_oid, advertised_ref))
+                if heads != [(pin.commit_oid, pin.ref)]:
+                    raise BundleExportError(
+                        "bundle advertises %r, expected exactly the one "
+                        "pin ref %s at %s; the export never uses --all"
+                        % (heads, pin.ref, pin.commit_oid))
+                fetch = _run_git(
+                    ["-C", str(fresh), "fetch", "--quiet", "--no-tags",
+                     str(staging), "%s:%s" % (pin.ref, pin.ref)],
+                    check=False, env_extra=_VERIFY_ENV)
+                if fetch.returncode != 0:
+                    detail = (fetch.stdout + fetch.stderr).decode(
+                        "utf-8", "replace").strip()
+                    raise BundleExportError(
+                        "importing the advertised pin ref from the bundle "
+                        "failed in the empty repository: %s" % detail)
+                fetched = _run_git(
+                    ["-C", str(fresh), "rev-parse", "--verify", pin.ref],
+                    env_extra=_VERIFY_ENV).stdout.decode("ascii").strip()
+                if fetched != pin.commit_oid:
+                    raise BundleExportError(
+                        "the fetched pin ref resolves to %s, not the "
+                        "frozen commit %s" % (fetched, pin.commit_oid))
+                object_type = _run_git(
+                    ["-C", str(fresh), "cat-file", "-t", pin.ref],
+                    env_extra=_VERIFY_ENV).stdout.decode("ascii").strip()
+                if object_type != "commit":
+                    raise BundleExportError(
+                        "the fetched pin target is a %s, not a commit"
+                        % object_type)
+                refs_out = _run_git(
+                    ["-C", str(fresh), "for-each-ref",
+                     "--format=%(refname)"],
+                    env_extra=_VERIFY_ENV).stdout.decode("utf-8")
+                refs = [line for line in refs_out.splitlines() if line]
+                if refs != [pin.ref]:
+                    raise BundleExportError(
+                        "the empty repository holds %r after the fetch, "
+                        "expected only the one pin ref %s"
+                        % (refs, pin.ref))
+                roots = _run_git(
+                    ["-C", str(fresh), "rev-list", "--max-parents=0",
+                     pin.ref], env_extra=_VERIFY_ENV
+                ).stdout.decode("ascii").split()
+                if len(roots) != 1:
+                    raise BundleExportError(
+                        "the exported history has %d zero-parent roots, "
+                        "expected exactly one" % len(roots))
+                count_out = _run_git(
+                    ["-C", str(fresh), "rev-list", "--count", pin.ref],
+                    env_extra=_VERIFY_ENV).stdout.decode("ascii").strip()
+                try:
+                    commit_count = int(count_out)
+                except ValueError:
+                    commit_count = 0
+                if commit_count < 1:
+                    raise BundleExportError(
+                        "the exported pin history is empty")
+                fsck = _run_git(
+                    ["-C", str(fresh), "fsck", "--no-dangling",
+                     "--no-reflogs", "--strict", pin.ref],
+                    check=False, env_extra=_VERIFY_ENV)
+                output = (fsck.stdout + fsck.stderr).decode(
+                    "utf-8", "replace")
+                problems = [line for line in output.splitlines()
+                            if line.startswith(("error", "fatal"))]
+                if fsck.returncode != 0 or problems:
+                    detail = "; ".join(problems[:5]) or (
+                        "git fsck exited with %d" % fsck.returncode)
+                    raise BundleExportError(
+                        "objects imported from the bundle failed "
+                        "integrity checks in the empty repository: %s"
+                        % detail)
+            except BundleExportError:
+                raise
+            except GitCommandError as exc:
+                raise BundleExportError(
+                    "bundle verification in the empty repository "
+                    "failed: %s" % exc) from exc
 
     def _verify_reachable_objects(self, head):
         # git fsck re-hashes and re-validates the objects reachable from

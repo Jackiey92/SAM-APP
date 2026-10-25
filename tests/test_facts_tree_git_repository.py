@@ -7,10 +7,13 @@ ever receives OIDs; tests may additionally drive plumbing directly to
 prepare synthetic trees and competing commits. The persistent
 maintenance pin tests additionally force refs and run
 ``git gc --prune=now``, strictly confined to these synthetic tmp_path
-bare repositories.
+bare repositories. The maintenance pin bundle export tests additionally
+create throwaway empty bare repositories and run ``git bundle`` and a
+local-file ``git fetch`` of the bundle, all inside pytest tmp_path.
 """
 import hashlib
 import os
+from pathlib import Path
 import subprocess
 import zlib
 
@@ -23,19 +26,25 @@ from app.facts_tree import template_packs
 from app.facts_tree.git_repository import (
     PIN_REF_NAMESPACE,
     REF_FACTS,
+    BundleExportError,
+    BundleOutputExistsError,
+    BundleStagingCleanupError,
     CasResult,
     FactsGitRepository,
+    GitCommandError,
     GitRepositoryError,
     IdentityMismatchError,
     InitializeError,
     IntegrityError,
     IntegrityReport,
     MaintenancePin,
+    MaintenancePinBundle,
     MaintenancePinError,
     OpenError,
     PinConflictError,
     PinCreationResult,
     PinHeadMismatchError,
+    PinNotFoundError,
     PinTargetError,
     SnapshotReadError,
     StaleBaseError,
@@ -2956,3 +2965,603 @@ def test_pin_in_sha256_repository_and_cross_format_oid_rejection(tmp_path):
         repo.create_maintenance_pin("bk-40", "bar-40", "a" * 40)
     assert repo.read_maintenance_pin("bk-40", "bar-40") is None
     assert _raw_pin_value(repo.path, result.pin.ref) == h1
+
+
+# CHG-066 section 4: export of one frozen maintenance pin as a
+# self-contained Git bundle, generated from the exact pin ref (never
+# --all and never REF_FACTS/HEAD/reflogs), verified inside a brand-new
+# empty bare repository and published without overwriting anything.
+
+
+def _bundle_head_lines(repo_path, bundle_path):
+    # The refs the bundle itself advertises, independent of the
+    # repository it is later imported into.
+    out = _git_text(repo_path, "bundle", "list-heads", str(bundle_path))
+    return [tuple(line.split(" ", 1)) for line in out.splitlines() if line]
+
+
+def _all_ref_lines(repo_path):
+    # The complete ref set as Git records it (heads and refs/sam/*),
+    # for source-invariance comparisons before/after an export.
+    return sorted(line for line in
+                  _git_text(repo_path, "for-each-ref").splitlines() if line)
+
+
+def _rev_list_oids(repo_path, ref):
+    out = _git_text(repo_path, "rev-list", "--objects", ref)
+    return {line.split(" ", 1)[0] for line in out.splitlines() if line}
+
+
+def _export_dir(tmp_path):
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    return export_dir
+
+
+def _assert_exports_clean(export_dir, *names):
+    # Only the named finished outputs may remain: no staging file and
+    # no throwaway verification directory survive a call.
+    assert sorted(path.name for path in export_dir.iterdir()) == \
+        sorted(names)
+
+
+def test_export_pin_bundle_freezes_h1_after_ref_advances_to_h2(tmp_path):
+    # The section 4 regression: pin H1, then let REF_FACTS advance to
+    # H2/H3 after the barrier; the bundle must still export exactly H1
+    # and its complete reachable history, self-contained and with no
+    # other ref advertised.
+    repo = _init_repo(tmp_path)
+    h1 = _append_commit(repo, tmp_path, "fact-1", "index-bundle-h1")
+    assert repo.create_maintenance_pin(
+        "bk-ex-1", "bar-ex-1", h1).created
+    h2 = _append_commit(repo, tmp_path, "fact-2", "index-bundle-h2")
+    h3 = _append_commit(repo, tmp_path, "fact-3", "index-bundle-h3")
+    pin_ref = maintenance_pin_ref("bk-ex-1", "bar-ex-1")
+    objects_before = _all_object_oids(repo.path)
+    refs_before = _all_ref_lines(repo.path)
+    head_symbolic_before = _git_text(
+        repo.path, "symbolic-ref", "HEAD").strip()
+    export_dir = _export_dir(tmp_path)
+    output = export_dir / "bk-ex-1.bundle"
+
+    result = repo.export_maintenance_pin_bundle(
+        "bk-ex-1", "bar-ex-1", output)
+
+    pin = MaintenancePin(
+        backup_id="bk-ex-1", barrier_id="bar-ex-1",
+        commit_oid=h1, ref=pin_ref)
+    assert result.pin == pin
+    assert result.output_path == output
+    assert result.object_format == "sha1"
+    assert result.size_bytes == output.stat().st_size
+    assert result.size_bytes > 0
+    assert result.sha256_digest == hashlib.sha256(
+        output.read_bytes()).hexdigest()
+    assert output.is_file()
+    assert output.stat().st_size > 0
+    _assert_exports_clean(export_dir, "bk-ex-1.bundle")
+    # The file advertises exactly the one pin ref at H1.
+    assert _bundle_head_lines(repo.path, output) == [(h1, pin_ref)]
+    # Empty-environment import: H1 and its full history, no H2/H3.
+    fresh = tmp_path / "fresh-import.git"
+    _git(tmp_path, "init", "--bare", str(fresh))
+    verify = _git(fresh, "bundle", "verify", str(output), check=False)
+    assert verify.returncode == 0, \
+        verify.stderr.decode("utf-8", "replace")
+    fetch = _git(
+        fresh, "fetch", "--quiet", "--no-tags", str(output),
+        "%s:%s" % (pin_ref, pin_ref), check=False)
+    assert fetch.returncode == 0, \
+        fetch.stderr.decode("utf-8", "replace")
+    assert _git_text(fresh, "rev-parse", "--verify", pin_ref).strip() == h1
+    assert _git_text(fresh, "cat-file", "-t", pin_ref).strip() == "commit"
+    assert _git_text(fresh, "rev-list", "--count", pin_ref).strip() == "2"
+    assert _git_text(
+        fresh, "rev-list", "--max-parents=0", pin_ref).split() == \
+        [repo.genesis_oid]
+    for later_oid in (h2, h3):
+        assert _git(
+            fresh, "cat-file", "-t", later_oid, check=False).returncode != 0
+    refs = [line for line in _git_text(
+        fresh, "for-each-ref", "--format=%(refname)").splitlines() if line]
+    assert refs == [pin_ref]
+    # The bundle closure equals H1's closure in the source, proving it
+    # is self-contained against a repository with no prior objects.
+    assert _rev_list_oids(fresh, pin_ref) == \
+        _rev_list_oids(repo.path, pin_ref)
+    fsck = _git(
+        fresh, "fsck", "--no-dangling", "--no-reflogs", "--strict",
+        pin_ref, check=False)
+    assert fsck.returncode == 0
+    # The source repository is untouched: head, HEAD, ref set, object
+    # set and remote configuration are exactly as before the export.
+    assert _head(repo.path) == h3
+    assert _git_text(repo.path, "symbolic-ref", "HEAD").strip() == \
+        head_symbolic_before
+    assert _all_ref_lines(repo.path) == refs_before
+    assert _all_object_oids(repo.path) == objects_before
+    assert _git_text(repo.path, "remote").strip() == ""
+    assert repo.read_maintenance_pin("bk-ex-1", "bar-ex-1") == pin
+
+
+def test_export_bundle_advertises_only_requested_pin_with_other_pins(
+        tmp_path):
+    # A second pin exists at the later head: exporting the first pin
+    # still advertises only that one ref, and the later commit is not
+    # part of the bundle.
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    assert repo.create_maintenance_pin("bk-a", "bar-a", h1).created
+    h2 = _append_commit(repo, tmp_path, "fact-1", "index-bundle-second")
+    assert repo.create_maintenance_pin("bk-b", "bar-b", h2).created
+    h3 = _append_commit(repo, tmp_path, "fact-2", "index-bundle-third")
+    export_dir = _export_dir(tmp_path)
+    output = export_dir / "bk-a.bundle"
+
+    result = repo.export_maintenance_pin_bundle("bk-a", "bar-a", output)
+
+    pin_ref = maintenance_pin_ref("bk-a", "bar-a")
+    assert result.pin == MaintenancePin(
+        backup_id="bk-a", barrier_id="bar-a", commit_oid=h1, ref=pin_ref)
+    assert _bundle_head_lines(repo.path, output) == [(h1, pin_ref)]
+    fresh = tmp_path / "fresh-one-pin.git"
+    _git(tmp_path, "init", "--bare", str(fresh))
+    assert _git(
+        fresh, "bundle", "verify", str(output), check=False).returncode == 0
+    assert _git(
+        fresh, "fetch", "--quiet", "--no-tags", str(output),
+        "%s:%s" % (pin_ref, pin_ref), check=False).returncode == 0
+    assert _git_text(fresh, "rev-parse", pin_ref).strip() == h1
+    for later_oid in (h2, h3):
+        assert _git(
+            fresh, "cat-file", "-t", later_oid, check=False).returncode != 0
+    _assert_exports_clean(export_dir, "bk-a.bundle")
+    assert _head(repo.path) == h3
+
+
+def test_export_refuses_unbound_instance_without_creating_output(tmp_path):
+    # A pin bundle has no legitimate producer that cannot prove the
+    # repo_id/installation_id/company_id of H: an unbound instance
+    # (constructor only) is refused with the same guard the pin write
+    # legs use, before any staging file is created, and the source
+    # repository is untouched.
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    assert repo.create_maintenance_pin("bk-u", "bar-u", h1).created
+    unbound = FactsGitRepository(repo.path)
+    export_dir = _export_dir(tmp_path)
+    output = export_dir / "unbound.bundle"
+    with pytest.raises(MaintenancePinError, match="not bound"):
+        unbound.export_maintenance_pin_bundle("bk-u", "bar-u", output)
+    assert not output.exists()
+    _assert_exports_clean(export_dir)
+    assert repo.read_maintenance_pin("bk-u", "bar-u").commit_oid == h1
+    assert _head(repo.path) == h1
+
+
+def test_export_rejects_missing_pin_without_creating_output(tmp_path):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    export_dir = _export_dir(tmp_path)
+    output = export_dir / "missing.bundle"
+    with pytest.raises(PinNotFoundError):
+        repo.export_maintenance_pin_bundle("bk-none", "bar-none", output)
+    assert not output.exists()
+    _assert_exports_clean(export_dir)
+    assert repo.read_maintenance_pin("bk-none", "bar-none") is None
+    assert _head(repo.path) == h1
+
+
+@pytest.mark.parametrize("mode", ["missing-object", "non-commit"])
+def test_export_rejects_corrupt_pin_and_leaves_ref_unrepaired(
+        tmp_path, mode):
+    # An existing pin ref whose recorded target is unreadable or not a
+    # commit is corruption, never a reason to fall back to another ref.
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    created = repo.create_maintenance_pin("bk-bad", "bar-bad", h1)
+    h2 = _append_commit(repo, tmp_path, "fact-1", "index-bundle-corrupt")
+    if mode == "missing-object":
+        corrupted = "f" * repo.oid_length
+    else:
+        corrupted = _tree_oid(repo.path, h2)
+    _point_ref_at(repo.path, corrupted, ref=created.pin.ref)
+    export_dir = _export_dir(tmp_path)
+    output = export_dir / "bad.bundle"
+    with pytest.raises(PinTargetError):
+        repo.export_maintenance_pin_bundle("bk-bad", "bar-bad", output)
+    assert not output.exists()
+    _assert_exports_clean(export_dir)
+    # The corrupted ref is left exactly as planted: no repair, no move.
+    assert (repo.path / created.pin.ref).read_text(
+        encoding="ascii").strip() == corrupted
+    assert _head(repo.path) == h2
+
+
+def test_export_rejects_pin_whose_history_contains_a_merge(tmp_path):
+    # A syntactically valid two-parent merge commit planted at the pin
+    # ref (bypassing the pin write transaction, exactly as the corrupt
+    # fixtures do) must not be exported: the authoritative history rule
+    # is one parent per commit outside the genesis, so the export leg
+    # re-walks H in the source and fails closed before staging anything.
+    repo = _init_repo(tmp_path)
+    h1 = _append_commit(repo, tmp_path, "fact-1", "index-merge-h1")
+    assert repo.create_maintenance_pin("bk-merge", "bar-merge", h1).created
+    # A second, divergent child of the genesis with a valid identity
+    # tree, produced through plumbing rather than accept().
+    genesis = repo.genesis_oid
+    other_blob = _write_blob(
+        repo.path, git_format.dumps_record({"fact": "other"}))
+    other_tree = _tree_with_added_file(
+        repo.path, _tree_oid(repo.path, genesis),
+        "facts/other/current.json", other_blob, tmp_path,
+        "index-merge-other")
+    other = _commit_tree(repo.path, other_tree, [genesis], "other line")
+    merge_body = (
+        b"tree " + _tree_oid(repo.path, h1).encode("ascii") + b"\n"
+        b"parent " + h1.encode("ascii") + b"\n"
+        b"parent " + other.encode("ascii") + b"\n"
+        b"author Fixture <fixture@example.invalid> 1700000000 +0000\n"
+        b"committer Fixture <fixture@example.invalid> 1700000000 +0000\n"
+        b"\nmerge fixture\n"
+    )
+    merge_oid = _commit_object_raw(repo.path, merge_body)
+    pin_ref = maintenance_pin_ref("bk-merge", "bar-merge")
+    _point_ref_at(repo.path, merge_oid, ref=pin_ref)
+    export_dir = _export_dir(tmp_path)
+    output = export_dir / "merge.bundle"
+    with pytest.raises(PinTargetError, match="single-parent"):
+        repo.export_maintenance_pin_bundle(
+            "bk-merge", "bar-merge", output)
+    assert not output.exists()
+    _assert_exports_clean(export_dir)
+    assert (repo.path / pin_ref).read_text(
+        encoding="ascii").strip() == merge_oid
+    assert _head(repo.path) == h1
+
+
+def test_export_rejects_pin_whose_identity_record_is_foreign(tmp_path):
+    # H carries a well-formed repository_meta record with a different
+    # repo_id: structurally valid history, wrong repository. It must be
+    # refused in the source walk with the same identity rule
+    # verify_integrity() uses, never bundled.
+    repo = _init_repo(tmp_path)
+    genesis = repo.genesis_oid
+    created = repo.create_maintenance_pin("bk-foreign", "bar-foreign", genesis)
+    env = {"GIT_INDEX_FILE": str(tmp_path / "index-foreign")}
+    _git(repo.path, "read-tree", "--empty", env=env)
+    foreign_blob = _write_blob(
+        repo.path,
+        git_format.dumps_record(_meta_payload(repo_id="foreign-repo-id")))
+    _git(repo.path, "update-index", "--add", "--cacheinfo",
+         "100644,%s,%s" % (foreign_blob, _META_PATH), env=env)
+    foreign_tree = _git_text(repo.path, "write-tree", env=env).strip()
+    foreign = _commit_tree(
+        repo.path, foreign_tree, [], "foreign genesis")
+    _point_ref_at(repo.path, foreign, ref=created.pin.ref)
+    export_dir = _export_dir(tmp_path)
+    output = export_dir / "foreign.bundle"
+    with pytest.raises(PinTargetError, match="identity"):
+        repo.export_maintenance_pin_bundle(
+            "bk-foreign", "bar-foreign", output)
+    assert not output.exists()
+    _assert_exports_clean(export_dir)
+    assert (repo.path / created.pin.ref).read_text(
+        encoding="ascii").strip() == foreign
+    assert _head(repo.path) == genesis
+
+
+def test_export_refuses_existing_output_file_and_keeps_its_bytes(tmp_path):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    assert repo.create_maintenance_pin("bk-file", "bar-file", h1).created
+    export_dir = _export_dir(tmp_path)
+    output = export_dir / "existing.bundle"
+    output.write_bytes(b"precious previous backup")
+    with pytest.raises(BundleOutputExistsError):
+        repo.export_maintenance_pin_bundle(
+            "bk-file", "bar-file", output)
+    assert output.read_bytes() == b"precious previous backup"
+    _assert_exports_clean(export_dir, "existing.bundle")
+    assert _head(repo.path) == h1
+
+
+def test_export_refuses_existing_output_directory(tmp_path):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    assert repo.create_maintenance_pin("bk-dir", "bar-dir", h1).created
+    export_dir = _export_dir(tmp_path)
+    output = export_dir / "a-directory"
+    output.mkdir()
+    with pytest.raises(BundleOutputExistsError):
+        repo.export_maintenance_pin_bundle("bk-dir", "bar-dir", output)
+    assert output.is_dir()
+    assert _head(repo.path) == h1
+
+
+def test_export_refuses_symlink_output_without_touching_target(tmp_path):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    assert repo.create_maintenance_pin("bk-link", "bar-link", h1).created
+    export_dir = _export_dir(tmp_path)
+    outside = tmp_path / "outside-target"
+    outside.write_bytes(b"outside")
+    link = export_dir / "link.bundle"
+    try:
+        link.symlink_to(outside)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip("platform cannot create symlinks: %s" % exc)
+    with pytest.raises(BundleOutputExistsError):
+        repo.export_maintenance_pin_bundle(
+            "bk-link", "bar-link", link)
+    assert link.is_symlink()
+    assert outside.read_bytes() == b"outside"
+    assert _head(repo.path) == h1
+
+
+def test_export_refuses_output_with_missing_parent_directory(tmp_path):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    assert repo.create_maintenance_pin("bk-parent", "bar-parent", h1).created
+    with pytest.raises(BundleExportError):
+        repo.export_maintenance_pin_bundle(
+            "bk-parent", "bar-parent",
+            tmp_path / "no-such-dir" / "out.bundle")
+    assert _head(repo.path) == h1
+
+
+@pytest.mark.parametrize("backup_id,barrier_id", [
+    ("", "bar-1"),
+    ("bk-1", ""),
+    ("bk/1", "bar-1"),
+    ("bk 1", "bar-1"),
+])
+def test_export_rejects_malformed_identifiers(tmp_path, backup_id,
+                                              barrier_id):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    export_dir = _export_dir(tmp_path)
+    output = export_dir / "x.bundle"
+    with pytest.raises(ValueError):
+        repo.export_maintenance_pin_bundle(
+            backup_id, barrier_id, output)
+    assert not output.exists()
+    _assert_exports_clean(export_dir)
+    assert _head(repo.path) == h1
+
+
+@pytest.mark.parametrize("bad_output,error_type", [
+    ("", ValueError),
+    (".", ValueError),
+    (None, TypeError),
+    (42, TypeError),
+])
+def test_export_rejects_malformed_output_path(tmp_path, bad_output,
+                                              error_type):
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    assert repo.create_maintenance_pin("bk-out", "bar-out", h1).created
+    with pytest.raises(error_type):
+        repo.export_maintenance_pin_bundle(
+            "bk-out", "bar-out", bad_output)
+    assert _head(repo.path) == h1
+
+
+def test_export_fails_closed_when_bundle_creation_fails(
+        tmp_path, monkeypatch):
+    # Inject a generation failure: no output is published, the private
+    # staging file is removed, and the source repository is untouched.
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    assert repo.create_maintenance_pin("bk-gen", "bar-gen", h1).created
+    export_dir = _export_dir(tmp_path)
+    output = export_dir / "out.bundle"
+    real_git = repo._git
+
+    def failing_bundle(args, input_bytes=None, check=True, env_extra=None):
+        if args[:1] == ["bundle"]:
+            raise GitCommandError("injected bundle creation failure")
+        return real_git(
+            args, input_bytes=input_bytes, check=check,
+            env_extra=env_extra)
+
+    monkeypatch.setattr(repo, "_git", failing_bundle)
+    with pytest.raises(BundleExportError, match="create"):
+        repo.export_maintenance_pin_bundle("bk-gen", "bar-gen", output)
+    assert not output.exists()
+    _assert_exports_clean(export_dir)
+    assert repo.read_maintenance_pin("bk-gen", "bar-gen").commit_oid == h1
+    assert _head(repo.path) == h1
+
+
+def test_export_fails_closed_when_empty_repo_verification_fails(
+        tmp_path, monkeypatch):
+    # The bundle is generated, but verification inside the brand-new
+    # empty repository fails: the staging bundle must not be published
+    # and the throwaway verification directory must not survive.
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    assert repo.create_maintenance_pin("bk-verify", "bar-verify", h1).created
+    export_dir = _export_dir(tmp_path)
+    output = export_dir / "out.bundle"
+    real_run = git_repository._run_git
+
+    def failing_verify(args, input_bytes=None, check=True, env_extra=None):
+        if len(args) >= 4 and args[0] == "-C" \
+                and args[2:4] == ["bundle", "verify"]:
+            return subprocess.CompletedProcess(
+                args=args, returncode=1, stdout=b"",
+                stderr=b"injected verification failure\n")
+        return real_run(
+            args, input_bytes=input_bytes, check=check,
+            env_extra=env_extra)
+
+    monkeypatch.setattr(git_repository, "_run_git", failing_verify)
+    with pytest.raises(BundleExportError, match="self-contained"):
+        repo.export_maintenance_pin_bundle(
+            "bk-verify", "bar-verify", output)
+    assert not output.exists()
+    _assert_exports_clean(export_dir)
+    assert repo.read_maintenance_pin(
+        "bk-verify", "bar-verify").commit_oid == h1
+    assert _head(repo.path) == h1
+
+
+def _fail_only_sam_staging_unlink(monkeypatch):
+    # Fault injection scoped to the export's own staging names: every
+    # other Path.unlink (pytest tmp cleanup, etc.) keeps working.
+    real_unlink = Path.unlink
+
+    def failing_unlink(self, missing_ok=False):
+        if self.name.startswith(".sam-bundle-") \
+                and self.name.endswith(".staging"):
+            raise OSError("injected staging unlink failure")
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+
+def test_export_reports_published_bundle_when_staging_cleanup_fails(
+        tmp_path, monkeypatch):
+    # The bundle is fully verified and hard-linked into place, but the
+    # staging name cannot be removed. The caller must learn that
+    # publication already happened (no silent swallow, no "retry is
+    # safe" signal): the finished file is usable, the leftover staging
+    # path is reported, and a retry meets the no-clobber refusal.
+    repo = _init_repo(tmp_path)
+    h1 = _append_commit(repo, tmp_path, "fact-1", "index-cleanup-h1")
+    assert repo.create_maintenance_pin("bk-clean", "bar-clean", h1).created
+    export_dir = _export_dir(tmp_path)
+    output = export_dir / "out.bundle"
+    _fail_only_sam_staging_unlink(monkeypatch)
+
+    with pytest.raises(BundleStagingCleanupError) as excinfo:
+        repo.export_maintenance_pin_bundle(
+            "bk-clean", "bar-clean", output)
+    err = excinfo.value
+    # Not a BundleExportError: the export-failure family must not be
+    # able to masquerade a completed publication as a failure.
+    assert not isinstance(err, BundleExportError)
+    assert err.published is True
+    assert err.output_path == output
+    assert output.is_file()
+    assert output.stat().st_size > 0
+    assert err.staging_path.exists()
+    assert err.staging_path.name.startswith(".sam-bundle-")
+    assert err.staging_path.name.endswith(".staging")
+    # The published bytes themselves are a valid bundle of the pin.
+    pin_ref = maintenance_pin_ref("bk-clean", "bar-clean")
+    assert _bundle_head_lines(repo.path, output) == [(h1, pin_ref)]
+    # No throwaway verification directory survives.
+    leftovers = [path.name for path in export_dir.iterdir()]
+    assert sorted(leftovers) == sorted(
+        [output.name, err.staging_path.name])
+    # A blind retry cannot overwrite the published bundle.
+    with pytest.raises(BundleOutputExistsError):
+        repo.export_maintenance_pin_bundle(
+            "bk-clean", "bar-clean", output)
+    assert output.read_bytes() == err.staging_path.read_bytes()
+    assert repo.read_maintenance_pin(
+        "bk-clean", "bar-clean").commit_oid == h1
+    assert _head(repo.path) == h1
+
+
+def test_export_reports_unpublished_cleanup_failure_with_original_error(
+        tmp_path, monkeypatch):
+    # Generation fails and the staging cleanup additionally fails: the
+    # reported error says nothing was published, names the leftover
+    # staging path, and the original creation failure stays chained.
+    repo = _init_repo(tmp_path)
+    h1 = repo.head_oid()
+    assert repo.create_maintenance_pin("bk-both", "bar-both", h1).created
+    export_dir = _export_dir(tmp_path)
+    output = export_dir / "out.bundle"
+    real_git = repo._git
+
+    def failing_bundle(args, input_bytes=None, check=True, env_extra=None):
+        if args[:1] == ["bundle"]:
+            raise GitCommandError("injected bundle creation failure")
+        return real_git(
+            args, input_bytes=input_bytes, check=check,
+            env_extra=env_extra)
+
+    monkeypatch.setattr(repo, "_git", failing_bundle)
+    _fail_only_sam_staging_unlink(monkeypatch)
+
+    with pytest.raises(BundleStagingCleanupError) as excinfo:
+        repo.export_maintenance_pin_bundle("bk-both", "bar-both", output)
+    err = excinfo.value
+    assert err.published is False
+    assert err.output_path == output
+    assert not output.exists()
+    assert err.staging_path.exists()
+    # The injected creation failure stays chained as the explicit
+    # cause, so the cleanup error never masks why the export aborted.
+    assert isinstance(err.__cause__, BundleExportError)
+    assert "create" in str(err.__cause__)
+    assert _head(repo.path) == h1
+
+
+def test_export_creates_no_objects_or_refs_in_source_repository(tmp_path):
+    # The source-side invariance in its smallest form: an export leaves
+    # the complete object and ref sets and the fsync configuration
+    # exactly as they were.
+    repo = _init_repo(tmp_path)
+    h1 = _append_commit(repo, tmp_path, "fact-1", "index-bundle-invariant")
+    assert repo.create_maintenance_pin("bk-inv", "bar-inv", h1).created
+    objects_before = _all_object_oids(repo.path)
+    refs_before = _all_ref_lines(repo.path)
+    config_before = {
+        key: _local_config_values(repo.path, key)
+        for key in _FSYNC_EXPECTED}
+    export_dir = _export_dir(tmp_path)
+    repo.export_maintenance_pin_bundle(
+        "bk-inv", "bar-inv", export_dir / "out.bundle")
+    assert _all_object_oids(repo.path) == objects_before
+    assert _all_ref_lines(repo.path) == refs_before
+    assert {
+        key: _local_config_values(repo.path, key)
+        for key in _FSYNC_EXPECTED} == config_before
+    assert _head(repo.path) == h1
+    # The source still opens cleanly with its identity intact.
+    assert FactsGitRepository.open(
+        repo.path, **_IDS).head_oid() == h1
+
+
+def test_export_pin_bundle_in_sha256_repository(tmp_path):
+    repo = _init_repo(
+        tmp_path, name="facts256-bundle.git", object_format="sha256")
+    h1 = _append_commit(
+        repo, tmp_path, "fact-1", "index-bundle256-h1")
+    assert len(h1) == 64
+    assert repo.create_maintenance_pin("bk-256", "bar-256", h1).created
+    h2 = _append_commit(
+        repo, tmp_path, "fact-2", "index-bundle256-h2")
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    output = export_dir / "h1.bundle"
+    result = repo.export_maintenance_pin_bundle(
+        "bk-256", "bar-256", output)
+    pin_ref = maintenance_pin_ref("bk-256", "bar-256")
+    assert result.pin == MaintenancePin(
+        backup_id="bk-256", barrier_id="bar-256",
+        commit_oid=h1, ref=pin_ref)
+    assert result.object_format == "sha256"
+    assert result.size_bytes == output.stat().st_size
+    assert result.size_bytes > 0
+    assert result.sha256_digest == hashlib.sha256(
+        output.read_bytes()).hexdigest()
+    assert _bundle_head_lines(repo.path, output) == [(h1, pin_ref)]
+    fresh = tmp_path / "fresh256.git"
+    _git(tmp_path, "init", "--bare", "--object-format=sha256", str(fresh))
+    assert _git(
+        fresh, "bundle", "verify", str(output), check=False).returncode == 0
+    assert _git(
+        fresh, "fetch", "--quiet", "--no-tags", str(output),
+        "%s:%s" % (pin_ref, pin_ref), check=False).returncode == 0
+    assert _git_text(fresh, "rev-parse", pin_ref).strip() == h1
+    assert _git(
+        fresh, "cat-file", "-t", h2, check=False).returncode != 0
+    assert _rev_list_oids(fresh, pin_ref) == \
+        _rev_list_oids(repo.path, pin_ref)
+    assert _head(repo.path) == h2
