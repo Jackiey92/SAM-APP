@@ -9,7 +9,15 @@ to degrade a missing O_DIRECTORY.  The path-safety tests plant symlinks
 and non-regular occupants inside tmp_path sandboxes and assert the store
 never follows them outside its explicit root; platforms that cannot
 create symlinks skip those cases loudly instead of passing them
-silently.
+silently.  The inventory tests assert the read-only sorted digest/size
+listing with per-object read-back verification, and its rejection of
+unexpected names, foreign entries, and corrupted digests without ever
+skipping, deleting, or repairing them.  The pinned-parent tests assert
+the borrowed-descriptor contract: root creation, object writes, reads,
+and the parent fsync all stay relative to the descriptor prepared by the
+mapping store — deterministically, with the parent path renamed and
+replaced by a symlink in between — and unusable descriptors are refused
+instead of degrading to path resolution.
 """
 import hashlib
 import os
@@ -19,10 +27,13 @@ from pathlib import Path
 import pytest
 
 from app.storage import versioned_mapping_objects
+from app.storage.mapping_store import _prepare_objects_parent
 from app.storage.versioned_mapping_objects import (
     InvalidDigestError,
+    MappingObjectEntry,
     ObjectMismatchError,
     ObjectMissingError,
+    UnexpectedEntryError,
     UnsafeObjectPathError,
     VersionedMappingObjectStore,
 )
@@ -508,3 +519,234 @@ def test_regular_file_at_shard_path_is_an_explicit_failure_not_missing(tmp_path)
         store.has(digest)
     with pytest.raises(UnsafeObjectPathError):
         store.put(PAYLOAD)
+
+
+def test_inventory_of_empty_store_is_empty(tmp_path):
+    store = VersionedMappingObjectStore(tmp_path / "objects")
+    assert store.inventory() == []
+
+
+def test_inventory_is_sorted_sized_and_read_verified(tmp_path):
+    store = VersionedMappingObjectStore(tmp_path / "objects")
+    # Distinct shards (29…, 9e…, ce…) plus a second payload, so the listing
+    # must merge shard-major enumeration into one global digest order.
+    payloads = [b"mapping v1", PAYLOAD, b"mapping v2"]
+    by_digest = {store.put(payload): payload for payload in payloads}
+    expected = sorted(MappingObjectEntry(digest, len(payload))
+                      for digest, payload in by_digest.items())
+    listing = store.inventory()
+    assert listing == expected
+    assert [entry.digest for entry in listing] == sorted(by_digest)
+    # Per item: every listed digest reads back exactly and the size is the
+    # exact byte length of the stored content.
+    for entry in listing:
+        data = store.get(entry.digest)
+        assert data == by_digest[entry.digest]
+        assert entry.size_bytes == len(data)
+    # Repeated listing is stable.
+    assert store.inventory() == listing
+
+
+def test_inventory_lists_duplicate_content_once(tmp_path):
+    store = VersionedMappingObjectStore(tmp_path / "objects")
+    digest = store.put(PAYLOAD)
+    assert store.put(PAYLOAD) == digest
+    assert store.inventory() == [MappingObjectEntry(digest, len(PAYLOAD))]
+
+
+def test_inventory_rejects_corrupted_object_and_never_repairs(tmp_path):
+    store = VersionedMappingObjectStore(tmp_path / "objects")
+    digest = store.put(PAYLOAD)
+    path = store.root / digest[:2] / digest
+    path.write_bytes(b"tampered")
+    with pytest.raises(ObjectMismatchError):
+        store.inventory()
+    # The corrupted bytes stay exactly as planted; nothing is repaired.
+    assert path.read_bytes() == b"tampered"
+
+
+@pytest.mark.parametrize("name", [
+    "zz", "AB", "notes.txt", "0" * 3, ".object-1-deadbeef.tmp",
+])
+def test_inventory_rejects_unknown_root_entries(tmp_path, name):
+    store = VersionedMappingObjectStore(tmp_path / "objects")
+    store.put(PAYLOAD)
+    (store.root / name).write_bytes(b"foreign")
+    with pytest.raises(UnexpectedEntryError):
+        store.inventory()
+    # Never deleted: the planted entry stays byte-identical.
+    assert (store.root / name).read_bytes() == b"foreign"
+
+
+def test_inventory_rejects_unknown_root_directory(tmp_path):
+    store = VersionedMappingObjectStore(tmp_path / "objects")
+    (store.root / "zz").mkdir()
+    with pytest.raises(UnexpectedEntryError):
+        store.inventory()
+    assert (store.root / "zz").is_dir()
+
+
+def test_inventory_rejects_non_directory_shard(tmp_path):
+    store = VersionedMappingObjectStore(tmp_path / "objects")
+    digest = store.digest_of(PAYLOAD)
+    (store.root / digest[:2]).write_bytes(b"not a shard directory")
+    with pytest.raises(UnsafeObjectPathError):
+        store.inventory()
+
+
+def test_inventory_rejects_wrong_shard_prefix_and_bad_names(tmp_path):
+    store = VersionedMappingObjectStore(tmp_path / "objects")
+    digest = store.put(PAYLOAD)
+    shard = store.root / digest[:2]
+    # sha256(b"foreign object") starts with 5c while PAYLOAD starts with ce,
+    # so this valid digest name deterministically lands in the wrong shard.
+    foreign_payload = b"foreign object"
+    foreign = hashlib.sha256(foreign_payload).hexdigest()
+    assert foreign[:2] != digest[:2]
+    (shard / foreign).write_bytes(foreign_payload)
+    with pytest.raises(UnexpectedEntryError):
+        store.inventory()
+    assert (shard / foreign).read_bytes() == foreign_payload
+    (shard / foreign).unlink()
+    (shard / "not-an-object").write_bytes(b"x")
+    with pytest.raises(UnexpectedEntryError):
+        store.inventory()
+    # Never skipped, deleted, or repaired: the planted name stays and the
+    # genuine object in the same shard is untouched.
+    assert (shard / "not-an-object").read_bytes() == b"x"
+    assert store.get(digest) == PAYLOAD
+
+
+def test_inventory_rejects_symlinked_shard(tmp_path):
+    store = VersionedMappingObjectStore(tmp_path / "objects")
+    digest = store.digest_of(PAYLOAD)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / digest).write_bytes(PAYLOAD)
+    _symlink_or_skip(outside, store.root / digest[:2])
+    with pytest.raises(UnsafeObjectPathError):
+        store.inventory()
+    assert (outside / digest).read_bytes() == PAYLOAD
+
+
+def test_inventory_rejects_symlinked_object(tmp_path):
+    store = VersionedMappingObjectStore(tmp_path / "objects")
+    digest = store.digest_of(PAYLOAD)
+    shard = store.root / digest[:2]
+    shard.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.bin"
+    # Even exact payload bytes behind the link must never be listed.
+    sentinel.write_bytes(PAYLOAD)
+    _symlink_or_skip(sentinel, shard / digest)
+    with pytest.raises(UnsafeObjectPathError):
+        store.inventory()
+    assert sentinel.read_bytes() == PAYLOAD
+
+
+def test_inventory_rejects_directory_at_object_path(tmp_path):
+    store = VersionedMappingObjectStore(tmp_path / "objects")
+    digest = store.digest_of(PAYLOAD)
+    (store.root / digest[:2] / digest).mkdir(parents=True)
+    with pytest.raises(UnsafeObjectPathError):
+        store.inventory()
+
+
+def test_pinned_parent_survives_rename_and_symlink_replacement(tmp_path):
+    """Regression for the parent check/use gap: the pin is the fd, not the path.
+
+    Preparation verifies and creates the single parent level and returns a
+    descriptor pinned to it.  The swap below is fully deterministic — no
+    concurrency, no timing: the verified directory's entry is renamed and
+    a symlink to an outside sandbox is planted at the original path before
+    the store is constructed.  Root creation, the object write, reads, and
+    inventory must all stay relative to the pinned descriptor; nothing may
+    land behind the symlink and the symlink must stay unfollowed.
+    """
+    objects_root = tmp_path / "2a" / "mapping-objects"
+    parent_fd = _prepare_objects_parent(objects_root)
+    try:
+        renamed = tmp_path / "2a-verified"
+        os.rename(tmp_path / "2a", renamed)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        _symlink_or_skip(outside, tmp_path / "2a")
+
+        store = VersionedMappingObjectStore(objects_root, parent_fd=parent_fd)
+        digest = store.put(PAYLOAD)
+
+        # The root leaf and the object landed inside the renamed verified
+        # directory the descriptor is pinned to — never behind the symlink.
+        assert (renamed / "mapping-objects").is_dir()
+        object_path = renamed / "mapping-objects" / digest[:2] / digest
+        assert object_path.read_bytes() == PAYLOAD
+        assert list(outside.iterdir()) == []
+        # The symlink is still exactly the planted, unfollowed link.
+        assert os.path.islink(tmp_path / "2a")
+        assert os.readlink(tmp_path / "2a") == str(outside)
+        # Reads and inventory through the same pinned store stay inside.
+        assert store.get(digest) == PAYLOAD
+        assert store.has(digest) is True
+        assert store.inventory() == [MappingObjectEntry(digest, len(PAYLOAD))]
+        # The store only borrows the descriptor: it is still open and the
+        # caller stays responsible for closing it.
+        assert stat.S_ISDIR(os.fstat(parent_fd).st_mode)
+    finally:
+        os.close(parent_fd)
+
+
+def test_parent_fd_validation_is_fail_closed(tmp_path):
+    """A refused parent descriptor never degrades to path resolution."""
+    root = tmp_path / "objects"
+    # A descriptor referencing a regular file is not a pinned directory.
+    regular = tmp_path / "regular"
+    regular.write_bytes(b"x")
+    fd = os.open(regular, os.O_RDONLY)
+    try:
+        with pytest.raises(UnsafeObjectPathError):
+            VersionedMappingObjectStore(root, parent_fd=fd)
+    finally:
+        os.close(fd)
+    # A closed descriptor is refused instead of silently re-resolving the
+    # parent path.
+    dead = os.open(tmp_path, os.O_RDONLY)
+    os.close(dead)
+    with pytest.raises(ValueError):
+        VersionedMappingObjectStore(root, parent_fd=dead)
+    # Non-descriptors never reach the filesystem.
+    with pytest.raises(TypeError):
+        VersionedMappingObjectStore(root, parent_fd=str(tmp_path))
+    # Nothing was created through any refused descriptor, and the plain
+    # regular file stays untouched.
+    assert not root.exists()
+    assert regular.read_bytes() == b"x"
+
+
+def test_pinned_parent_fsyncs_the_borrowed_descriptor(tmp_path, monkeypatch):
+    """The construction-time parent sync targets the pinned fd itself."""
+    parent = tmp_path / "2a"
+    parent.mkdir()
+    parent_fd = os.open(parent,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                        | os.O_CLOEXEC)
+    synced = []
+    real_fsync = os.fsync
+
+    def recording_fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            synced.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    try:
+        store = VersionedMappingObjectStore(parent / "objects",
+                                            parent_fd=parent_fd)
+        assert (parent / "objects").is_dir()
+        # Exactly one directory sync, on the borrowed descriptor itself —
+        # the parent was never reopened by path for the sync.
+        assert synced == [parent_fd]
+        digest = store.put(PAYLOAD)
+        assert (parent / "objects" / digest[:2] / digest).read_bytes() == PAYLOAD
+    finally:
+        os.close(parent_fd)

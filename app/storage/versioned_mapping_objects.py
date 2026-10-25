@@ -26,6 +26,21 @@ to an absolute path at construction, so a later chdir can never relocate the
 store; the conversion is lexical and keeps symlink components intact for the
 no-symlink boundary below.
 
+Parent pinning: a caller that verified the root's parent directory itself —
+the mapping-store preparation creates and verifies that single level
+relative to a pinned grandparent descriptor — can hand the verified
+directory to the constructor as ``parent_fd``.  The store borrows the
+descriptor for its lifetime and never closes it; the caller retains
+ownership and closes it once the store is done.  While it is borrowed, the
+root leaf's creation, every root open, and the parent fsync all run
+exclusively relative to that descriptor, so the parent path is never
+re-resolved and a parent renamed or replaced by a symlink after
+verification cannot redirect any store operation.  Pinned construction
+never falls back to path-based preparation: a non-descriptor, an unusable
+descriptor, or one that does not reference a directory is refused at
+construction.  Without ``parent_fd`` the path-based contract above is
+unchanged.
+
 Path safety: the store never follows symbolic links at the configured root,
 the digest-shard directory, or the object path.  Every lookup and write is
 issued relative to directory descriptors opened with ``O_NOFOLLOW`` (plus
@@ -40,6 +55,26 @@ the no-symlink boundary needs POSIX ``dir_fd``/``O_NOFOLLOW`` support plus
 ``O_DIRECTORY`` for directory-only opens; a platform missing any of them is
 refused explicitly at construction instead of silently degrading a missing
 flag to ``0``.
+
+Inventory: :meth:`VersionedMappingObjectStore.inventory` is a read-only,
+digest-sorted listing that re-reads and hash-verifies every object it
+enumerates.  Each returned record proves only that, at the moment that
+object was read, it was a regular file whose bytes matched its digest; an
+enumerated object that vanishes before its open or read raises instead of
+being dropped.  The listing guarantees nothing about any object at or
+after the moment the method returns — a returned object may since have
+been changed or removed by anything with filesystem access — and it is not
+an atomic snapshot: each directory contributes only the entries its own
+listdir observed, and only those enumerated entries are validated one by
+one.  A concurrent write that lands after the relevant listdir — a new
+object in an already-enumerated shard, or a brand-new shard — is silently
+absent from the result instead of raising, so the listing may be
+incomplete and forms no consistent R-backup closure; without an external
+maintenance barrier it must not be consumed as one.  Enumerated entries
+still fail closed: wrong shard or object names, unknown directory entries
+(including an in-flight temporary visible at enumeration time),
+non-regular occupants, and corrupted digests are explicit failures;
+nothing is skipped, deleted, or repaired.
 """
 from __future__ import annotations
 
@@ -50,8 +85,10 @@ import re
 import secrets
 import stat
 from pathlib import Path
+from typing import NamedTuple
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+_SHARD_RE = re.compile(r"[0-9a-f]{2}")
 
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -60,6 +97,9 @@ _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 
 # dir_fd-relative open/mkdir/link/unlink plus O_NOFOLLOW are what make the
 # no-symlink boundary atomic; without them the guarantee cannot be enforced.
+# Inventory enumeration additionally needs listdir to accept a held directory
+# descriptor (os.listdir is fd-capable, not dir_fd-capable), which the
+# constructor checks separately.
 _DIR_FD_PRIMITIVES = (os.open, os.mkdir, os.link, os.unlink)
 
 
@@ -83,6 +123,21 @@ class UnsafeObjectPathError(RuntimeError):
     """
 
 
+class UnexpectedEntryError(RuntimeError):
+    """Inventory found a directory entry that cannot be a valid object.
+
+    Wrong shard or object names and unknown entries under the storage root
+    are explicit failures; inventory never skips, deletes, or repairs them.
+    """
+
+
+class MappingObjectEntry(NamedTuple):
+    """One inventory-verified object: lowercase SHA-256 digest and byte size."""
+
+    digest: str
+    size_bytes: int
+
+
 def _validate_digest(digest: str) -> str:
     if not isinstance(digest, str) or not _DIGEST_RE.fullmatch(digest):
         raise InvalidDigestError("digest must be a lowercase sha256 hex digest")
@@ -99,26 +154,73 @@ def _unlink_quietly(shard_fd: int, name: str) -> None:
 class VersionedMappingObjectStore:
     """Create-only SHA-256-addressed byte objects under an explicit root."""
 
-    def __init__(self, root: Path | str) -> None:
+    def __init__(self, root: Path | str, *, parent_fd: int | None = None) -> None:
+        """Store rooted at ``root``, optionally pinned to ``parent_fd``.
+
+        ``parent_fd`` is a descriptor the caller already verified as
+        ``root.parent`` (e.g. from the mapping-store preparation).  The
+        store only borrows it — the caller retains ownership and must
+        close it; the store itself never does.  While borrowed, root
+        creation, every root open, and the parent fsync stay relative to
+        that descriptor and the parent path is never re-resolved; an
+        unusable or non-directory descriptor is refused here instead of
+        falling back to unverified path resolution.  Without ``parent_fd``
+        the historical path-based construction contract is unchanged.
+        """
         if root is None or not str(root):
             raise ValueError("an explicit storage root is required")
         if _O_NOFOLLOW == 0 or _O_DIRECTORY == 0 or not all(
             fn in os.supports_dir_fd for fn in _DIR_FD_PRIMITIVES
-        ):
+        ) or os.listdir not in os.supports_fd:
             raise RuntimeError(
                 "symlink-safe object storage requires POSIX dir_fd, "
-                "O_NOFOLLOW and O_DIRECTORY support; this platform cannot "
-                "enforce the no-symlink boundary or directory-only opens, "
-                "so the store refuses to run here instead of silently "
-                "degrading a missing flag to 0"
+                "fd-based listdir, O_NOFOLLOW and O_DIRECTORY support; "
+                "this platform cannot enforce the no-symlink boundary, "
+                "directory-only opens, or descriptor-pinned inventory "
+                "enumeration, so the store refuses to run here instead of "
+                "silently degrading a missing flag to 0"
             )
         # Freeze the absolute path at construction so a later chdir can
         # never relocate the store; abspath is lexical (not resolve()), so
         # symlink components stay intact for the O_NOFOLLOW checks below.
         self.root = Path(os.path.abspath(root))
+        self._parent_fd = self._borrow_parent_fd(parent_fd)
         self._ensure_root_durable()
         root_fd = self._open_root()
         os.close(root_fd)
+
+    @staticmethod
+    def _borrow_parent_fd(parent_fd: int | None) -> int | None:
+        """Validate the caller-owned parent descriptor the store borrows.
+
+        Ownership stays with the caller: the store uses the descriptor for
+        root-relative creation, opens, and the parent fsync, and never
+        closes it.  Fail-closed: a non-descriptor raises ``TypeError``, an
+        unusable (e.g. already closed) descriptor raises ``ValueError``,
+        and a descriptor that does not reference a directory raises
+        :class:`UnsafeObjectPathError`; none of them ever degrades into
+        re-resolving the parent by path.
+        """
+        if parent_fd is None:
+            return None
+        if isinstance(parent_fd, bool) or not isinstance(parent_fd, int):
+            raise TypeError(
+                "parent_fd must be an open directory descriptor or None"
+            )
+        try:
+            st = os.fstat(parent_fd)
+        except OSError as exc:
+            raise ValueError(
+                "parent_fd is not a usable open descriptor; pinned "
+                "construction never falls back to re-resolving the "
+                "parent path"
+            ) from exc
+        if not stat.S_ISDIR(st.st_mode):
+            raise UnsafeObjectPathError(
+                "parent_fd does not reference a directory; refusing to "
+                "use it as the pinned parent"
+            )
+        return parent_fd
 
     def _ensure_root_durable(self) -> None:
         """Create the root leaf if needed and fsync its parent directory.
@@ -132,9 +234,25 @@ class VersionedMappingObjectStore:
         regular file, FIFO, or symlink — fails closed as
         :class:`UnsafeObjectPathError` through the no-follow root open and
         is never leaked as a raw ``FileExistsError``; a genuine directory
-        that appeared concurrently still receives the parent fsync.  Path
+        that appeared concurrently still receives the parent fsync.
+
+        With a pinned parent descriptor the creation, the occupant type
+        re-check, and the parent fsync all run relative to that descriptor
+        and the parent path is never re-resolved: the descriptor itself is
+        the verified parent, so it is fsynced directly.  Without one, path
         components above the root remain the caller's responsibility.
         """
+        if self._parent_fd is not None:
+            try:
+                os.mkdir(self.root.name, dir_fd=self._parent_fd)
+            except FileExistsError:
+                # Same contract as path mode: the occupant's type is
+                # decided atomically by the pinned O_NOFOLLOW/O_DIRECTORY
+                # open below, never by a symlink-following probe; a
+                # genuine directory falls through to the parent fsync.
+                os.close(self._open_root())
+            os.fsync(self._parent_fd)
+            return
         parent = self.root.parent
         try:
             self.root.mkdir(exist_ok=True)
@@ -201,7 +319,7 @@ class VersionedMappingObjectStore:
                 # may never have had its root entry synced to stable
                 # storage, so the root sync below is never skipped.
                 pass
-            shard_fd = self._open_shard_fd(root_fd, digest)
+            shard_fd = self._open_shard_fd(root_fd, digest[:2])
             try:
                 tmp_name = self._write_temp(shard_fd, data)
                 try:
@@ -250,9 +368,92 @@ class VersionedMappingObjectStore:
         """
         return self._read_object(digest) is not None
 
-    def _open_root(self) -> int:
-        """Open the configured root as a real directory, never via symlink."""
+    def inventory(self) -> list[MappingObjectEntry]:
+        """List enumerated stored objects as ``(digest, size_bytes)``, sorted.
+
+        Read-only and fail-closed for everything actually enumerated: each
+        listed object's bytes are re-read and hash-verified while
+        enumerating, so a corrupted object raises
+        :class:`ObjectMismatchError`; a wrong shard or object name, an
+        unknown root/shard entry (including an in-flight temporary visible
+        at enumeration time), or an object name whose prefix does not match
+        its shard raises :class:`UnexpectedEntryError`; and a symlinked,
+        directory, or other non-regular occupant raises
+        :class:`UnsafeObjectPathError`.  Nothing enumerated is ever
+        skipped, deleted, or repaired, and an enumerated entry that
+        vanishes mid-run raises :class:`ObjectMissingError` instead of
+        being silently dropped.  Enumeration runs through descriptors
+        opened with ``O_NOFOLLOW``/``O_DIRECTORY``, so no symlinked root or
+        shard component is ever followed.
+
+        Each returned record proves only that, at the moment this method
+        read that object, it was a regular file whose bytes matched its
+        digest; an enumerated object that vanishes before its open or read
+        raises :class:`ObjectMissingError`.  Nothing is guaranteed about
+        any object at or after the moment the method returns — a returned
+        object may since have been changed or removed by anything with
+        filesystem access — so the result is not a point-in-time inventory
+        of the store.
+
+        This listing implements no concurrency barrier and is not an atomic
+        snapshot: each directory contributes only the entries its own
+        listdir observed, and only those enumerated entries are validated
+        one by one.  A concurrent write that lands after the relevant
+        listdir — a new object in an already-enumerated shard, or a
+        brand-new shard under the root — is therefore silently absent from
+        the result instead of raising.  The listing may thus be incomplete
+        and forms no consistent R-backup closure; without an external
+        maintenance barrier it must not be consumed as one.
+        """
+        entries: list[MappingObjectEntry] = []
+        root_fd = self._open_root()
         try:
+            for shard_name in sorted(os.listdir(root_fd)):
+                if not _SHARD_RE.fullmatch(shard_name):
+                    raise UnexpectedEntryError(
+                        f"unexpected root entry {shard_name!r}; only "
+                        "lowercase two-hex-digit digest shard directories "
+                        "are allowed"
+                    )
+                shard_fd = self._open_shard_fd(root_fd, shard_name)
+                try:
+                    for name in sorted(os.listdir(shard_fd)):
+                        if not _DIGEST_RE.fullmatch(name) \
+                                or name[:2] != shard_name:
+                            raise UnexpectedEntryError(
+                                f"unexpected entry {name!r} in shard "
+                                f"{shard_name!r}; only lowercase sha256 "
+                                "object names matching the shard prefix "
+                                "are allowed"
+                            )
+                        data = self._read_verified(shard_fd, name)
+                        if data is None:
+                            raise ObjectMissingError(name)
+                        entries.append(MappingObjectEntry(name, len(data)))
+                finally:
+                    os.close(shard_fd)
+        finally:
+            os.close(root_fd)
+        # Shard-major enumeration with prefix-matched names is already
+        # digest-sorted; the explicit sort pins the contract regardless.
+        entries.sort(key=lambda entry: entry.digest)
+        return entries
+
+    def _open_root(self) -> int:
+        """Open the configured root as a real directory, never via symlink.
+
+        With a pinned parent descriptor the root is opened by its leaf
+        name relative to that descriptor, so resolution never touches the
+        parent path — a parent renamed or replaced by a symlink after
+        verification cannot redirect the open.  Without one, the frozen
+        absolute path is used and O_NOFOLLOW guards its final component.
+        """
+        try:
+            if self._parent_fd is not None:
+                return os.open(self.root.name,
+                               os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW
+                               | _O_CLOEXEC,
+                               dir_fd=self._parent_fd)
             return os.open(self.root,
                            os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW
                            | _O_CLOEXEC)
@@ -265,22 +466,22 @@ class VersionedMappingObjectStore:
             raise
 
     @staticmethod
-    def _open_shard_fd(root_fd: int, digest: str) -> int:
-        """Open the digest shard below ``root_fd`` as a real directory."""
+    def _open_shard_fd(root_fd: int, shard: str) -> int:
+        """Open a two-hex-digit shard below ``root_fd`` as a real directory."""
         try:
-            return os.open(digest[:2],
+            return os.open(shard,
                            os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW
                            | _O_CLOEXEC,
                            dir_fd=root_fd)
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 raise UnsafeObjectPathError(
-                    f"digest shard {digest[:2]} is a symbolic link; "
+                    f"digest shard {shard} is a symbolic link; "
                     "refusing to follow it"
                 ) from None
             if exc.errno == errno.ENOTDIR:
                 raise UnsafeObjectPathError(
-                    f"digest shard {digest[:2]} is not a directory"
+                    f"digest shard {shard} is not a directory"
                 ) from None
             raise
 
@@ -337,7 +538,7 @@ class VersionedMappingObjectStore:
             return None
         try:
             try:
-                shard_fd = self._open_shard_fd(root_fd, digest)
+                shard_fd = self._open_shard_fd(root_fd, digest[:2])
             except FileNotFoundError:
                 return None
             try:

@@ -18,6 +18,10 @@ _PROTECTED += [Path(value).resolve() for key, value in os.environ.items()
                if key.startswith('SAM_') and key.endswith('DB') and value]
 for key in data_keys(os.environ):
     os.environ[key] = str(_ROOT / key.lower())
+# The content-addressed object store creates only its configured leaf and
+# fsyncs the parent, refusing recursive mkdir; the isolated SAM_2A_ROOT must
+# therefore exist before any test imports or constructs a store.
+Path(os.environ['SAM_2A_ROOT']).mkdir()
 os.environ['SAM_TEST_ROOT'] = str(_ROOT)
 os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
 os.environ['TMPDIR'] = str(_ROOT / 'tmp')

@@ -27,11 +27,21 @@ class StagingStore:
         # Explicit DBs keep test/scoped output away from the product store.
         root = evidence_root() if db_path is None or os.environ.get("SAM_2A_ROOT") else Path(db_path).parent / "2a"
         self.maps_path = Path(maps_path) if maps_path is not None else root / "map"
+        # Immutable mapping objects live in the explicit sibling of the maps
+        # root, so the same configuration always resolves to the same store
+        # root as SourceMapService; nothing here reads environment variables
+        # or the current working directory beyond the configured paths.  The
+        # object store creates only this leaf; persist_latest_mapping
+        # prepares its parent (the maps root's parent) as at most a single
+        # durable directory level before the first object write.
+        self.mapping_objects_path = self.maps_path.parent / "mapping-objects"
 
     def _rebuild_map(self, conn, file_hash: str) -> None:
         from ..storage.mapping_store import persist_latest_mapping
         from ..storage.archive_paths import hash_relpath
-        persist_latest_mapping(conn, file_hash, self.maps_path / hash_relpath(file_hash, mapping=True))
+        persist_latest_mapping(conn, file_hash,
+                               self.maps_path / hash_relpath(file_hash, mapping=True),
+                               self.mapping_objects_path)
 
     def _conn(self):
         from ..db.database import connect as c
