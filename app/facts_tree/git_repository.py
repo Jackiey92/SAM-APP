@@ -83,6 +83,28 @@ Guarantees enforced here:
   A tree carrying none of the three families passes with three empty
   collections; any closure failure raises GitRepositoryError before the
   ref can move.
+- accept() additionally enforces, on that same pre-CAS leg, the
+  operation/event cross-record closure of approved design 97 §3, §4
+  item 5 (操作闭合) and §5 (事件契约): every operation and event record
+  of the whole accepted commit C is parsed with git_format.loads_record
+  from the exact bytes the physical tree-validation leg already read and
+  validated, and handed to
+  operation_event_closure.validate_operation_event_closure under the
+  repo_id/company_id bound to this instance and the repository object
+  format, so typed event_ids listings, event ownership, scope, ordinals
+  and the operation/event base_commit agreement close exactly inside C;
+  two empty collections pass. That payload-level validator never sees
+  Git paths, so on the same leg every event record is additionally bound
+  to its path per design 97 §4 item 1 (路径身份): the path must equal
+  git_format.record_path("event", event_id=...) rebuilt from that
+  payload's own event_id, and a mismatch refuses the commit. Only
+  operation records newly added by this commit (operation paths absent
+  from the accepted parent tree already listed for append-only
+  retention) are additionally bound to this commit's own parent H:
+  their base_commit must equal expected_old, including the all-zero
+  genesis form. Old operation records are append-only, so their original
+  base_commit stays valid in every later commit and is never compared
+  against the then-current parent.
 - build_tree() materializes a caller-assembled complete final snapshot
   of (repository-relative path, canonical JSON bytes) records into Git
   blob and tree objects and returns the root tree OID. Before any
@@ -195,6 +217,7 @@ from app.facts_tree import candidate_reference_closure
 from app.facts_tree import git_append_only
 from app.facts_tree import git_format
 from app.facts_tree import git_tree_validation
+from app.facts_tree import operation_event_closure
 
 REF_FACTS = "refs/heads/facts"
 # CHG-066 section 3 step 4 / section 4: the dedicated maintenance
@@ -214,6 +237,11 @@ _CANDIDATE_CLOSURE_FAMILIES = (
     "operation",
     "consumed_candidate",
 )
+# Design 97 §3, §4 item 5 and §5: the two record families accept()
+# closes cross-record inside the one accepted commit C. Classification
+# goes through git_format.canonical_record_type, so no path template is
+# duplicated.
+_OPERATION_EVENT_CLOSURE_FAMILIES = frozenset(("operation", "event"))
 GIT_TIMEOUT_SECONDS = 30
 _OBJECT_FORMAT_OID_LENGTH = {"sha1": 40, "sha256": 64}
 _HEX_DIGITS = frozenset("0123456789abcdef")
@@ -705,6 +733,32 @@ class FactsGitRepository:
           identity bound to this instance (the records' own scope fields
           are never trusted as the expected scope). A tree carrying none
           of the three families passes with three empty collections.
+        - the operation/event cross-record closure of design 97 §3, §4
+          item 5 and §5 is enforced next, on the same validated bytes:
+          every operation and event record of the whole commit C is
+          parsed with git_format.loads_record from content_by_path (the
+          physical leg's exact bytes, never re-read from Git) and closed
+          through
+          operation_event_closure.validate_operation_event_closure under
+          the bound repo_id/company_id and this repository's object
+          format. event_ids listings must resolve to events of the same
+          operation in this commit, no event may be an orphan, ordinals
+          must be consecutive and an operation must agree with its
+          events on base_commit; two empty collections pass. Because
+          that payload-level closure never sees Git paths, each event is
+          then bound to its path per design 97 §4 item 1 (路径身份): the
+          path must equal record_path("event", event_id=...) rebuilt
+          from that payload's own event_id, and a mismatch refuses the
+          commit before the CAS. On top of that whole-commit closure,
+          only the operation records this commit newly adds (paths
+          absent from the accepted parent tree already listed for
+          append-only retention) are bound to this commit's own parent
+          H: their base_commit must equal expected_old, including the
+          all-zero genesis form. Old
+          operation records survive unchanged under append-only
+          retention and their original base_commit is deliberately not
+          compared to the current parent, so an operation first accepted
+          at an earlier commit stays valid in every later commit C.
         - the repository's effective local fsync configuration is
           re-verified against the exact section 10.9.1 policy
           (_FSYNC_POLICY) immediately before the swap: a missing,
@@ -743,8 +797,11 @@ class FactsGitRepository:
                 "expected_old %s, got %s" % (expected_old, parents))
         new_entries, content_by_path = self._validate_commit_tree(
             new_oid, expected_paths)
-        self._validate_append_only_retention(expected_old, new_entries)
+        base_entries = self._validate_append_only_retention(
+            expected_old, new_entries)
         self._validate_candidate_closure(new_entries, content_by_path)
+        self._validate_operation_event_closure(
+            expected_old, new_entries, content_by_path, base_entries)
         # Last guard before the authoritative ref moves: the section
         # 10.9.1 durability configuration is re-read through Git, so a
         # repository whose policy was removed or drifted since open()
@@ -873,6 +930,10 @@ class FactsGitRepository:
         # and trivially passes. The repository identity record is not
         # part of the compared append-only set; accept() guarantees its
         # immutability through the identity-record comparison above.
+        # Returns the parent's blob entries as (path, oid) tuples: the
+        # operation/event closure leg reuses exactly this listing to
+        # tell newly added operation paths apart from retained ones, so
+        # the parent tree is listed only once for both checks.
         if expected_old == self.zero_oid:
             base_entries = []
         else:
@@ -893,6 +954,96 @@ class FactsGitRepository:
             raise GitRepositoryError(
                 "accepted commit violates append-only retention: %s"
                 % exc) from exc
+        return base_entries
+
+    def _validate_operation_event_closure(self, expected_old, new_entries,
+                                          content_by_path, base_entries):
+        # Design 97 §3 (the operation/event rows), §4 item 5 (操作闭合)
+        # and §5 (事件契约): after the physical tree validation, the
+        # append-only retention comparison and the candidate closure,
+        # every operation and event record of the whole accepted commit
+        # C is collected from the exact bytes the physical leg validated
+        # and handed to the pure operation/event closure validator:
+        # event_ids listings must resolve to events of the same
+        # operation in this one commit, no event may be an orphan, the
+        # scope/ordinal rules must hold, an operation must agree with
+        # its events on base_commit and an event never embeds its own
+        # accepted commit. That validator compares payload identities
+        # only and never sees the Git path an event was read from, so
+        # right after it every event is bound to its path per §4 item 1
+        # (路径身份): record_path("event", event_id=...) rebuilt from
+        # the payload's own event_id must equal the tree path exactly.
+        # The closure pass has just proved event_id is present and a
+        # legal encode_id id, so record_path() cannot raise here; an
+        # event body naming a different identity than its path is
+        # refused before the CAS. The parent binding on top of that
+        # whole-commit check applies only to operations this commit
+        # newly adds: append-only retention has already proved an
+        # operation path present in the parent keeps identical bytes,
+        # so "absent from the parent path set" is exactly the set of
+        # newly introduced operations, and only those must carry
+        # base_commit equal to expected_old (this commit's own parent H,
+        # including the all-zero genesis form). A retained operation's
+        # original base_commit names an earlier commit by construction
+        # and must remain valid in a later commit. Everything here runs
+        # before the fsync recheck and the REF_FACTS CAS, so a closure
+        # failure leaves the ref at its previous value. Two empty
+        # collections (genesis and ordinary snapshots) pass.
+        operations = []
+        events = []
+        for path, _oid in sorted(new_entries):
+            family = git_format.canonical_record_type(path)
+            if family not in _OPERATION_EVENT_CLOSURE_FAMILIES:
+                continue
+            try:
+                payload = git_format.loads_record(content_by_path[path])
+            except (TypeError, ValueError) as exc:
+                raise GitRepositoryError(
+                    "accepted commit %s record at %r is not a valid "
+                    "canonical record: %s" % (family, path, exc)) from exc
+            if family == "operation":
+                operations.append((path, payload))
+            else:
+                events.append((path, payload))
+        try:
+            operation_event_closure.validate_operation_event_closure(
+                [payload for _path, payload in operations],
+                [payload for _path, payload in events],
+                repo_id=self._expected_meta["repo_id"],
+                company_id=self._expected_meta["company_id"],
+                object_format=self.object_format)
+        except (TypeError, ValueError) as exc:
+            raise GitRepositoryError(
+                "accepted commit failed operation/event closure: %s"
+                % exc) from exc
+        # Design 97 §4 item 1 (路径身份), event family: the pure closure
+        # only compares payload-level event_id values, so an event body
+        # whose event_id disagrees with its canonical tree path must be
+        # refused here. The check rides on the same validated bytes and
+        # runs, like everything in this method, before the fsync recheck
+        # and the REF_FACTS CAS; operation path identity is already
+        # covered by the candidate path/payload identity leg above.
+        for path, event in events:
+            canonical_path = git_format.record_path(
+                "event", event_id=event["event_id"])
+            if canonical_path != path:
+                raise GitRepositoryError(
+                    "accepted commit event record at %r carries event_id "
+                    "%r, whose canonical record_path() is %r; an event's "
+                    "path must be rebuilt from its payload's own event_id"
+                    % (path, event["event_id"], canonical_path))
+        parent_operation_paths = {
+            path for path, _oid in base_entries
+            if git_format.canonical_record_type(path) == "operation"}
+        for path, operation in operations:
+            if path in parent_operation_paths:
+                continue
+            if operation["base_commit"] != expected_old:
+                raise GitRepositoryError(
+                    "new operation record at %r is bound to base_commit %r, "
+                    "not the accepted parent expected_old %s; a newly "
+                    "accepted operation must build on this commit's own "
+                    "parent" % (path, operation["base_commit"], expected_old))
 
     def _validate_candidate_closure(self, new_entries, content_by_path):
         # Design 97 §4 item 1 (结构与作用域: 路径身份) and item 5 (操作

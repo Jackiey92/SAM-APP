@@ -911,7 +911,12 @@ def _candidate_input_payload(candidate_uid=_CAND1_UID,
 
 
 def _candidate_operation_payload(operation_id="op-1", refs=(_CAND1_REF,),
-                                 **overrides):
+                                 base_commit=None, event_ids=(), **overrides):
+    # The accept-time operation/event closure leg additionally requires
+    # base_commit and event_ids on every operation, so candidate-closure
+    # fixtures carry them: base_commit is the parent the synthetic
+    # accepting commit is built on (almost always genesis), and these
+    # candidate scenarios list no events.
     payload = {
         "schema_version": 1,
         "record_type": "operation",
@@ -919,6 +924,8 @@ def _candidate_operation_payload(operation_id="op-1", refs=(_CAND1_REF,),
         "repo_id": _IDS["repo_id"],
         "company_id": _IDS["company_id"],
         "candidate_refs": list(refs),
+        "base_commit": base_commit,
+        "event_ids": list(event_ids),
     }
     payload.update(overrides)
     return payload
@@ -942,13 +949,15 @@ def _candidate_consumed_payload(candidate_uid=_CAND1_UID,
     return payload
 
 
-def _closed_candidate_records():
+def _closed_candidate_records(base_commit):
     # One of each family, mutually closed inside one commit: the input
     # is referenced by the operation and terminally consumed through
-    # that same operation's typed reference.
+    # that same operation's typed reference. The operation binds itself
+    # to the accepting commit's parent (base_commit) and lists no events.
     return [
         (_candidate_input_path(), _candidate_input_payload()),
-        (_candidate_operation_path(), _candidate_operation_payload()),
+        (_candidate_operation_path(),
+         _candidate_operation_payload(base_commit=base_commit)),
         (_candidate_consumed_path(), _candidate_consumed_payload()),
     ]
 
@@ -968,7 +977,7 @@ def _tree_with_records(repo_path, base_tree, records, tmp_path, index_name):
 def test_accept_closes_candidate_records_and_advances_ref(tmp_path):
     repo = _init_repo(tmp_path)
     genesis = repo.head_oid()
-    records = _closed_candidate_records()
+    records = _closed_candidate_records(genesis)
     paths = [path for path, _payload in records]
     tree = _tree_with_records(
         repo.path, _tree_oid(repo.path, genesis), records, tmp_path,
@@ -997,7 +1006,8 @@ def test_accept_rejects_candidate_path_payload_identity_mismatch(tmp_path):
     planted_path = _candidate_input_path(candidate_uid="cand-2")
     records = [
         (planted_path, _candidate_input_payload()),
-        (_candidate_operation_path(), _candidate_operation_payload()),
+        (_candidate_operation_path(),
+         _candidate_operation_payload(base_commit=genesis)),
         (_candidate_consumed_path(), _candidate_consumed_payload()),
     ]
     paths = [path for path, _payload in records]
@@ -1037,7 +1047,7 @@ def test_accept_rejects_unclosed_candidate_reference_without_moving_ref(
     records = [
         (_candidate_input_path(), _candidate_input_payload()),
         (_candidate_operation_path(),
-         _candidate_operation_payload(refs=refs)),
+         _candidate_operation_payload(refs=refs, base_commit=genesis)),
         (_candidate_consumed_path(), _candidate_consumed_payload()),
     ]
     paths = [path for path, _payload in records]
@@ -1062,7 +1072,8 @@ def test_accept_rejects_candidate_record_claiming_foreign_scope(tmp_path):
         (_candidate_input_path(),
          _candidate_input_payload(company_id="co-other")),
         (_candidate_operation_path(),
-         _candidate_operation_payload(company_id="co-other")),
+         _candidate_operation_payload(base_commit=genesis,
+                                      company_id="co-other")),
         (_candidate_consumed_path(),
          _candidate_consumed_payload(company_id="co-other")),
     ]
@@ -1108,7 +1119,7 @@ def test_accept_closure_consumes_validated_tree_bytes_without_reread(
     # accept uses the <commit>:<path> form and is not a bare-OID read.
     repo = _init_repo(tmp_path)
     genesis = repo.head_oid()
-    records = _closed_candidate_records()
+    records = _closed_candidate_records(genesis)
     paths = [path for path, _payload in records]
     tree = _tree_with_records(
         repo.path, _tree_oid(repo.path, genesis), records, tmp_path,
@@ -1131,6 +1142,293 @@ def test_accept_closure_consumes_validated_tree_bytes_without_reread(
     assert len(blob_reads) == 4
     assert len(set(blob_reads)) == len(blob_reads)
     assert repo.head_oid() == commit
+
+
+# Design 97 §3, §4 item 5 (操作闭合) and §5 (事件契约): the
+# operation/event cross-record closure and the new-operation parent
+# binding enforced on accept(). Fixture operations carry candidate_refs
+# as well (the candidate closure leg runs on the same commit) but list
+# no candidates here; payloads carry only closure fields plus harmless
+# record_type/schema_version extras, not the full business schema.
+_OE_OP_ID = "op-evt-1"
+_OE_EVENT_ID = "evt-1"
+
+
+def _oe_operation_path(operation_id=_OE_OP_ID):
+    return git_format.record_path("operation", operation_id=operation_id)
+
+
+def _oe_event_path(event_id=_OE_EVENT_ID):
+    return git_format.record_path("event", event_id=event_id)
+
+
+def _oe_operation_payload(operation_id=_OE_OP_ID, *, base_commit,
+                          event_ids=(_OE_EVENT_ID,), **overrides):
+    payload = {
+        "schema_version": 1,
+        "record_type": "operation",
+        "operation_id": operation_id,
+        "repo_id": _IDS["repo_id"],
+        "company_id": _IDS["company_id"],
+        "candidate_refs": [],
+        "base_commit": base_commit,
+        "event_ids": list(event_ids),
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _oe_event_payload(event_id=_OE_EVENT_ID, operation_id=_OE_OP_ID, *,
+                      base_commit, ordinal=0, **overrides):
+    payload = {
+        "schema_version": 1,
+        "record_type": "event",
+        "event_id": event_id,
+        "operation_id": operation_id,
+        "repo_id": _IDS["repo_id"],
+        "company_id": _IDS["company_id"],
+        "base_commit": base_commit,
+        "ordinal": ordinal,
+        "event_type": "fact_revision_committed",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _closed_operation_event_records(base_commit, operation_id=_OE_OP_ID,
+                                    event_id=_OE_EVENT_ID, ordinal=0):
+    # One new operation plus its one event, mutually closed inside one
+    # commit and both bound to the same parent base_commit.
+    return [
+        (_oe_operation_path(operation_id),
+         _oe_operation_payload(
+             operation_id=operation_id, base_commit=base_commit,
+             event_ids=[event_id])),
+        (_oe_event_path(event_id),
+         _oe_event_payload(
+             event_id=event_id, operation_id=operation_id,
+             base_commit=base_commit, ordinal=ordinal)),
+    ]
+
+
+def test_accept_closes_operation_event_pair_and_advances_ref(tmp_path):
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = _closed_operation_event_records(genesis)
+    paths = [path for path, _payload in records]
+    tree = _tree_with_records(
+        repo.path, _tree_oid(repo.path, genesis), records, tmp_path,
+        "index-oe-ok")
+    commit = repo.create_commit(tree, genesis)
+    assert repo.accept(
+        genesis, commit,
+        expected_paths=_accept_paths(*paths)).accepted
+    assert repo.head_oid() == commit
+    assert _head(repo.path) == commit
+    snapshot = repo.read_snapshot_at(commit)
+    assert {record.path for record in snapshot.records} == \
+        set(paths) | {_META_PATH}
+    assert FactsGitRepository.open(repo.path, **_IDS).head_oid() == commit
+
+
+def test_accept_rejects_new_operation_bound_to_wrong_base_before_cas(
+        tmp_path):
+    # The operation and its event agree with each other, so the generic
+    # whole-commit closure passes, but both bind to a base_commit that is
+    # not this commit's parent H. Only the new-operation parent binding
+    # can refuse this, and it must happen before the CAS.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    wrong_base = "f" * 40
+    records = [
+        (_oe_operation_path(),
+         _oe_operation_payload(base_commit=wrong_base)),
+        (_oe_event_path(), _oe_event_payload(base_commit=wrong_base)),
+    ]
+    paths = [path for path, _payload in records]
+    tree = _tree_with_records(
+        repo.path, _tree_oid(repo.path, genesis), records, tmp_path,
+        "index-oe-badbase")
+    commit = repo.create_commit(tree, genesis)
+    with pytest.raises(GitRepositoryError, match="base_commit"):
+        repo.accept(genesis, commit, expected_paths=_accept_paths(*paths))
+    assert repo.head_oid() == genesis
+    assert _head(repo.path) == genesis
+    assert FactsGitRepository.open(repo.path, **_IDS).head_oid() == genesis
+
+
+@pytest.mark.parametrize("case,event_ids,carry_event,reason", [
+    ("dangling", ["evt-missing"], False,
+     "dangling or foreign-owned listing"),
+    ("orphan", [], True, "no orphan event"),
+])
+def test_accept_rejects_unclosed_operation_event_listing(
+        tmp_path, case, event_ids, carry_event, reason):
+    # Paths and scope are canonical; the listing itself does not close:
+    # the operation names an event this commit does not carry
+    # (dangling), or an event of this operation is not listed (orphan).
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = [
+        (_oe_operation_path(),
+         _oe_operation_payload(base_commit=genesis, event_ids=event_ids)),
+    ]
+    if carry_event:
+        records.append(
+            (_oe_event_path(), _oe_event_payload(base_commit=genesis)))
+    paths = [path for path, _payload in records]
+    tree = _tree_with_records(
+        repo.path, _tree_oid(repo.path, genesis), records, tmp_path,
+        "index-oe-%s" % case)
+    commit = repo.create_commit(tree, genesis)
+    with pytest.raises(GitRepositoryError, match=reason):
+        repo.accept(genesis, commit, expected_paths=_accept_paths(*paths))
+    assert repo.head_oid() == genesis
+    assert _head(repo.path) == genesis
+    assert FactsGitRepository.open(repo.path, **_IDS).head_oid() == genesis
+
+
+def test_accept_rejects_event_path_identity_mismatch_before_cas(tmp_path):
+    # Design 97 §4 item 1 (路径身份) for the event family: the event
+    # file sits at the canonical path of a different id (evt-other)
+    # while its body names evt-1. The payload-level closure still
+    # closes — the operation lists exactly evt-1 and the carried event
+    # body is evt-1 owned by that operation — so only the path
+    # identity leg can refuse this, and it must happen before the CAS.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    planted_event_path = _oe_event_path("evt-other")
+    records = [
+        (_oe_operation_path(),
+         _oe_operation_payload(
+             base_commit=genesis, event_ids=[_OE_EVENT_ID])),
+        (planted_event_path,
+         _oe_event_payload(base_commit=genesis)),
+    ]
+    paths = [path for path, _payload in records]
+    tree = _tree_with_records(
+        repo.path, _tree_oid(repo.path, genesis), records, tmp_path,
+        "index-oe-badpath")
+    commit = repo.create_commit(tree, genesis)
+    with pytest.raises(GitRepositoryError, match="canonical record_path"):
+        repo.accept(genesis, commit, expected_paths=_accept_paths(*paths))
+    assert repo.head_oid() == genesis
+    assert _head(repo.path) == genesis
+    assert FactsGitRepository.open(repo.path, **_IDS).head_oid() == genesis
+
+
+def test_accept_genesis_zero_base_operation_passes_closure_but_loses_cas(
+        tmp_path):
+    # The all-zero base_commit is the legal genesis form for a new
+    # operation: a zero-parent commit carrying a closed operation/event
+    # pair bound to the all-zero OID must pass every closure leg. The
+    # ref already sits at the real genesis, so only the CAS rejects this
+    # late zero-parent sibling (a lost race), never a closure error.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    records = _closed_operation_event_records(repo.zero_oid)
+    paths = [path for path, _payload in records]
+    tree = _tree_with_records(
+        repo.path, _tree_oid(repo.path, genesis), records, tmp_path,
+        "index-oe-zerobase")
+    zero_parent = _commit_tree(
+        repo.path, tree, [], "facts: zero-base operations")
+    result = repo.accept(
+        repo.zero_oid, zero_parent,
+        expected_paths=_accept_paths(*paths))
+    assert result == CasResult(
+        accepted=False, current_oid=genesis,
+        expected_old=repo.zero_oid, new_oid=zero_parent)
+    assert repo.head_oid() == genesis
+
+
+def test_accept_later_commit_retains_older_operation_with_original_base(
+        tmp_path):
+    # Commit C1 accepts op-1/event-1 bound to genesis. The next commit
+    # C2 adds a second operation op-2: op-2 must bind to C1 (its real
+    # parent), while op-1 rides along unchanged and must stay valid even
+    # though its original base_commit (genesis) is no longer the current
+    # parent. A new op-2 that wrongly binds to genesis is refused first.
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    first = _closed_operation_event_records(genesis)
+    first_paths = [path for path, _payload in first]
+    tree1 = _tree_with_records(
+        repo.path, _tree_oid(repo.path, genesis), first, tmp_path,
+        "index-oe-c1")
+    commit1 = repo.create_commit(tree1, genesis)
+    assert repo.accept(
+        genesis, commit1,
+        expected_paths=_accept_paths(*first_paths)).accepted
+
+    op2_id = "op-evt-2"
+    evt2_id = "evt-2"
+    op2_path = _oe_operation_path(op2_id)
+    evt2_path = _oe_event_path(evt2_id)
+    second_paths = [op2_path, evt2_path]
+    all_paths = first_paths + second_paths
+
+    bad_second = [
+        (op2_path, _oe_operation_payload(
+            operation_id=op2_id, base_commit=genesis,
+            event_ids=[evt2_id])),
+        (evt2_path, _oe_event_payload(
+            event_id=evt2_id, operation_id=op2_id,
+            base_commit=genesis)),
+    ]
+    bad_tree = _tree_with_records(
+        repo.path, tree1, bad_second, tmp_path, "index-oe-c2-bad")
+    bad_commit = repo.create_commit(bad_tree, commit1)
+    with pytest.raises(GitRepositoryError, match="base_commit"):
+        repo.accept(
+            commit1, bad_commit,
+            expected_paths=_accept_paths(*all_paths))
+    assert repo.head_oid() == commit1
+
+    good_second = [
+        (op2_path, _oe_operation_payload(
+            operation_id=op2_id, base_commit=commit1,
+            event_ids=[evt2_id])),
+        (evt2_path, _oe_event_payload(
+            event_id=evt2_id, operation_id=op2_id,
+            base_commit=commit1)),
+    ]
+    tree2 = _tree_with_records(
+        repo.path, tree1, good_second, tmp_path, "index-oe-c2-ok")
+    commit2 = repo.create_commit(tree2, commit1)
+    assert repo.accept(
+        commit1, commit2,
+        expected_paths=_accept_paths(*all_paths)).accepted
+    assert repo.head_oid() == commit2
+    snapshot = repo.read_snapshot_at(commit2)
+    bytes_by_path = {
+        record.path: record.content for record in snapshot.records}
+    op1_path = _oe_operation_path()
+    assert bytes_by_path[op1_path] == git_format.dumps_record(
+        _oe_operation_payload(base_commit=genesis))
+    assert bytes_by_path[op2_path] == git_format.dumps_record(
+        _oe_operation_payload(
+            operation_id=op2_id, base_commit=commit1,
+            event_ids=[evt2_id]))
+
+
+def test_accept_with_no_operation_or_event_records_passes_event_closure(
+        tmp_path):
+    # Two empty operation/event collections must stay legal: an ordinary
+    # snapshot carrying neither family accepts exactly as before (as does
+    # the genesis acceptance in every fixture above).
+    repo = _init_repo(tmp_path)
+    genesis = repo.head_oid()
+    path = "facts/fact-2/current.json"
+    tree = _tree_with_added_file(
+        repo.path, _tree_oid(repo.path, genesis), path,
+        _write_blob(repo.path, git_format.dumps_record({"fact": 2})),
+        tmp_path, "index-oe-empty")
+    commit = repo.create_commit(tree, genesis)
+    assert repo.accept(
+        genesis, commit, expected_paths=_accept_paths(path)).accepted
+    assert repo.head_oid() == commit
+    assert _head(repo.path) == commit
 
 
 def test_accept_with_zero_expected_old_has_empty_retention_base(tmp_path):
