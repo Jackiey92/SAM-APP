@@ -9,11 +9,21 @@ invalid sources and missing directories fail closed, Backup API and
 verification errors leave no artifact behind, and the published
 file's bytes match the returned size and sha256 digest.
 
+Hardening coverage: the destination directory is pinned by descriptor
+and must be a non-group/world-writable directory owned by the current
+user, staging is a private 0700 directory with a 0600 snapshot reached
+through a descriptor-pinned /proc/self/fd path that survives concurrent
+directory-entry replacement, bytes paths are rejected before any
+artifact exists, and every failure reports a truthful publication state
+(absent / confirmed / uncertain), including deterministic injection of
+the directory-sync, rollback-unlink and post-publication cleanup paths.
+
 Only synthetic databases under pytest's ``tmp_path`` are used; no SAM
 runtime data, real company data or network is touched.
 """
 import hashlib
 import os
+import shutil
 import sqlite3
 import stat
 
@@ -22,6 +32,7 @@ import pytest
 from app.facts_tree import backup_sqlite_checkpoint as checkpoint_module
 from app.facts_tree.backup_sqlite_checkpoint import (
     DIGEST_ALGORITHM,
+    PublicationState,
     SqliteCheckpointError,
     create_sqlite_checkpoint,
 )
@@ -45,7 +56,13 @@ def _make_wal_source(directory, *, name="src.db"):
 
 
 def _assert_no_temp_artifacts(directory):
-    files = [path for path in directory.rglob("*") if path.is_file()]
+    entries = list(directory.rglob("*"))
+    files = [path for path in entries if path.is_file()]
+    assert not [
+        path
+        for path in entries
+        if path.name.startswith(".sqlite-checkpoint-stage-")
+    ]
     assert not [path for path in files if path.name.startswith(".sqlite-checkpoint-")]
     assert not [path for path in files if path.name.endswith(".tmp")]
     assert not [path for path in files if path.name.endswith(".tmp-wal")]
@@ -116,9 +133,10 @@ def test_foreign_key_violation_fails_and_cleans_temp(tmp_path):
     assert connection.execute("PRAGMA foreign_key_check").fetchall()
 
     destination = tmp_path / "cp.db"
-    with pytest.raises(SqliteCheckpointError, match="foreign_key_check"):
+    with pytest.raises(SqliteCheckpointError, match="foreign_key_check") as exc_info:
         create_sqlite_checkpoint(connection, destination)
 
+    assert exc_info.value.publication == PublicationState.ABSENT
     assert not destination.exists()
     _assert_no_temp_artifacts(tmp_path)
     # The source connection was never closed or otherwise disturbed.
@@ -159,9 +177,10 @@ def test_existing_destination_file_is_never_overwritten(tmp_path):
     destination.write_bytes(b"ORIGINAL-CONTENT")
     original_stat = destination.stat()
 
-    with pytest.raises(SqliteCheckpointError, match="already exists"):
+    with pytest.raises(SqliteCheckpointError, match="already exists") as exc_info:
         create_sqlite_checkpoint(connection, destination)
 
+    assert exc_info.value.publication == PublicationState.ABSENT
     assert destination.read_bytes() == b"ORIGINAL-CONTENT"
     assert destination.stat().st_mtime_ns == original_stat.st_mtime_ns
     _assert_no_temp_artifacts(tmp_path)
@@ -275,8 +294,9 @@ def test_publish_race_target_is_never_overwritten(tmp_path, monkeypatch):
 
     monkeypatch.setattr(checkpoint_module.os, "link", racing_hard_link)
 
-    with pytest.raises(SqliteCheckpointError, match="appeared while"):
+    with pytest.raises(SqliteCheckpointError, match="appeared while") as exc_info:
         create_sqlite_checkpoint(connection, destination)
+    assert exc_info.value.publication == PublicationState.ABSENT
     assert not destination.exists()
     _assert_no_temp_artifacts(tmp_path)
     connection.close()
@@ -291,16 +311,53 @@ def test_unsupported_hard_link_fails_without_overwrite(tmp_path, monkeypatch):
 
     monkeypatch.setattr(checkpoint_module.os, "link", unsupported_hard_link)
 
-    with pytest.raises(SqliteCheckpointError, match="unsupported"):
+    with pytest.raises(SqliteCheckpointError, match="unsupported") as exc_info:
         create_sqlite_checkpoint(connection, destination)
+    assert exc_info.value.publication == PublicationState.ABSENT
     assert not destination.exists()
     _assert_no_temp_artifacts(tmp_path)
     connection.close()
 
 
-def test_directory_fsync_failure_after_link_removes_only_our_inode(
+def _directory_fsync_fail_on_calls(failing_calls, monkeypatch):
+    """Patch os.fsync so the Nth directory-fsync call(s) fail."""
+    real_fsync = os.fsync
+    state = {"directory_calls": 0}
+
+    def patched(file_descriptor):
+        if stat.S_ISDIR(os.fstat(file_descriptor).st_mode):
+            state["directory_calls"] += 1
+            if state["directory_calls"] in failing_calls:
+                raise OSError(5, "simulated directory fsync failure")
+        return real_fsync(file_descriptor)
+
+    monkeypatch.setattr(checkpoint_module.os, "fsync", patched)
+
+
+def test_publish_fsync_failure_with_synced_rollback_reports_absent(
     tmp_path, monkeypatch
 ):
+    # The publication directory sync fails once; the inode-guarded rollback
+    # unlink and its own directory sync succeed, so absence is durable.
+    connection, _ = _make_wal_source(tmp_path)
+    destination = tmp_path / "cp.db"
+    _directory_fsync_fail_on_calls({1}, monkeypatch)
+
+    with pytest.raises(SqliteCheckpointError, match="rolled the link back") as exc_info:
+        create_sqlite_checkpoint(connection, destination)
+
+    assert exc_info.value.publication == PublicationState.ABSENT
+    assert exc_info.value.result is None
+    assert not destination.exists()
+    _assert_no_temp_artifacts(tmp_path)
+    connection.close()
+
+
+def test_publish_fsync_failure_without_rollback_sync_reports_uncertain(
+    tmp_path, monkeypatch
+):
+    # Every directory fsync fails: the in-memory link can be unlinked, but
+    # without a synced rollback durability of the absence cannot be promised.
     connection, _ = _make_wal_source(tmp_path)
     destination = tmp_path / "cp.db"
     real_fsync = os.fsync
@@ -312,8 +369,315 @@ def test_directory_fsync_failure_after_link_removes_only_our_inode(
 
     monkeypatch.setattr(checkpoint_module.os, "fsync", fail_on_directories)
 
-    with pytest.raises(SqliteCheckpointError, match="destination directory"):
+    with pytest.raises(SqliteCheckpointError, match="may exist") as exc_info:
         create_sqlite_checkpoint(connection, destination)
+
+    assert exc_info.value.publication == PublicationState.UNCERTAIN
+    assert not destination.exists()  # the rollback unlink itself worked
+    _assert_no_temp_artifacts(tmp_path)
+    connection.close()
+
+
+def test_publish_fsync_failure_with_blocked_rollback_unlink_is_uncertain(
+    tmp_path, monkeypatch
+):
+    # Directory sync fails AND the rollback unlink of the destination fails:
+    # the destination truly remains and the state is uncertain, never
+    # reported as a clean absence.
+    connection, _ = _make_wal_source(tmp_path)
+    output_dir = tmp_path
+    destination = output_dir / "cp.db"
+    parent_stat = os.stat(output_dir)
+    real_fsync = os.fsync
+    real_unlink = os.unlink
+
+    def fail_on_directories(file_descriptor):
+        if stat.S_ISDIR(os.fstat(file_descriptor).st_mode):
+            raise OSError(5, "simulated directory fsync failure")
+        return real_fsync(file_descriptor)
+
+    def block_destination_unlink(name, *args, dir_fd=None, **kwargs):
+        if (
+            dir_fd is not None
+            and os.fstat(dir_fd).st_ino == parent_stat.st_ino
+            and name == destination.name
+        ):
+            raise OSError(1, "simulated rollback unlink failure")
+        return real_unlink(name, *args, dir_fd=dir_fd, **kwargs)
+
+    monkeypatch.setattr(checkpoint_module.os, "fsync", fail_on_directories)
+    monkeypatch.setattr(checkpoint_module.os, "unlink", block_destination_unlink)
+
+    with pytest.raises(SqliteCheckpointError, match="may exist") as exc_info:
+        create_sqlite_checkpoint(connection, destination)
+
+    assert exc_info.value.publication == PublicationState.UNCERTAIN
+    # The surviving link is exactly the checkpoint bytes this call produced.
+    assert destination.exists()
+    restored = sqlite3.connect(destination)
+    try:
+        assert restored.execute("SELECT name FROM parent").fetchall() == [("alice",)]
+        assert restored.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+    finally:
+        restored.close()
+    connection.close()
+
+
+def test_confirmed_publication_survives_staging_unlink_failure(tmp_path, monkeypatch):
+    # After the destination link and its directory fsync have succeeded the
+    # checkpoint is CONFIRMED; a failure removing the private snapshot does
+    # not roll the destination back and comes back with a usable result.
+    connection, _ = _make_wal_source(tmp_path)
+    destination = tmp_path / "cp.db"
+    real_unlink = os.unlink
+
+    def block_snapshot_unlink(name, *args, dir_fd=None, **kwargs):
+        if dir_fd is not None and os.fstat(dir_fd).st_mode & stat.S_IFDIR:
+            if isinstance(name, str) and name.endswith(".tmp"):
+                raise OSError(1, "simulated snapshot removal failure")
+        return real_unlink(name, *args, dir_fd=dir_fd, **kwargs)
+
+    monkeypatch.setattr(checkpoint_module.os, "unlink", block_snapshot_unlink)
+
+    with pytest.raises(SqliteCheckpointError, match="staging cleanup") as exc_info:
+        create_sqlite_checkpoint(connection, destination)
+
+    error = exc_info.value
+    assert error.publication == PublicationState.CONFIRMED
+    result = error.result
+    assert result is not None and result.path == destination
+    payload = destination.read_bytes()
+    assert result.size_bytes == len(payload)
+    assert result.digest == "sha256:" + hashlib.sha256(payload).hexdigest()
+    restored = sqlite3.connect(destination)
+    try:
+        assert restored.execute("SELECT name FROM parent").fetchall() == [("alice",)]
+    finally:
+        restored.close()
+
+    # The only leftover is this call's private 0700 staging directory with a
+    # 0600 snapshot inside; clean it as the operator would after inspection.
+    stage_dirs = [
+        path
+        for path in tmp_path.iterdir()
+        if path.name.startswith(".sqlite-checkpoint-stage-")
+    ]
+    assert len(stage_dirs) == 1
+    assert stat.S_IMODE(stage_dirs[0].stat().st_mode) == 0o700
+    leftovers = list(stage_dirs[0].iterdir())
+    assert len(leftovers) == 1
+    assert stat.S_IMODE(leftovers[0].stat().st_mode) == 0o600
+    # Operator-side cleanup after inspection; stop injecting failures.
+    monkeypatch.undo()
+    shutil.rmtree(stage_dirs[0])
+    connection.close()
+
+
+def test_confirmed_publication_survives_final_directory_sync_failure(
+    tmp_path, monkeypatch
+):
+    # Directory fsyncs: #1 publishes the link (must succeed), the staging
+    # directory sync succeeds, #2 (after staging rmdir) fails. The
+    # destination was already durable after #1, so this stays CONFIRMED.
+    connection, _ = _make_wal_source(tmp_path)
+    destination = tmp_path / "cp.db"
+    _directory_fsync_fail_on_calls({3}, monkeypatch)
+
+    with pytest.raises(SqliteCheckpointError, match="staging cleanup") as exc_info:
+        create_sqlite_checkpoint(connection, destination)
+
+    assert exc_info.value.publication == PublicationState.CONFIRMED
+    result = exc_info.value.result
+    payload = destination.read_bytes()
+    assert result.size_bytes == len(payload)
+    assert result.digest == "sha256:" + hashlib.sha256(payload).hexdigest()
+    assert not [
+        path
+        for path in tmp_path.iterdir()
+        if path.name.startswith(".sqlite-checkpoint-stage-")
+    ]
+    connection.close()
+
+
+def test_group_and_world_writable_directories_are_rejected_before_artifacts(
+    tmp_path,
+):
+    connection, _ = _make_wal_source(tmp_path)
+    for mode in (0o777, 0o775, 0o757, 0o1777):
+        output_dir = tmp_path / f"out-{mode:o}"
+        os.mkdir(output_dir, mode)
+        os.chmod(output_dir, mode)
+        destination = output_dir / "cp.db"
+        with pytest.raises(SqliteCheckpointError, match="writable") as exc_info:
+            create_sqlite_checkpoint(connection, destination)
+        assert exc_info.value.publication == PublicationState.ABSENT
+        assert os.listdir(output_dir) == []
+    connection.close()
+
+
+def test_foreign_owned_directory_is_rejected_before_artifacts(tmp_path):
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    try:
+        os.chown(output_dir, 65534, 65534)
+    except (PermissionError, OSError):
+        pytest.skip("needs privilege to create a directory owned by another uid")
+    try:
+        connection, _ = _make_wal_source(tmp_path)
+        with pytest.raises(SqliteCheckpointError, match="owned by the current"):
+            create_sqlite_checkpoint(connection, output_dir / "cp.db")
+        assert os.listdir(output_dir) == []
+        connection.close()
+    finally:
+        os.chown(output_dir, os.geteuid(), os.getegid())
+
+
+def test_symlinked_destination_directory_is_rejected(tmp_path):
+    connection, _ = _make_wal_source(tmp_path)
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    linked_dir = tmp_path / "linked"
+    linked_dir.symlink_to(real_dir)
+    with pytest.raises(SqliteCheckpointError, match="symlink"):
+        create_sqlite_checkpoint(connection, linked_dir / "cp.db")
+    assert os.listdir(real_dir) == []
+    _assert_no_temp_artifacts(tmp_path)
+    connection.close()
+
+
+def test_private_staging_is_0700_with_0600_snapshot_and_is_cleaned_on_failure(
+    tmp_path, monkeypatch
+):
+    connection, _ = _make_wal_source(tmp_path)
+    destination = tmp_path / "cp.db"
+    observed = {}
+
+    def inspect_then_fail(source, staging):
+        stage_stat = os.fstat(staging.dir_fd)
+        entries = os.listdir(staging.dir_fd)
+        temp_fd = os.open(
+            staging.temp_name,
+            os.O_PATH | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=staging.dir_fd,
+        )
+        try:
+            temp_stat = os.fstat(temp_fd)
+        finally:
+            os.close(temp_fd)
+        observed["stage_mode"] = stat.S_IMODE(stage_stat.st_mode)
+        observed["stage_uid"] = stage_stat.st_uid
+        observed["entries"] = entries
+        observed["temp_mode"] = stat.S_IMODE(temp_stat.st_mode)
+        observed["temp_uid"] = temp_stat.st_uid
+        raise SqliteCheckpointError("injected staging failure")
+
+    monkeypatch.setattr(checkpoint_module, "_backup_and_verify", inspect_then_fail)
+
+    with pytest.raises(SqliteCheckpointError, match="injected staging failure") as exc_info:
+        create_sqlite_checkpoint(connection, destination)
+    assert exc_info.value.publication == PublicationState.ABSENT
+    assert observed["stage_mode"] == 0o700
+    assert observed["stage_uid"] == os.geteuid()
+    assert len(observed["entries"]) == 1
+    assert observed["entries"][0].startswith(".sqlite-checkpoint-")
+    assert observed["entries"][0].endswith(".tmp")
+    assert observed["temp_mode"] == 0o600
+    assert observed["temp_uid"] == os.geteuid()
     assert not destination.exists()
+    _assert_no_temp_artifacts(tmp_path)
+    connection.close()
+
+
+def test_pinned_staging_defeats_concurrent_directory_entry_replacement(
+    tmp_path, monkeypatch
+):
+    # Simulate an actor who can replace the private staging directory entry
+    # right when SQLite opens the snapshot (possible only if the documented
+    # ownership/permission precondition is violated). SQLite is handed a
+    # /proc/self/fd-pinned path, so every byte still lands in OUR directory
+    # and the impostor's file can never be published.
+    connection, _ = _make_wal_source(tmp_path)
+    destination = tmp_path / "cp.db"
+    real_connect = sqlite3.connect
+    swapped = {"done": False}
+
+    def swap_on_snapshot_open(path, *args, **kwargs):
+        if (
+            not swapped["done"]
+            and isinstance(path, str)
+            and path.startswith("/proc/self/fd/")
+        ):
+            swapped["done"] = True
+            dir_fd = int(path.split("/")[4])
+            stage_path = os.readlink(f"/proc/self/fd/{dir_fd}")
+            temp_name = path.rsplit("/", 1)[1]
+            moved_aside = tmp_path / "stolen-stage"
+            os.rename(stage_path, moved_aside)
+            impostor = tmp_path / os.path.basename(stage_path)
+            os.mkdir(impostor, 0o777)
+            with open(impostor / temp_name, "wb") as handle:
+                handle.write(b"EVIL-BYTES" * 8)
+        return real_connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(checkpoint_module.sqlite3, "connect", swap_on_snapshot_open)
+
+    # Publication itself is intact; only staging removal reports a (confirmed)
+    # cleanup problem because the name now points at the impostor directory.
+    try:
+        result = create_sqlite_checkpoint(connection, destination)
+    except SqliteCheckpointError as exc:
+        assert exc.publication == PublicationState.CONFIRMED
+        assert "staging" in str(exc)
+        result = exc.result
+
+    # The published bytes come from the pinned (renamed) staging, never from
+    # the impostor directory entry.
+    payload = destination.read_bytes()
+    assert b"EVIL-BYTES" not in payload
+    assert result.size_bytes == len(payload)
+    assert result.digest == "sha256:" + hashlib.sha256(payload).hexdigest()
+    restored = sqlite3.connect(destination)
+    try:
+        assert restored.execute("SELECT name FROM parent").fetchall() == [("alice",)]
+    finally:
+        restored.close()
+    impostors = [
+        path
+        for path in tmp_path.iterdir()
+        if path.name.startswith(".sqlite-checkpoint-stage-")
+    ]
+    assert len(impostors) == 1
+    assert (impostors[0] / os.listdir(impostors[0])[0]).read_bytes().startswith(
+        b"EVIL-BYTES"
+    )
+    # Our own renamed staging directory had its snapshot unlinked via fd.
+    assert os.listdir(tmp_path / "stolen-stage") == []
+    shutil.rmtree(impostors[0])
+    shutil.rmtree(tmp_path / "stolen-stage")
+    connection.close()
+
+
+def test_bytes_destination_paths_are_rejected_before_any_artifact(tmp_path):
+    connection, _ = _make_wal_source(tmp_path)
+
+    class BytesLike:
+        def __fspath__(self):
+            return b"cp.db"
+
+    with pytest.raises(SqliteCheckpointError, match="bytes") as exc_info:
+        create_sqlite_checkpoint(connection, str(tmp_path).encode() + b"/cp.db")
+    assert exc_info.value.publication == PublicationState.ABSENT
+    with pytest.raises(SqliteCheckpointError, match="bytes"):
+        create_sqlite_checkpoint(connection, BytesLike())
+    assert not (tmp_path / "cp.db").exists()
+    _assert_no_temp_artifacts(tmp_path)
+    connection.close()
+
+
+@pytest.mark.parametrize("bad_name_suffix", ["/", "/cp.db/.."])
+def test_destination_must_name_a_file_inside_a_directory(tmp_path, bad_name_suffix):
+    connection, _ = _make_wal_source(tmp_path)
+    with pytest.raises(SqliteCheckpointError, match="file inside a directory"):
+        create_sqlite_checkpoint(connection, str(tmp_path) + bad_name_suffix)
     _assert_no_temp_artifacts(tmp_path)
     connection.close()
