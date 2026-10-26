@@ -399,6 +399,18 @@ def _require_secret(name, value):
         raise TypeError("%s must be a str credential" % name)
     if not value:
         raise ValueError("%s must not be empty" % name)
+    # A plain str can carry lone surrogates; encoding it for the digest
+    # would raise UnicodeEncodeError with the raw secret embedded in
+    # its object/args/repr. Refuse it at the boundary instead. Only a
+    # boolean leaves the except block, so the fixed error below carries
+    # no cause, context or other trace of the original encode failure.
+    unencodable = False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        unencodable = True
+    if unencodable:
+        raise ValueError("%s is not a UTF-8 encodable credential" % name)
     return value
 
 
