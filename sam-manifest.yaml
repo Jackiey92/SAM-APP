@@ -1,7 +1,13 @@
 # SAM portable contract. Secret values are never stored here.
 runtime:
-  node: 24.16.x
-  openclaw: 2026.9.6
+  # CHG-070 approved execution contract; profiles and environment variables must not relax it.
+  node: 24.22.1
+  openclaw: 2026.10.7
+  node_platform: linux
+  node_arch: x64
+  openclaw_commit: 157d8c2bc3ea2fa183afdc11088e69690bf8e64e
+  openclaw_tarball: https://registry.npmjs.org/openclaw/-/openclaw-2026.10.7.tgz
+  openclaw_integrity: sha512-iiZO+kFFBgQvxm17wn3Sc/MSC/GQu01PubAFVNA2Nn736HOHUbR0ra7a9NeW9wpjq3kDkSJ1RB7dTP+qVJFXig==
   agent_id: sam-leader
   gateway_mode: gateway
   # Keep the resident OpenClaw gateway separate from the Flask HTTP service.
