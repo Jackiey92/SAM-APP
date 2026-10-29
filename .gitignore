@@ -36,6 +36,7 @@ data/sales_app/
 
 # OpenClaw runtime
 .oc-runtime/
+.oc-runtime.installer/
 .sam-isolated/
 poc/memory_m0/model-cache/
 harness-openclaw/state/**

@@ -121,13 +121,40 @@ export SAM_LEADER_MODEL_API_KEY='从你的安全环境注入'
 export SAM_LEADER_MODEL=qwen3.8-max
 export SAM_VENV_BIN="$PWD/.sam-isolated/venv/bin"
 export SAM_TOOL_BRIDGE_PYTHON="$PWD/.sam-isolated/venv/bin/python"
-# 按本机 OpenClaw 安装位置设置 SAM_NODE_BIN 与 SAM_OPENCLAW_ENTRY。
+# 先按下节安装 manifest 固定的受管运行时；默认无需设置 Node/入口覆盖。
 
 "$SAM_TOOL_BRIDGE_PYTHON" scripts/prepare-openclaw-runtime.py
 (cd webapp && "$SAM_TOOL_BRIDGE_PYTHON" app.py)
 ```
 
 `prepare-openclaw-runtime.py` 会准备 state、技能与插件发现目录；随后由 `webapp/app.py` 启动 Flask。仅查看静态界面可打开 [`prototype/startup-ai-manager.html`](./prototype/startup-ai-manager.html) 或在线体验链接；上传/Agent 功能需要本地运行时和模型密钥。
+
+### CHG-070 V2：一次性安装受管运行时
+
+> 修订：2026-10-29T18:36+08:00（Asia/Shanghai）。以下是操作说明；版本唯一来源为 `sam-manifest.yaml`。
+
+在 Linux x64 上，先准备 GnuPG 和可信导出的 Node 发布公钥（签名指纹必须为 `5BE8A3F6C8A5C01D106C0AD820B1A390B168D356`）。在线模式还需 `curl`，沿用 `HTTPS_PROXY`/`https_proxy`/`ALL_PROXY`；只接受精确官方 HTTPS 地址，拒绝重定向。安装器不联网取公钥；不传 `--node-release-key` 时，从当前 GPG keyring 只读导出该指纹，缺失即失败。
+
+```bash
+# 在线：下载固定 OpenClaw/Node tarball、SHASUMS256.txt 和 .asc。
+python3 scripts/install-managed-runtime.py --node-release-key /trusted/node-release-key.asc
+
+# 离线：目录内必须放齐下面列出的四个官方文件；完全不调用下载器。
+python3 scripts/install-managed-runtime.py --staging-dir /trusted/runtime-artifacts --node-release-key /trusted/node-release-key.asc
+
+# 安装成功后，只读验收（只执行受管 Node 的版本/平台探测）。
+python3 scripts/prepare-openclaw-runtime.py --check
+```
+
+当前契约所需离线文件：`openclaw-2026.10.7.tgz`、`node-v24.22.1-linux-x64.tar.gz`、`SHASUMS256.txt`、`SHASUMS256.txt.asc`。公钥可放在同一目录，须通过参数指定。在线与离线均重新计算 OpenClaw SHA-512，与 manifest SRI 比较；Node 校验 GPG clearsign 的固定签名指纹、签名正文与独立 SHASUMS 文本一致、文件名对应的 SHA-256 与审阅过的官方摘要一致，以及 tarball 实际摘要一致。缺 GPG、公钥、签名或任何证据不符均失败关闭，没有跳过验证参数。
+
+安装在默认 `.oc-runtime`，锁放在同级 `.oc-runtime.installer/install.lock`（`flock`，进程退出自动释放，默认等待 60 秒）。私有 staging 为 `0700`，账本为当前用户拥有的单硬链接普通文件 `0600`。拒绝越界路径、特殊文件和不安全链接；保留经验证的根内文件软链以维持 npm/npx 的相对导入语义，硬链接复制为普通文件。schema 1 账本覆盖全部部署文件（账本自身除外），包括 OpenClaw 入口、包声明、依赖文件、Node 及软链别名和目标。原有 preflight 完整通过后才发布：首次 `rename`，重装用 Linux `renameat2(RENAME_EXCHANGE)` 原子交换非空目录；不支持交换就保留旧目录并失败。重复安装安全重建，不在 live root 内覆盖文件。
+
+`bash scripts/setup.sh` 保留原来的 Python 依赖安装行为，默认不安装运行时；显式使用 `bash scripts/setup.sh --install-managed-runtime --node-release-key /trusted/node-release-key.asc` 才追加在线安装，也可同时传 `--staging-dir`。已备好 Python 环境的隔离机直接调用上面的安装脚本，避免 setup 的 pip 步骤。`run.sh` 保持先 prepare/preflight 后启动的流程；安装器只做 Node 元数据探测，不启动 OpenClaw/Gateway、不执行 npm 生命周期或自动更新。
+
+审阅者提供的官方证据（核验日期 2026-10-29，本实现未重新联网核验）：OpenClaw 官方 tarball 为 103,494,479 字节，SHA-512 SRI 与 manifest 一致，npm SHA-1 为 `7aaaa1b0a91f79ce2f17236b09869c25f579e209`；包内无 `gitHead`。上游注解 tag `v2026.10.7`（tag object `5c101ce5a0637df375c5f6ae49d44d0d27cc26b1`）解引用至批准的完整 commit；npm SLSA v1 attestation 记录 GitHub Actions github-hosted builder、`.github/workflows/openclaw-npm-release.yml` 和构建 commit `723d9c20878e8ecadb684883854b9707d5c31050`。账本明确以审阅者证据记录两条来源，不从包版本猜 commit。
+
+Node 官方签名 SHASUMS 的 `.tar.gz` 摘要为 `eb6728e77c576a35162c122c45ccadf224d89ff00abc8dae46cc2897c6002d7c`；`.tar.xz` 摘要为 `6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6`（本安装器选择 `.tar.gz`）。安装时仍须重新进行完整签名及摘要验证。V1 proof 的 `official_chain=unverified-v2` 字段按原契约保留；V2 的官方链验证发生在安装时，不改变 V1 门禁或声称它会在线复验。
 
 ## 唯一前端原型模板（设计基准）
 
