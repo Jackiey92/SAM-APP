@@ -26,36 +26,9 @@ if [[ "${SAM_MEMORY_BACKEND:-localvector}" != localvector ]]; then
   exit 2
 fi
 
-select_node24() {
-  local candidates=() candidate version major i
-  if [[ -n "${SAM_NODE_BIN:-}" ]]; then
-    candidates+=("$SAM_NODE_BIN")
-  else
-    shopt -s nullglob
-    local installed=("${HOME}/.local"/node-v*-linux-x64/bin/node)
-    shopt -u nullglob
-    for ((i=${#installed[@]}-1; i>=0; i--)); do
-      candidates+=("${installed[$i]}")
-    done
-    if command -v node >/dev/null 2>&1; then
-      candidates+=("$(command -v node)")
-    fi
-  fi
-  for candidate in "${candidates[@]}"; do
-    version="$("$candidate" --version 2>/dev/null || true)"
-    major="${version#v}"
-    major="${major%%.*}"
-    if [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 24 )); then
-      export SAM_NODE_BIN="$candidate"
-      export PATH="$(dirname "$candidate"):$PATH"
-      return 0
-    fi
-  done
-  echo "Node.js >=24 is required for OpenClaw Gateway; set SAM_NODE_BIN to a compatible executable" >&2
-  exit 2
-}
-
-select_node24
+# Node selection and version verification belong to the read-only preflight
+# in prepare/adapter. SAM_NODE_BIN only records a path, which must resolve to
+# the trusted install ledger's managed Node.
 
 export HOST="${HOST:-0.0.0.0}"
 # Single-host local deployment: default scope. Override only for multi-host setups.

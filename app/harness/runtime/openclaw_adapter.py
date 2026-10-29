@@ -31,6 +31,7 @@ from ...runtime_config import (
     PROCESS_STOP_GRACE_SECONDS, PROCESS_STOP_POLL_SECONDS,
 )
 from ...employee_policy import openclaw_timeout_floor
+from ...runtime_contract import EngineProof, RuntimeContractError, preflight_runtime
 from ...runtime_errors import EmployeeTransportError, check_transport_envelope, transport_exception, transient_text
 
 
@@ -112,13 +113,27 @@ class OpenClawAdapter(RuntimeProvider):
         self.db_path = Path(db_path) if db_path else self.config.main_db
         self.staging.maps_path = self.objects_dir.parent / "map"
         self._runner = runner or subprocess.run
+        self._engine_proof: EngineProof | None = None
         self._session_ids: dict[tuple[str, str], str] = {}
         self._session_lock = Lock()
+
+    def _require_engine_proof(self) -> EngineProof:
+        """Read-only gate before runtime writes, port reclaim or engine children."""
+        if self.config.cloud_readonly:
+            raise RuntimeContractError("cloud read-only profile must not start the OpenClaw engine")
+        if self._engine_proof is None:
+            # An injected runner must also pass the pinned-runtime gate.
+            self._engine_proof = preflight_runtime(self.config, runner=self._runner)
+        return self._engine_proof
+
+    def _verified_node_bin(self) -> str:
+        return self._require_engine_proof().node_bin or self.config.node_bin
 
     def supports(self, format: str) -> bool:
         return format in self.config.skill_for_format
 
     def run_parse(self, file_hash: str, format: str, timeout: int = 600, *, quality_issues=None) -> int:
+        self._require_engine_proof()
         if not self.supports(format):
             raise KeyError(f"no OpenClaw skill for format: {format}")
 
@@ -174,6 +189,7 @@ class OpenClawAdapter(RuntimeProvider):
                           company_id: str | None = None, thread_id: str | None = None,
                           allow_promote: bool = False, timeout: int = 600,
                           access_role: str = "employee") -> str:
+        self._require_engine_proof()
         if access_role not in {"employee", "manager"}:
             raise ValueError("invalid runtime access role")
         prompt = message
@@ -185,6 +201,7 @@ class OpenClawAdapter(RuntimeProvider):
 
     def ensure_runtime_ready(self, *, timeout: int = 90) -> None:
         """Health-probe the owned Gateway before a parse worker starts work."""
+        self._require_engine_proof()
         if self.config.openclaw_mode != "gateway":
             return
         self._ensure_gateway(self._base_env(), timeout=timeout)
@@ -214,6 +231,7 @@ class OpenClawAdapter(RuntimeProvider):
     def _invoke_agent(self, message: str, timeout: int, *, company_id: str | None = None,
                       thread_id: str | None = None, allow_promote: bool = False,
                       access_role: str = "employee") -> str:
+        self._require_engine_proof()
         deadline = time.monotonic() + timeout
         env = self._base_env()
         if self.config.openclaw_mode == "gateway":
@@ -235,7 +253,7 @@ class OpenClawAdapter(RuntimeProvider):
         cache_dir.mkdir(parents=True, exist_ok=True)
         env["XDG_CACHE_HOME"] = str(cache_dir)
         session_id = self._session_id(company_id, thread_id, access_role=access_role)
-        cmd = [self.config.node_bin, str(self.config.openclaw_entry), "agent",
+        cmd = [self._verified_node_bin(), str(self.config.openclaw_entry), "agent",
                "--agent", self.config.agent_id, "--session-id", session_id, "--json",
                "--message", message, "--timeout", str(timeout)]
         if self.config.openclaw_mode != "gateway":
@@ -264,6 +282,7 @@ class OpenClawAdapter(RuntimeProvider):
 
     def _base_env(self) -> dict[str, str]:
         """Build trusted runtime environment without request-specific scope."""
+        self._require_engine_proof()
         env = os.environ.copy()
         env["PATH"] = f"{self.config.venv_bin}:{env.get('PATH', '')}"
         state_dir = self.config.state_dir
@@ -367,6 +386,7 @@ class OpenClawAdapter(RuntimeProvider):
         cleanup are owned by one process.  The first agent call then pays at
         most one bounded Gateway startup cost and all later calls reuse it.
         """
+        self._require_engine_proof()
         self.config.state_dir.mkdir(parents=True, exist_ok=True)
         self._ensure_skill_mount()
 
@@ -400,6 +420,7 @@ class OpenClawAdapter(RuntimeProvider):
         only a process we can prove is our own; an unknown listener fails
         closed instead of serving requests through the wrong runtime.
         """
+        self._require_engine_proof()
         # Unit tests inject a runner and must not launch a real daemon. The
         # production composition root uses subprocess.run and takes this path.
         if self._runner is not subprocess.run:
@@ -425,7 +446,7 @@ class OpenClawAdapter(RuntimeProvider):
                 log_path = self.config.state_dir / "gateway.log"
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 stream = log_path.open("a", encoding="utf-8")
-                command = [self.config.node_bin, str(self.config.openclaw_entry), "gateway", "run", "--port", str(self.config.gateway_port)]
+                command = [self._verified_node_bin(), str(self.config.openclaw_entry), "gateway", "run", "--port", str(self.config.gateway_port)]
                 process = subprocess.Popen(
                     command, cwd=self.root, env=env, stdout=stream, stderr=stream,
                     text=True,
@@ -454,14 +475,16 @@ class OpenClawAdapter(RuntimeProvider):
 
     def reclaim_gateway_port(self) -> None:
         """Validate a resident Gateway without restarting or taking ownership."""
+        self._require_engine_proof()
         self._reclaim_or_reject_gateway_port()
 
     def _gateway_rpc_healthy(self, env: dict[str, str], *, timeout: int) -> bool:
         """TCP alone is insufficient: use the authenticated Gateway health RPC."""
+        self._require_engine_proof()
         limit = min(max(timeout, 1), 10)
         try:
             result = self._runner(
-                [self.config.node_bin, str(self.config.openclaw_entry), "gateway", "health",
+                [self._verified_node_bin(), str(self.config.openclaw_entry), "gateway", "health",
                  "--json", "--timeout", str(limit * 1000)],
                 cwd=self.root, env=env, capture_output=True, text=True, timeout=limit + 2,
             )
@@ -579,7 +602,7 @@ class OpenClawAdapter(RuntimeProvider):
             if (proc.stat().st_uid != os.getuid() or owner.get("uid") != os.getuid()
                     or not owner.get("start_ticks")
                     or owner["start_ticks"] != self._process_start_ticks(pid)
-                    or (proc / "exe").resolve() != Path(self.config.node_bin).resolve()
+                    or (proc / "exe").resolve() != Path(self._verified_node_bin()).resolve()
                     or (proc / "cwd").resolve() != self.root.resolve()
                     or not self._pid_listens_on_gateway_port(pid)):
                 return False
@@ -659,6 +682,7 @@ class OpenClawAdapter(RuntimeProvider):
         return owners[0] if len(owners) == 1 else None
 
     def _reclaim_or_reject_gateway_port(self, env: dict[str, str] | None = None) -> bool:
+        self._require_engine_proof()
         if not self._gateway_port_open():
             return False
         owner = self._read_gateway_owner()

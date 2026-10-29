@@ -1,3 +1,6 @@
+# Runtime pins live only in sam-manifest.yaml and are enforced by
+# runtime_contract before any engine write or subprocess. Profiles and env
+# must not restate or relax them; cloud read-only mode never starts the engine.
 profile: cloud
 memory:
   provider: localvector

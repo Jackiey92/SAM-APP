@@ -1,5 +1,7 @@
 import json
 import subprocess
+
+import pytest
 from dataclasses import replace
 from pathlib import Path
 
@@ -8,6 +10,12 @@ from app.harness.staging import StagingStore
 from app.db.database import init_db
 from app.storage import ArchiveFileStore
 from app.runtime_config import RuntimeConfig
+from tests.runtime_install import managed_config, managed_runner
+
+
+@pytest.fixture(autouse=True)
+def synthetic_node_probes(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", managed_runner(subprocess.run))
 
 
 def _isolated_config(tmp_path: Path, env: dict[str, str] | None = None,
@@ -31,8 +39,8 @@ def _isolated_config(tmp_path: Path, env: dict[str, str] | None = None,
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
     state_dir = tmp_path / "state"
-    return replace(config, harness_root=harness_root, state_dir=state_dir,
-                   config_path=config_path or state_dir / "openclaw.json")
+    return managed_config(replace(config, harness_root=harness_root, state_dir=state_dir,
+                                  config_path=config_path or state_dir / "openclaw.json"), tmp_path)
 
 
 def test_agent_context_is_optional_and_deterministically_injected(tmp_path: Path):
@@ -44,7 +52,7 @@ def test_agent_context_is_optional_and_deterministically_injected(tmp_path: Path
         return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
 
     config = _isolated_config(tmp_path)
-    adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=runner)
+    adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=managed_runner(runner))
     adapter.run_agent_message("裸问题")
     assert calls[-1][calls[-1].index("--message") + 1] == "裸问题"
     mounted = json.loads(config.config_path.read_text(encoding="utf-8"))
@@ -66,7 +74,7 @@ def test_agent_scope_is_injected_outside_prompt(tmp_path: Path):
         return subprocess.CompletedProcess(command, 0, json.dumps({"meta": {"finalAssistantVisibleText": "ok"}}), "")
 
     config = _isolated_config(tmp_path)
-    adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=runner)
+    adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=managed_runner(runner))
     adapter.run_agent_message("问题", company_id="acme", thread_id="t1")
     env = calls[-1][1]["env"]
     assert env["SAM_COMPANY_ID"] == "acme"
@@ -85,7 +93,7 @@ def test_manager_agent_scope_is_distinct_and_read_only(tmp_path: Path):
         return subprocess.CompletedProcess(command, 0, json.dumps({"meta": {"finalAssistantVisibleText": "ok"}}), "")
 
     config = _isolated_config(tmp_path)
-    adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=runner)
+    adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=managed_runner(runner))
     adapter.run_agent_message("经理问题", company_id="acme", thread_id="manager-thread", access_role="manager")
     env = calls[-1][1]["env"]
     session_id = calls[-1][0][calls[-1][0].index("--session-id") + 1]
@@ -102,7 +110,7 @@ def test_scoped_employee_calls_reuse_one_openclaw_session(tmp_path: Path):
         return subprocess.CompletedProcess(command, 0, json.dumps({"meta": {"finalAssistantVisibleText": "ok"}}), "")
 
     config = _isolated_config(tmp_path)
-    adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=runner)
+    adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=managed_runner(runner))
     adapter.run_agent_message("第一块", company_id="acme", thread_id="parse-job-1")
     adapter.run_agent_message("第二块", company_id="acme", thread_id="parse-job-1")
     first = calls[0][calls[0].index("--session-id") + 1]
@@ -118,7 +126,7 @@ def test_unscoped_parse_calls_use_independent_openclaw_sessions(tmp_path: Path):
         return subprocess.CompletedProcess(command, 0, json.dumps({"meta": {"finalAssistantVisibleText": "ok"}}), "")
 
     config = _isolated_config(tmp_path)
-    adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=runner)
+    adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=managed_runner(runner))
     # run_parse uses this same unscoped invocation path; two files must never
     # inherit the leader's scoped conversation/session.
     adapter.run_agent_message("parse file A")
@@ -143,7 +151,7 @@ def test_runtime_injects_token_plan_provider_into_existing_config(tmp_path: Path
         env={"SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root", "SAM_PROFILE": "local", "SAM_LEADER_MODEL": "qwen3.8-max"},
         config_path=config_path,
     )
-    adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=runner)
+    adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "missing.db"), config=config, runner=managed_runner(runner))
     adapter.run_agent_message("问题")
     generated = json.loads(config_path.read_text(encoding="utf-8"))
     provider = generated["models"]["providers"]["token-plan"]
@@ -176,7 +184,7 @@ def test_document_ingest_agent_keeps_model_proxy_boundary(tmp_path: Path, monkey
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:10808")
     monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:10808")
     config = _isolated_config(tmp_path)
-    adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "db.sqlite"), config=config, runner=runner)
+    adapter = OpenClawAdapter(StagingStore(db_path=tmp_path / "db.sqlite"), config=config, runner=managed_runner(runner))
     adapter.run_agent_message("document-ingest skill task")
     env = calls[-1]["env"]
     assert env["HTTP_PROXY"] == "http://127.0.0.1:10808"
@@ -221,7 +229,7 @@ def test_gateway_mode_starts_one_daemon_and_reuses_it(tmp_path: Path, monkeypatc
         def __exit__(self, *args):
             return False
 
-    monkeypatch.setattr(adapter_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(adapter_module.subprocess, "run", managed_runner(fake_run))
     monkeypatch.setattr(adapter_module.subprocess, "Popen", fake_popen)
     calls_to_socket = {"count": 0}
 
@@ -290,7 +298,7 @@ def test_gateway_health_probe_retries_within_long_startup_budget(tmp_path: Path,
             raise OSError("gateway still booting")
         return ReadySocket()
 
-    monkeypatch.setattr(adapter_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(adapter_module.subprocess, "run", managed_runner(fake_run))
     monkeypatch.setattr(adapter_module.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(adapter_module.socket, "create_connection", socket_connection)
     monkeypatch.setenv("SAM_GATEWAY_STARTUP_TIMEOUT", "3")
@@ -353,7 +361,7 @@ def test_document_ingest_is_delegated_to_skill_agent(tmp_path: Path):
             },
         }
     config = RuntimeConfig.from_env(project_root=Path(__file__).parents[1], env={"SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root", "SAM_PROFILE": "local"})
-    config = replace(config, harness_root=tmp_path / "harness")
+    config = managed_config(replace(config, harness_root=tmp_path / "harness"), tmp_path)
     adapter = OpenClawAdapter(
         StagingStore(db_path=db_path), config=config, objects_dir=objects,
         db_path=db_path,

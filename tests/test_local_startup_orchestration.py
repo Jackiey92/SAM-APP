@@ -14,6 +14,12 @@ import pytest
 from app.harness.runtime.openclaw_adapter import OpenClawAdapter
 from app.harness.staging import StagingStore
 from app.runtime_config import RuntimeConfig
+from tests.runtime_install import managed_config, managed_runner
+
+
+@pytest.fixture(autouse=True)
+def synthetic_node_probes(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", managed_runner(subprocess.run))
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -65,7 +71,7 @@ def test_full_entry_orders_prepare_then_flask(tmp_path):
 def adapter(tmp_path):
     config = RuntimeConfig.from_env(project_root=ROOT)
     config = replace(config, state_dir=tmp_path / "state", config_path=tmp_path / "state/openclaw.json")
-    return OpenClawAdapter(StagingStore(tmp_path / "missing.db"), config=config)
+    return OpenClawAdapter(StagingStore(tmp_path / "missing.db"), config=managed_config(config, tmp_path))
 
 
 @pytest.mark.parametrize("cmdline,expected", [
@@ -105,16 +111,22 @@ def test_owner_binds_process_start_uid_executable_cwd_and_listener(tmp_path, mon
     import app.harness.runtime.openclaw_adapter as module
     a = adapter(tmp_path)
     a.root = Path.cwd()
-    a.config = replace(a.config, gateway_port=18890, node_bin=sys.executable)
-    # Keep real process identity proofs; fixture only the network tables/fds.
+    a.config = replace(a.config, gateway_port=18890)
+    # Keep real PID/start/UID proofs; fixture the executable and network tables.
     tcp, tcp6, fds = tmp_path / "tcp", tmp_path / "tcp6", tmp_path / "fd"
     tcp.write_text("header\n0: 0100007F:49CA 00000000:0000 0A 0 0 0 0 0 12345\n")
     tcp6.write_text("header\n")
     fds.mkdir()
     fd = fds / "7"
     fd.symlink_to("socket:[12345]")
+    proc = tmp_path / "process"
+    proc.mkdir()
+    (proc / "exe").symlink_to(a.config.node_bin)
+    (proc / "cwd").symlink_to(a.root, target_is_directory=True)
+    (proc / "cmdline").write_bytes(b"openclaw-gateway\0")
     real_path = Path
-    redirects = {"/proc/net/tcp": tcp, "/proc/net/tcp6": tcp6, f"/proc/{os.getpid()}/fd": fds}
+    redirects = {"/proc/net/tcp": tcp, "/proc/net/tcp6": tcp6, f"/proc/{os.getpid()}/fd": fds,
+                 f"/proc/{os.getpid()}": proc}
     monkeypatch.setattr(module, "Path", lambda value: redirects.get(str(value), real_path(value)))
     a._write_gateway_owner(SimpleNamespace(pid=os.getpid()), {})
     owner = a._read_gateway_owner()
@@ -123,6 +135,11 @@ def test_owner_binds_process_start_uid_executable_cwd_and_listener(tmp_path, mon
     assert not a._owner_is_sam_gateway({**owner, "start_ticks": "stale"})
     assert not a._owner_is_sam_gateway({**owner, "uid": -1})
     assert not a._owner_is_sam_gateway({**owner, "state_dir": "/other"})
+    (proc / "exe").unlink()
+    (proc / "exe").symlink_to(sys.executable)
+    assert not a._owner_is_sam_gateway(owner)
+    (proc / "exe").unlink()
+    (proc / "exe").symlink_to(a.config.node_bin)
     fd.unlink()
     assert not a._owner_is_sam_gateway(owner)
 
@@ -156,6 +173,8 @@ def test_config_mismatch_rejected_without_restart(tmp_path, monkeypatch):
 def test_missing_owner_reclaimed_only_with_all_process_proofs(tmp_path, monkeypatch, mismatch):
     import app.harness.runtime.openclaw_adapter as module
     a = adapter(tmp_path)
+    # Validate the synthetic install before process-identity-only /proc and UID mocks.
+    a._require_engine_proof()
     proc_root = tmp_path / 'proc'
     proc = proc_root / '45678'
     proc.mkdir(parents=True)

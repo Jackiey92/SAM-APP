@@ -14,6 +14,7 @@ from app.harness.staging import StagingStore
 from app.memory.company_facts import L2CompleteFactService
 from app.parse_jobs import ParseJobManager
 from app.runtime_config import RuntimeConfig
+from tests.runtime_install import managed_config, managed_runner
 from app.runtime_errors import EmployeeTransportError, transport_exception
 from tests.test_finance_worker import _setup, _candidate
 from tests.test_parse_jobs import _manager, _create, _wait_for
@@ -116,7 +117,8 @@ def test_openclaw_default_floor_and_cli_use_python_budget(tmp_path, monkeypatch)
     def run(cmd, **kw):
         calls.append((cmd, kw))
         return subprocess.CompletedProcess(cmd, 0, json.dumps(TIMEOUT), "")
-    adapter = OpenClawAdapter(StagingStore(tmp_path / "db"), config=config, runner=run)
+    config = managed_config(config, tmp_path)
+    adapter = OpenClawAdapter(StagingStore(tmp_path / "db"), config=config, runner=managed_runner(run))
     adapter.prepare_runtime()
     assert json.loads(config.config_path.read_text())["agents"]["defaults"]["timeoutSeconds"] >= 720
     with pytest.raises(EmployeeTransportError, match="timeoutPhase=provider"):
@@ -234,8 +236,11 @@ def test_late_failure_callback_does_not_overwrite_new_retry(tmp_path):
 
 @pytest.mark.parametrize("failed_step", ["projection", "classification"])
 def test_web_worker_projection_timeout_fails_and_retry_is_idempotent(tmp_path, monkeypatch, failed_step):
-    import webapp.app as web
     from app.ports import LocalMemoryProvider
+    # This worker contract uses an injected memory provider, including assembly
+    # during import; it must not require an installed HF model in isolation.
+    monkeypatch.setattr("app.providers.memory_provider", lambda *_a, **_kw: LocalMemoryProvider(tmp_path / "ov"))
+    import webapp.app as web
     from tests.entity_employee import FixtureEntityEmployee
     db, stored, _ = _setup(tmp_path)
     with connect(db) as conn:
@@ -313,7 +318,8 @@ def test_gateway_fallback_and_output_budget_are_configurable(tmp_path, monkeypat
     monkeypatch.setenv('SAM_EMPLOYEE_MAX_OUTPUT_TOKENS', '24576')
     config = replace(RuntimeConfig.from_env(), state_dir=tmp_path / 'state',
                      config_path=tmp_path / 'state/openclaw.json', openclaw_mode='local')
-    OpenClawAdapter(StagingStore(tmp_path / 'db'), config=config).prepare_runtime()
+    config = managed_config(config, tmp_path)
+    OpenClawAdapter(StagingStore(tmp_path / 'db'), config=config, runner=managed_runner()).prepare_runtime()
     data = json.loads(config.config_path.read_text())
     assert data['agents']['defaults']['model']['fallbacks'] == ['token-plan/operator-selected']
     assert data['agents']['defaults']['models']['token-plan/${SAM_LEADER_MODEL}']['params']['maxTokens'] == 24576
