@@ -8,9 +8,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
-import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -93,50 +90,17 @@ def _path(root: Path, value: str | None, default: Path, *, follow_symlinks: bool
     return Path(os.path.abspath(candidate))
 
 
-def _node_major(binary: str) -> int | None:
-    packaged = re.search(r"(?:^|/)node-v(\d+)(?:\.[^/]*)?-linux-x64/bin/node$", binary)
-    if packaged and Path(binary).is_file() and os.access(binary, os.X_OK):
-        return int(packaged.group(1))
-    try:
-        output = subprocess.check_output(
-            [binary, "--version"], text=True, timeout=5, stderr=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    match = re.match(r"v?(\d+)", output.strip())
-    return int(match.group(1)) if match else None
-
-
 def _select_node_bin(env: dict[str, str], runtime: dict[str, Any]) -> str:
-    """Select a real Node.js >=24 executable; never limp on with Node 22."""
+    """Record the Node path without probing or rejecting a missing executable.
+
+    Version, platform, architecture, provenance and integrity are all checked
+    by the read-only preflight. An empty path selects the ledger-managed Node.
+    """
     explicit = env.get("SAM_NODE_BIN")
-    candidates: list[str] = []
-    if explicit:
-        candidates.append(explicit)
-    else:
-        home = Path(env.get("HOME", str(Path.home()))).expanduser()
-        candidates.extend(str(path) for path in sorted(
-            (home / ".local").glob("node-v*-linux-x64/bin/node"), reverse=True,
-        ))
-        configured = runtime.get("node_bin")
-        if configured:
-            candidates.append(str(configured))
-        system = shutil.which("node", path=env.get("PATH"))
-        if system:
-            candidates.append(system)
-    seen: set[str] = set()
-    detected: list[str] = []
-    for candidate in candidates:
-        resolved = shutil.which(candidate, path=env.get("PATH")) or candidate
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        major = _node_major(resolved)
-        detected.append(f"{resolved}={major if major is not None else 'unavailable'}")
-        if major is not None and major >= 24:
-            return resolved
-    detail = ", ".join(detected) if detected else "no node executable found"
-    raise RuntimeError(f"Node.js >=24 is required for OpenClaw Gateway ({detail})")
+    if explicit is not None:
+        return explicit
+    configured = runtime.get("node_bin")
+    return str(configured) if configured else ""
 
 
 @dataclass(frozen=True)

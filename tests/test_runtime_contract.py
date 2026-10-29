@@ -8,6 +8,7 @@ import subprocess
 import pytest
 
 from app import runtime_contract as contract
+from tests.runtime_install import managed_install
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -200,55 +201,6 @@ def test_read_only_without_probes(tmp_path, monkeypatch, valid):
 
 
 # V1B: synthetic managed installs; no real Node or runtime configuration probes.
-@pytest.fixture
-def managed_install(tmp_path):
-    import hashlib
-    from types import SimpleNamespace
-
-    write_manifest(tmp_path)
-    root = tmp_path / "managed"
-    entry = root / "node_modules/openclaw/openclaw.mjs"
-    entry.parent.mkdir(parents=True)
-    entry.write_bytes(b"synthetic entry\n")
-    package = entry.with_name("package.json")
-    package.write_text(json.dumps({"version": PINS["openclaw"]}), encoding="utf-8")
-    node = root / "bin/node"
-    node.parent.mkdir()
-    node.write_bytes(b"synthetic node; never execute")
-    node.chmod(0o700)
-    ledger = {
-        "schema": 1,
-        "contract": {"node": PINS["node"], "node_platform": PINS["node_platform"],
-                     "node_arch": PINS["node_arch"], "openclaw": PINS["openclaw"],
-                     "commit": PINS["openclaw_commit"], "tarball": PINS["openclaw_tarball"],
-                     "integrity": PINS["openclaw_integrity"]},
-        "files": [{"path": str(p.relative_to(root)),
-                   "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p in (entry, package)],
-        "openclaw": {"commit": PINS["openclaw_commit"], "commit_provenance": "synthetic evidence",
-                     "tarball_sha512": PINS["openclaw_integrity"][7:]},
-        "node": {"binary": "bin/node", "sha256": hashlib.sha256(node.read_bytes()).hexdigest(),
-                 "official_sha256": "a" * 64, "official_signature": "synthetic signature evidence"},
-    }
-    ledger_path = root / contract.LEDGER_NAME
-    calls = []
-
-    def save():
-        ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
-        ledger_path.chmod(0o600)
-
-    def runner(argv, **kwargs):
-        assert argv[0] == str(node)
-        assert kwargs == {"capture_output": True, "text": True, "timeout": 10}
-        assert argv[1:] in (["--version"], ["-p", "process.platform + '/' + process.arch"])
-        calls.append(argv)
-        return SimpleNamespace(returncode=0, stdout="v24.22.1\n" if argv[1] == "--version" else "linux/x64\n")
-
-    config = SimpleNamespace(project_root=tmp_path, openclaw_entry=entry, node_bin="", cloud_readonly=False)
-    save()
-    return SimpleNamespace(root=root, entry=entry, package=package, node=node, ledger=ledger,
-                           ledger_path=ledger_path, save=save, runner=runner, calls=calls, config=config)
-
-
 def run_preflight(install, runner=None):
     return contract.preflight_runtime(install.config, env={}, runner=install.runner if runner is None else runner)
 

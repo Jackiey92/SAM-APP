@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -9,11 +10,13 @@ from pathlib import Path
 
 import pytest
 
+from tests.runtime_install import managed_config, managed_runner
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_prepare_runtime_mounts_plugin_and_writes_fresh_9_6_shape(tmp_path: Path) -> None:
+def test_prepare_runtime_mounts_plugin_and_writes_fresh_9_6_shape(tmp_path: Path, monkeypatch, capsys) -> None:
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -28,15 +31,16 @@ def test_prepare_runtime_mounts_plugin_and_writes_fresh_9_6_shape(tmp_path: Path
             "SAM_OPENCLAW_CONFIG": str(state / "openclaw.json"),
         }
     )
-    result = subprocess.run(
-        [sys.executable, "scripts/prepare-openclaw-runtime.py"],
-        cwd=ROOT,
-        env=env,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert "openclaw_runtime_prepared" in result.stdout
+    # Exercise real preparation in-process with a synthetic managed installation.
+    from app.runtime_config import RuntimeConfig
+    config = managed_config(RuntimeConfig.from_env(project_root=ROOT, env=env), tmp_path)
+    spec = importlib.util.spec_from_file_location("prepare_bootstrap", ROOT / "scripts/prepare-openclaw-runtime.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module.RuntimeConfig, "from_env", classmethod(lambda cls, **kwargs: config))
+    monkeypatch.setattr(subprocess, "run", managed_runner())
+    assert module.main([]) == 0
+    assert "openclaw_runtime_prepared" in capsys.readouterr().out
     assert (state / "extensions" / "sam-memory").is_symlink()
     config = json.loads((state / "openclaw.json").read_text(encoding="utf-8"))
     assert "sam-leader" in config["agents"]["entries"]
@@ -139,28 +143,72 @@ def _fake_node(path: Path, version: str) -> Path:
     return path
 
 
-def test_runtime_prefers_local_node24_over_path_node22(tmp_path: Path) -> None:
+def test_runtime_does_not_select_local_or_path_node(tmp_path: Path, monkeypatch) -> None:
     from app.runtime_config import RuntimeConfig
 
     node22 = _fake_node(tmp_path / "bin" / "node", "v22.23.3")
-    node24 = _fake_node(
-        tmp_path / ".local" / "node-v24.21.0-linux-x64" / "bin" / "node",
-        "v24.21.0",
-    )
+    _fake_node(tmp_path / ".local/node-v24.21.0-linux-x64/bin/node", "v24.21.0")
+    def forbidden(*args, **kwargs):
+        pytest.fail("configuration must not discover or execute Node")
+    monkeypatch.setattr(subprocess, "check_output", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(Path, "glob", forbidden)
     config = RuntimeConfig.from_env(project_root=ROOT, env={
-            "SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root",
         "HOME": str(tmp_path), "PATH": str(node22.parent), "SAM_PROFILE": "local",
     })
-    assert config.node_bin == str(node24)
+    assert config.node_bin == ""
 
 
-def test_runtime_rejects_explicit_unsupported_node(tmp_path: Path) -> None:
+@pytest.mark.parametrize("configured", [None, "", "missing-node", "node22"])
+def test_runtime_records_explicit_node_without_probing(tmp_path: Path, monkeypatch, configured) -> None:
     from app.runtime_config import RuntimeConfig
 
-    node22 = _fake_node(tmp_path / "node22", "v22.23.3")
-    with pytest.raises(RuntimeError, match="Node.js >=24"):
-        RuntimeConfig.from_env(project_root=ROOT, env={
-            "SAM_MEMORY_ROOT_URI": "sam://sam-test/product-root",
-            "HOME": str(tmp_path), "PATH": str(tmp_path),
-            "SAM_NODE_BIN": str(node22), "SAM_PROFILE": "local",
-        })
+    def forbidden(*args, **kwargs):
+        pytest.fail("configuration must not execute Node or reject its version")
+    monkeypatch.setattr(subprocess, "check_output", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    env = {"SAM_PROFILE": "local", "HOME": str(tmp_path), "PATH": ""}
+    if configured is not None:
+        env["SAM_NODE_BIN"] = str(_fake_node(tmp_path / "node22", "v22.23.3")) if configured == "node22" else configured
+    config = RuntimeConfig.from_env(project_root=ROOT, env=env)
+    assert config.node_bin == env.get("SAM_NODE_BIN", "")
+
+
+@pytest.mark.parametrize(("env", "runtime", "expected"), [
+    ({}, {}, ""), ({}, {"node_bin": "/managed/node"}, "/managed/node"),
+    ({"SAM_NODE_BIN": " raw-node "}, {"node_bin": "/managed/node"}, " raw-node "),
+    ({"SAM_NODE_BIN": ""}, {"node_bin": "/managed/node"}, ""),
+])
+def test_select_node_bin_only_records_values(monkeypatch, env, runtime, expected):
+    from app.runtime_config import _select_node_bin
+    def forbidden(*args, **kwargs):
+        pytest.fail("Node selection must only record configuration")
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "check_output", forbidden)
+    monkeypatch.setattr(Path, "glob", forbidden)
+    assert _select_node_bin(env, runtime) == expected
+
+
+def test_preflight_failure_stops_standard_startup_before_flask(tmp_path: Path) -> None:
+    calls = tmp_path / "calls"
+    fake = tmp_path / "python3"
+    fake.write_text('''#!/bin/sh
+printf "%s\\n" "$*" >> "$CALLS"
+if [ "$1" = "-c" ]; then exit 0; fi
+if [ "$1" = "scripts/prepare-openclaw-runtime.py" ]; then exec "$TEST_PYTHON" "$@"; fi
+exit 99
+''')
+    fake.chmod(0o755)
+    env = dict(os.environ, PATH=str(tmp_path) + ":/usr/bin:/bin", HOME=str(tmp_path),
+               SAM_PROFILE="local", SAM_DATA_ROOT=str(tmp_path / "data"),
+               SAM_LEADER_MODEL_API_KEY="synthetic", TEST_PYTHON=sys.executable,
+               CALLS=str(calls), SAM_NODE_BIN="/absent/unmanaged-node",
+               SAM_OPENCLAW_ENTRY=str(tmp_path / "managed/node_modules/openclaw/openclaw.mjs"))
+    # Missing installation fails before even a managed Node probe is possible.
+    result = subprocess.run(["bash", "scripts/run.sh"], cwd=ROOT, env=env, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "OpenClaw runtime preflight failed:" in result.stderr
+    lines = calls.read_text().splitlines()
+    assert len(lines) == 2
+    assert lines[-1] == "scripts/prepare-openclaw-runtime.py"
+    assert "webapp/app.py" not in calls.read_text()
