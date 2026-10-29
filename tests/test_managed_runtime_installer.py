@@ -25,6 +25,8 @@ def forbidden(*args, **kwargs):
 
 
 REAL_DOWNLOAD = installer.download
+REAL_VERIFY_NODE_SIGNATURE = installer.verify_node_signature
+PINNED_NODE_SIGNER = "5BE8A3F6C8A5C01D106C0AD820B1A390B168D356"
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +48,38 @@ def archive(path, members):
             else:
                 info.size = len(data)
                 output.addfile(info, io.BytesIO(data))
+
+
+def mock_clearsigned_gpg(monkeypatch, payload, *, fingerprint=PINNED_NODE_SIGNER):
+    """Emit synthetic GPG status/payload; never execute GPG or retrieve keys."""
+    assert installer.NODE_RELEASE_FINGERPRINT == PINNED_NODE_SIGNER
+    calls = []
+    monkeypatch.setattr(installer.shutil, "which", lambda name: "/fake/gpg" if name == "gpg" else None)
+
+    def gpg(argv, **kwargs):
+        calls.append(argv)
+        assert argv[:3] == ["/fake/gpg", "--no-options", "--batch"]
+        assert "--no-auto-key-retrieve" in argv and "--homedir" in argv
+        if "--import" in argv:
+            assert kwargs["input"] == b"synthetic public key"
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        assert "--decrypt" in argv and "--status-fd" in argv
+        Path(argv[argv.index("--output") + 1]).write_bytes(payload)
+        status = f"[GNUPG:] VALIDSIG {fingerprint} 2026-10-29 0 0 4 0 22 8 01\n".encode()
+        return subprocess.CompletedProcess(argv, 0, status, b"")
+
+    monkeypatch.setattr(subprocess, "run", gpg)
+    return calls
+
+
+def clearsign_inputs(directory, checksums):
+    txt = directory / "SHASUMS256.txt"
+    txt.write_bytes(checksums)
+    asc = directory / "SHASUMS256.txt.asc"
+    asc.write_bytes(b"-----BEGIN PGP SIGNED MESSAGE-----\nsynthetic signature")
+    key = directory / "release-key.asc"
+    key.write_bytes(b"synthetic public key")
+    return txt, asc, key
 
 
 @pytest.fixture
@@ -462,6 +496,71 @@ def test_gpg_fails_closed_and_binds_txt(tmp_path, monkeypatch, failure, explicit
     else:
         assert installer.NODE_RELEASE_FINGERPRINT in installer.verify_node_signature(txt, asc, tmp_path, key if explicit_key else None)
         assert len(calls) == (2 if explicit_key else 3)
+
+
+@pytest.mark.parametrize("ending", [b"", b"\n", b"\n\n", b"\n \t\n\t \n", b"\r\n\r\n \t\r\n"])
+@pytest.mark.parametrize("blank_lines_in_verified", [False, True])
+def test_clearsign_trailing_blank_lines_install_and_preflight_pass(
+        artifacts, tmp_path, monkeypatch, ending, blank_lines_in_verified):
+    a = artifacts
+    # Mirror the reviewer's 34-line payload; only its EOF representation varies.
+    original = a.checksums.read_bytes() + b"".join(
+        f"{'f' * 64}  synthetic-other-{index}.tar.gz\n".encode() for index in range(33))
+    changed = original.rstrip(b"\n") + ending
+    standalone, authenticated = (original, changed) if blank_lines_in_verified else (changed, original)
+    a.checksums.write_bytes(standalone)
+    (a.source / "SHASUMS256.txt.asc").write_bytes(
+        b"-----BEGIN PGP SIGNED MESSAGE-----\nsynthetic signature")
+    key = tmp_path / "release-key.asc"
+    key.write_bytes(b"synthetic public key")
+    calls = mock_clearsigned_gpg(monkeypatch, authenticated)
+    monkeypatch.setattr(installer, "verify_node_signature", REAL_VERIFY_NODE_SIGNATURE)
+
+    root = run_install(a, node_release_key=key)
+    assert proof(a).openclaw_commit == a.pins.openclaw_commit
+    ledger = json.loads((root / "install-ledger.json").read_text())
+    assert PINNED_NODE_SIGNER in ledger["node"]["official_signature"]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("tampering", [
+    "hash_character", "filename_character", "insert_entry", "remove_entry", "remove_last_entry",
+    "append_entry", "reorder", "leading_blank", "leading_bytes", "internal_blank",
+    "internal_whitespace", "embedded_cr", "embedded_crlf", "content_trailing_space",
+    "last_content_trailing_space",
+])
+def test_gpg_checksum_content_tampering_is_rejected(tmp_path, monkeypatch, tampering):
+    lines = [f"{letter * 64}  node-{letter}.tar.gz".encode() for letter in "abc"]
+    standalone = b"\n".join(lines) + b"\n"
+    extra = b"d" * 64 + b"  inserted.tar.gz"
+    changed = {
+        "hash_character": b"d" + standalone[1:],
+        "filename_character": standalone.replace(b"node-b", b"node-X"),
+        "insert_entry": b"\n".join([lines[0], extra, *lines[1:]]) + b"\n",
+        "remove_entry": b"\n".join([lines[0], lines[2]]) + b"\n",
+        "remove_last_entry": b"\n".join(lines[:-1]) + b"\n",
+        "append_entry": standalone + extra + b"\n",
+        "reorder": b"\n".join(reversed(lines)) + b"\n",
+        "leading_blank": b"\n" + standalone,
+        "leading_bytes": b" " + standalone,
+        "internal_blank": b"\n".join([lines[0], b"", *lines[1:]]) + b"\n",
+        "internal_whitespace": b"\n".join([lines[0], b" \t", *lines[1:]]) + b"\n",
+        "embedded_cr": standalone.replace(b"node-b", b"node-\rb"),
+        "embedded_crlf": standalone.replace(b"node-b", b"node-\r\nb"),
+        "content_trailing_space": b"\n".join([lines[0] + b" ", *lines[1:]]) + b"\n",
+        "last_content_trailing_space": standalone[:-1] + b" \n",
+    }[tampering]
+    txt, asc, key = clearsign_inputs(tmp_path, standalone)
+    mock_clearsigned_gpg(monkeypatch, changed)
+    with pytest.raises(installer.InstallError, match="differs from the GPG-authenticated"):
+        installer.verify_node_signature(txt, asc, tmp_path, key)
+
+
+def test_clearsign_trailing_blanks_do_not_allow_wrong_fingerprint(tmp_path, monkeypatch):
+    txt, asc, key = clearsign_inputs(tmp_path, b"synthetic checksum line\n")
+    mock_clearsigned_gpg(monkeypatch, txt.read_bytes() + b"\n \t\n", fingerprint="0" * 40)
+    with pytest.raises(installer.InstallError, match="signer is not the pinned fingerprint"):
+        installer.verify_node_signature(txt, asc, tmp_path, key)
 
 
 def test_online_downloader_proxy_and_redirect_policy(tmp_path, monkeypatch):

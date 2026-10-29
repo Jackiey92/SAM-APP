@@ -80,6 +80,14 @@ def download(url: str, destination: Path, allowed: set[str]) -> None:
         raise InstallError(f"official HTTPS download failed (curl exit {result.returncode}); redirects refused")
 
 
+def _checksum_content_lines(raw: bytes) -> list[bytes]:
+    """Normalize CRLF endings and only empty/space/tab lines at EOF."""
+    lines = raw.replace(b"\r\n", b"\n").split(b"\n")
+    while lines and not lines[-1].strip(b" \t"):
+        lines.pop()
+    return lines
+
+
 def verify_node_signature(checksums: Path, signature: Path, work: Path,
                           release_key: Path | None = None) -> str:
     """Authenticate the clearsigned payload, then bind it to the separate txt.
@@ -120,7 +128,7 @@ def verify_node_signature(checksums: Path, signature: Path, work: Path,
         "BADSIG", "ERRSIG", "EXPSIG", "EXPKEYSIG", "REVKEYSIG", "NO_PUBKEY"))) for line in status)
     if result.returncode or bad or signers != [NODE_RELEASE_FINGERPRINT] or not verified.is_file():
         raise InstallError("Node GPG signature verification failed or signer is not the pinned fingerprint")
-    if verified.read_bytes().replace(b"\r\n", b"\n") != checksums.read_bytes().replace(b"\r\n", b"\n"):
+    if _checksum_content_lines(verified.read_bytes()) != _checksum_content_lines(checksums.read_bytes()):
         raise InstallError("Node SHASUMS256.txt differs from the GPG-authenticated clearsigned payload")
     return f"GPG-verified nodejs.org SHASUMS256.txt.asc; signing key {NODE_RELEASE_FINGERPRINT}"
 
