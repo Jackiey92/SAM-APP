@@ -6,6 +6,7 @@ configuration, no real company data.
 """
 import sqlite3
 import threading
+import traceback
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -551,6 +552,59 @@ def test_repr_and_exceptions_never_contain_raw_secrets(bound, ticket):
         bound.resolve_session(grant.secret, now=at(31))
     assert grant.secret not in str(excinfo.value)
     assert grant.secret not in repr(excinfo.value)
+
+
+def _assert_safe_secret_refusal(excinfo, marker):
+    # The refusal must carry no trace of the rejected secret: not in
+    # its message, args, repr, formatted traceback or exception chain.
+    exc = excinfo.value
+    assert exc.__cause__ is None
+    assert exc.__context__ is None
+    surfaces = [str(exc), repr(exc),
+                "".join(traceback.format_exception(exc))]
+    surfaces.extend(str(arg) for arg in exc.args)
+    for text in surfaces:
+        assert marker not in text
+
+
+def test_unencodable_secret_is_refused_without_leaking(bound, ticket,
+                                                       db_path):
+    # A plain str can carry a lone surrogate; encoding it for the
+    # digest would raise UnicodeEncodeError with the raw secret in its
+    # object/args/repr. The boundary refuses it with a fixed,
+    # secret-free error instead. The surrogate is built with chr so no
+    # such byte is written into this source file.
+    marker = "syn-marker-7c3d-pairing"
+    with pytest.raises(ValueError) as excinfo:
+        bound.pair(marker + chr(0xD800), now=at(20),
+                   session_lifetime_seconds=60)
+    _assert_safe_secret_refusal(excinfo, marker)
+    # The refusal happened before any SQL write: nothing was consumed
+    # and no session was issued; the real credential still pairs.
+    assert _scalar(db_path,
+                   "SELECT COUNT(*) FROM host_identity_sessions") == 0
+    assert _scalar(
+        db_path,
+        "SELECT status FROM host_identity_pairing_credentials "
+        "WHERE credential_id = ?", (ticket.credential_id,)) == "pending"
+    grant = bound.pair(ticket.secret, now=at(25),
+                       session_lifetime_seconds=60)
+    assert grant.context.principal_id == "user-syn-owner"
+
+    marker = "syn-marker-7c3d-session"
+    with pytest.raises(ValueError) as excinfo:
+        bound.resolve_session(marker + chr(0xD800), now=at(30))
+    _assert_safe_secret_refusal(excinfo, marker)
+
+    # A normal, UTF-8 encodable unknown secret still takes the original
+    # unauthenticated path, unchanged.
+    unknown = "syn-unknown-" + chr(0x4E16)
+    with pytest.raises(Unauthenticated):
+        bound.resolve_session(unknown, now=at(30))
+    with pytest.raises(PairingCredentialInvalid):
+        bound.pair(unknown, now=at(30), session_lifetime_seconds=60)
+    assert _scalar(db_path,
+                   "SELECT COUNT(*) FROM host_identity_sessions") == 1
 
 
 # -- test isolation contract (coverage item 7) ------------------------------

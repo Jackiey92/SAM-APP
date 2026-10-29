@@ -8,6 +8,7 @@ pairing flow and the real HostAuthorizationService ledger.
 """
 import hashlib
 import sqlite3
+import traceback
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -694,6 +695,39 @@ def test_error_messages_never_leak_secrets(service, grant, policy,
         service.resolve_task_credential(cred.secret, now=at(51))
     assert cred.secret not in str(revoked.value)
     assert grant.secret not in str(revoked.value)
+
+
+def _assert_safe_secret_refusal(excinfo, marker):
+    # The refusal must carry no trace of the rejected secret: not in
+    # its message, args, repr, formatted traceback or exception chain.
+    exc = excinfo.value
+    assert exc.__cause__ is None
+    assert exc.__context__ is None
+    surfaces = [str(exc), repr(exc),
+                "".join(traceback.format_exception(exc))]
+    surfaces.extend(str(arg) for arg in exc.args)
+    for text in surfaces:
+        assert marker not in text
+
+
+def test_resolve_refuses_unencodable_secret_without_leaking(service,
+                                                            db_path):
+    # Same boundary contract as app.host_identity: a plain str carrying
+    # a lone surrogate must not reach the digest's encode, whose
+    # UnicodeEncodeError would embed the raw secret in its
+    # object/args/repr. The surrogate is built with chr so no such byte
+    # is written into this source file.
+    marker = "syn-marker-7c3d-credential"
+    with pytest.raises(ValueError) as excinfo:
+        service.resolve_task_credential(marker + chr(0xD800), now=at(50))
+    _assert_safe_secret_refusal(excinfo, marker)
+    # The read-side refusal left nothing behind.
+    _assert_no_credential_rows(db_path)
+    # A normal, UTF-8 encodable unknown secret still takes the original
+    # not-recognized path, unchanged.
+    unknown = "syn-unknown-" + chr(0x4E16)
+    with pytest.raises(TaskCredentialInvalid):
+        service.resolve_task_credential(unknown, now=at(50))
 
 
 # -- resolution: current state is re-verified every call ---------------------
