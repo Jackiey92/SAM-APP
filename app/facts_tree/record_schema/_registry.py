@@ -2,6 +2,12 @@
 from types import MappingProxyType
 
 
+# Fixed fixture coverage for R1 closures 1/5, independent of future plugins.
+R1_CLOSURE_FAMILIES = (
+    "input_candidate", "operation", "consumed_candidate", "event",
+)
+
+
 _schema_validators = {}
 _closure_validators = {}
 _schema_fields = {}

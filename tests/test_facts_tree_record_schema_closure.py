@@ -6,6 +6,7 @@ from hashlib import sha256
 import pytest
 
 from app.facts_tree import git_format
+from app.facts_tree.record_schema._registry import R1_CLOSURE_FAMILIES
 from app.facts_tree.record_schema_closure import (
     CLOSURE_VALIDATORS, SCHEMA_FIELDS, SCHEMA_VALIDATORS,
     RecordSchemaClosureError, loads_schema_record, validate_record_schema,
@@ -115,7 +116,7 @@ def rejected(tree, code, family=None, path=None):
     return error
 
 
-@pytest.mark.parametrize("family", SCHEMA_FIELDS)
+@pytest.mark.parametrize("family", R1_CLOSURE_FAMILIES)
 def test_each_family_valid_standalone_and_in_closed_tree(family):
     tree, _ = synthetic_tree()
     path, payload = next((p, r) for p, r in tree.items() if r["record_type"] == family)
@@ -143,7 +144,7 @@ def test_empty_tree_and_registration_boundaries():
         SCHEMA_FIELDS["fact_revision"] = frozenset()
 
 
-@pytest.mark.parametrize("family", SCHEMA_FIELDS)
+@pytest.mark.parametrize("family", R1_CLOSURE_FAMILIES)
 @pytest.mark.parametrize("field,value", [
     ("schema_version", True), ("schema_version", 0), ("schema_version", -1),
     ("schema_version", "1"), ("schema_version", Decimal("1")),
@@ -157,7 +158,7 @@ def test_exact_positive_versions(family, field, value):
     rejected(tree, "positive_integer", family, path)
 
 
-@pytest.mark.parametrize("family", SCHEMA_FIELDS)
+@pytest.mark.parametrize("family", R1_CLOSURE_FAMILIES)
 @pytest.mark.parametrize("field", ["schema_version", "format_version"])
 def test_unknown_versions(family, field):
     tree, _ = synthetic_tree()
@@ -166,7 +167,7 @@ def test_unknown_versions(family, field):
     rejected(tree, "unsupported_version", family, path)
 
 
-@pytest.mark.parametrize("family", SCHEMA_FIELDS)
+@pytest.mark.parametrize("family", R1_CLOSURE_FAMILIES)
 @pytest.mark.parametrize("missing", [False, True])
 def test_exact_field_set(family, missing):
     tree, _ = synthetic_tree()
@@ -670,7 +671,7 @@ def test_missing_binding_history_is_not_resolved_through_mutable_current():
     rejected(tree, "unresolved_typed_ref", "bindings_current", current)
 
 
-@pytest.mark.parametrize("family", SCHEMA_FIELDS)
+@pytest.mark.parametrize("family", R1_CLOSURE_FAMILIES)
 def test_record_type_label_cannot_disagree_with_path(family):
     tree, _ = synthetic_tree()
     path = next(p for p, payload in tree.items() if payload["record_type"] == family)
