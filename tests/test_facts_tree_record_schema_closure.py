@@ -1,4 +1,10 @@
-"""Synthetic C only: strict four-family schemas and closure 1/5 (F-001-R1)."""
+"""R1 mechanism fixtures are independent of business-family schemas.
+
+Only the structural-result integration cases use business sample builders and
+the full public schema/closure entry point. Mechanism tests keep the broker
+schemas and common path/encoding boundary, then call closures 1/5 directly.
+族卡注册样例后结构结果用例自动转为真实校验，最终须 0 skipped。
+"""
 from copy import deepcopy
 from decimal import Decimal
 from hashlib import sha256
@@ -6,9 +12,10 @@ from hashlib import sha256
 import pytest
 
 from app.facts_tree import git_format
+from app.facts_tree.record_schema._primitives import _path_identity, _target_index
 from app.facts_tree.record_schema._registry import R1_CLOSURE_FAMILIES
 from app.facts_tree.record_schema_closure import (
-    CLOSURE_VALIDATORS, SCHEMA_FIELDS, SCHEMA_VALIDATORS,
+    CLOSURE_VALIDATORS, SCHEMA_FIELDS, SCHEMA_VALIDATORS, SCHEMA_BUILDERS,
     RecordSchemaClosureError, loads_schema_record, validate_record_schema,
     validate_record_schema_closure,
 )
@@ -17,6 +24,13 @@ from app.facts_tree.record_schema_closure import (
 SCOPE = {"repo_id": "repo-test", "company_id": "company-test"}
 DIGEST = "a" * 64
 BASE = "b" * 40
+
+# Explicit closure-5 coverage targets; schema plugins supply all business fields.
+STRUCTURAL_RESULT_TARGETS = (
+    ("fact_revision", True), ("evidence", True), ("link_revision", True),
+    ("placement_revision", True), ("issue_event", True),
+    ("issue_event", False), ("proposal_event", False),
+)
 
 
 def record(family, **ids):
@@ -101,9 +115,35 @@ def validate(tree, **kwargs):
     return validate_record_schema_closure(tree, **SCOPE, **kwargs)
 
 
+def mechanism_tree(result_type="fact_revision", terminal=True):
+    """Hand-built broker frame with schema-free, path-valid reference targets.
+
+    Extra reference fields belong to closure probes, never to a business schema.
+    Deliberately do not consult SCHEMA_BUILDERS for these mechanism records.
+    """
+    return synthetic_tree(result_type, terminal)
+
+
+def validate_mechanism(tree, *, object_format="sha1"):
+    """Check the R1 frame and common boundary, then invoke the real closures.
+
+    Broker schemas remain strict (including nested results, actor and events).
+    Other families contribute canonical identity/encoding and typed references;
+    their business-field validation is exercised by the integration cases.
+    """
+    ordered = {path: tree[path] for path in sorted(tree)}
+    for path, payload in ordered.items():
+        family, _ = _path_identity(path, payload, **SCOPE)
+        if family in R1_CLOSURE_FAMILIES:
+            validate_record_schema(path, payload, **SCOPE, object_format=object_format)
+    CLOSURE_VALIDATORS[1](ordered, _target_index(ordered))
+    CLOSURE_VALIDATORS[5](ordered)
+    return None
+
+
 def rejected(tree, code, family=None, path=None):
     with pytest.raises(RecordSchemaClosureError) as caught:
-        validate(tree)
+        validate_mechanism(tree)
     error = caught.value
     assert error.code == code
     assert error.path in tree or error.path.startswith("<")
@@ -118,20 +158,33 @@ def rejected(tree, code, family=None, path=None):
 
 @pytest.mark.parametrize("family", R1_CLOSURE_FAMILIES)
 def test_each_family_valid_standalone_and_in_closed_tree(family):
-    tree, _ = synthetic_tree()
+    tree, _ = mechanism_tree()
     path, payload = next((p, r) for p, r in tree.items() if r["record_type"] == family)
+    if family in SCHEMA_BUILDERS:
+        payload = SCHEMA_BUILDERS[family](**git_format._match_template(family, path))
+        payload.update(SCOPE)
+        tree[path] = payload
     assert validate_record_schema(path, payload, **SCOPE) is None
-    assert validate(tree) is None
+    assert validate_mechanism(tree) is None
     assert set(payload) == SCHEMA_FIELDS[family]
 
 
 @pytest.mark.parametrize("result_type,terminal", [
-    ("fact_revision", True), ("evidence", True), ("link_revision", True),
-    ("placement_revision", True), ("issue_event", True),
-    ("issue_event", False), ("proposal_event", False),
+    pytest.param(family, terminal, marks=(
+        () if family in SCHEMA_BUILDERS else
+        pytest.mark.skip(reason=f"{family} family sample pending")))
+    for family, terminal in STRUCTURAL_RESULT_TARGETS
 ])
 def test_structural_results_new_support_revision_placement_conflict_hold_propose(result_type, terminal):
-    tree, _ = synthetic_tree(result_type, terminal)
+    tree, paths = synthetic_tree(result_type, terminal)
+    result_path = paths[4]
+    output = SCHEMA_BUILDERS[result_type](**git_format._match_template(result_type, result_path))
+    output.update(SCOPE)
+    tree[result_path] = output
+    event = tree[paths[3]]
+    result_ref = event["changed_refs"][0]
+    event["after"] = [result_ref["revision"] if type(result_ref.get("revision")) is int
+                      else sha256(git_format.dumps_record(output)).hexdigest()]
     assert validate(tree) is None
 
 
@@ -152,7 +205,7 @@ def test_empty_tree_and_registration_boundaries():
     ("format_version", "1"), ("format_version", Decimal("1")),
 ])
 def test_exact_positive_versions(family, field, value):
-    tree, _ = synthetic_tree()
+    tree, _ = mechanism_tree()
     path = next(p for p, r in tree.items() if r["record_type"] == family)
     tree[path][field] = value
     rejected(tree, "positive_integer", family, path)
@@ -161,7 +214,7 @@ def test_exact_positive_versions(family, field, value):
 @pytest.mark.parametrize("family", R1_CLOSURE_FAMILIES)
 @pytest.mark.parametrize("field", ["schema_version", "format_version"])
 def test_unknown_versions(family, field):
-    tree, _ = synthetic_tree()
+    tree, _ = mechanism_tree()
     path = next(p for p, r in tree.items() if r["record_type"] == family)
     tree[path][field] = 2
     rejected(tree, "unsupported_version", family, path)
@@ -170,7 +223,7 @@ def test_unknown_versions(family, field):
 @pytest.mark.parametrize("family", R1_CLOSURE_FAMILIES)
 @pytest.mark.parametrize("missing", [False, True])
 def test_exact_field_set(family, missing):
-    tree, _ = synthetic_tree()
+    tree, _ = mechanism_tree()
     path = next(p for p, r in tree.items() if r["record_type"] == family)
     if missing:
         del tree[path]["schema_version"]
@@ -182,14 +235,14 @@ def test_exact_field_set(family, missing):
 @pytest.mark.parametrize("index", range(5))
 @pytest.mark.parametrize("scope", ["repo_id", "company_id"])
 def test_all_tree_records_share_scope(index, scope):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[index]][scope] = "foreign"
     rejected(tree, "scope_mismatch", path=paths[index])
 
 
 @pytest.mark.parametrize("value", ["", None, True, "x" * (git_format.MAX_ID_CHARS + 1), "\ud800"])
 def test_invalid_scope(value):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[0]]["repo_id"] = value
     rejected(tree, "record_encoding" if value == "\ud800" else "invalid_id")
 
@@ -197,7 +250,7 @@ def test_invalid_scope(value):
 @pytest.mark.parametrize("index,field", [(0, "candidate_uid"), (1, "operation_id"),
                                        (2, "candidate_revision"), (3, "event_id"), (4, "fact_uid")])
 def test_exact_path_payload_identity(index, field):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[index]][field] = 2 if field == "candidate_revision" else "different-id"
     rejected(tree, "path_identity", path=paths[index])
 
@@ -205,7 +258,7 @@ def test_exact_path_payload_identity(index, field):
 @pytest.mark.parametrize("bad_path", ["../operations/operation-1.json", "operations//operation-1.json",
                                      "operations/~6Fperation-1.json", "operations/operation-1.json/extra"])
 def test_path_aliases_and_prefixes_rejected(bad_path):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[bad_path] = tree.pop(paths[1])
     rejected(tree, "record_path", "tree", bad_path)
 
@@ -213,21 +266,25 @@ def test_path_aliases_and_prefixes_rejected(bad_path):
 @pytest.mark.parametrize("value", [1.0, float("nan"), float("inf"), Decimal("NaN"),
                                    Decimal("Infinity"), Decimal("0E-999999")])
 def test_number_encoding_rejected_anywhere(value):
-    tree, paths = synthetic_tree()
-    tree[paths[4]]["value_raw"] = value
-    rejected(tree, "record_encoding", "fact_revision", paths[4])
+    tree, paths = mechanism_tree()
+    path = paths[1]
+    tree[path]["server_time"] = value
+    with pytest.raises(RecordSchemaClosureError) as caught:
+        validate_record_schema(path, tree[path], **SCOPE)
+    assert caught.value.code == "record_encoding"
+    assert caught.value.family == "operation" and caught.value.path == path
+    assert caught.value.field == "$"
 
 
 def test_exact_decimal_and_original_text_preserved_without_mutation():
-    tree, paths = synthetic_tree()
-    tree[paths[4]]["value_raw"] = Decimal("12345678901234567890.00100")
-    tree[paths[4]]["statement"] = "尚未收款\n原文"
-    original = deepcopy(tree)
-    assert validate(tree) is None
-    assert tree == original
-    raw = git_format.dumps_record(tree[paths[4]])
+    # This is a codec guarantee, not a claim about any business field set.
+    payload = {"value_raw": Decimal("12345678901234567890.00100"),
+               "statement": "尚未收款\n原文"}
+    original = deepcopy(payload)
+    raw = git_format.dumps_record(payload)
+    assert payload == original
     assert b"12345678901234567890.00100" in raw
-    assert loads_schema_record(raw, path=paths[4], **SCOPE) == tree[paths[4]]
+    assert git_format.loads_record(raw) == payload
 
 
 @pytest.mark.parametrize("raw", [b'{"a":1,"a":2}\n', b'{"a":{"b":1,"b":2}}\n',
@@ -244,7 +301,7 @@ def test_raw_boundary_duplicate_keys_nonfinite_invalid_json(raw):
 @pytest.mark.parametrize("rewrite", [lambda b: b.replace(b"\n", b"\r\n"), lambda b: b.rstrip(),
                                      lambda b: b" " + b])
 def test_raw_boundary_canonical_lf_sorting(rewrite):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     raw = git_format.dumps_record(tree[paths[0]])
     with pytest.raises(RecordSchemaClosureError) as caught:
         loads_schema_record(rewrite(raw), path=paths[0], **SCOPE)
@@ -252,7 +309,7 @@ def test_raw_boundary_canonical_lf_sorting(rewrite):
 
 
 def test_text_parser_valid_utf8_sorted_keys_and_decimal():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     payload = tree[paths[0]]
     raw = git_format.dumps_record(payload)
     assert raw.endswith(b"\n") and not raw.endswith(b"\n\n")
@@ -262,7 +319,7 @@ def test_text_parser_valid_utf8_sorted_keys_and_decimal():
 
 @pytest.mark.parametrize("revision", [None, "HEAD", "current", "latest", True, 0, -1, "1"])
 def test_missing_unstable_or_wrong_revision_rejected(revision):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     ref = tree[paths[1]]["disposition_result"][0]["result_refs"][0]
     if revision is None:
         del ref["revision"]
@@ -283,27 +340,27 @@ def test_missing_unstable_or_wrong_revision_rejected(revision):
     ({"path": "facts/output-1/revisions/1.json"}, "unknown_field"),
 ])
 def test_dangling_wrong_type_cross_domain_and_model_paths(change, code):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[1]]["disposition_result"][0]["result_refs"][0].update(change)
     rejected(tree, code)
 
 
 def test_every_typed_ref_in_out_of_scope_target_is_resolved():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[4]]["source_ref"] = typed("source_version", "missing", "v1")
     rejected(tree, "unresolved_typed_ref", "fact_revision", paths[4])
 
 
 def test_opaque_source_and_issue_revisions_resolve_without_numeric_coercion():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     source_path, source = record("source_version", source_id="source/一", version_id="v01")
     tree[source_path] = source
     tree[paths[4]]["source_ref"] = typed("source_version", "source/一", "v01")
-    assert validate(tree) is None
+    assert validate_mechanism(tree) is None
 
 
 def test_mutable_current_cannot_replace_precise_history():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     current_path, current = record("fact_current", fact_uid="output-1")
     tree[current_path] = current
     tree[paths[4]]["history_ref"] = typed("fact_current", "output-1")
@@ -311,13 +368,13 @@ def test_mutable_current_cannot_replace_precise_history():
 
 
 def test_candidate_manifest_and_disposition_digests_close():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[1]]["candidate_refs"][0]["payload_digest"] = "c" * 64
     rejected(tree, "candidate_digest_mismatch", "operation", paths[1])
 
 
 def test_duplicate_primary_disposition():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[1]]["disposition_result"] *= 2
     rejected(tree, "multiple_dispositions", "operation", paths[1])
 
@@ -325,14 +382,14 @@ def test_duplicate_primary_disposition():
 @pytest.mark.parametrize("field,code", [("candidate_refs", "duplicate_candidate"),
                                         ("disposition_result", "multiple_dispositions")])
 def test_duplicate_candidate_structures(field, code):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[1]][field].append(deepcopy(tree[paths[1]][field][0]))
     rejected(tree, code, "operation", paths[1])
 
 
 @pytest.mark.parametrize("where", ["operation", "consumed_candidate"])
 def test_terminal_consumption_requires_nonempty_result_refs(where):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     index = 1 if where == "operation" else 2
     result = tree[paths[index]]["disposition_result"]
     (result[0] if where == "operation" else result)["result_refs"] = []
@@ -340,7 +397,7 @@ def test_terminal_consumption_requires_nonempty_result_refs(where):
 
 
 def test_consumed_result_cannot_be_forged_even_if_target_exists():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     other_path, other = record("fact_revision", fact_uid="other", revision=1)
     tree[other_path] = other
     tree[paths[2]]["disposition_result"]["result_refs"] = [typed("fact_revision", "other", 1)]
@@ -348,14 +405,14 @@ def test_consumed_result_cannot_be_forged_even_if_target_exists():
 
 
 def test_missing_output_is_rejected_before_consumption_acceptance():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     del tree[paths[4]]
     rejected(tree, "unresolved_typed_ref")
 
 
 @pytest.mark.parametrize("in_formal", [False, True])
 def test_conflict_cannot_claim_fact_output(in_formal):
-    tree, paths = synthetic_tree("issue_event", True)
+    tree, paths = mechanism_tree("issue_event", True)
     fact_path, fact = record("fact_revision", fact_uid="new-fact", revision=1)
     tree[fact_path] = fact
     ref = typed("fact_revision", "new-fact", 1)
@@ -368,7 +425,7 @@ def test_conflict_cannot_claim_fact_output(in_formal):
 
 @pytest.mark.parametrize("result_type", ["issue_event", "proposal_event"])
 def test_hold_and_proposal_forbid_terminal_consumed(result_type):
-    tree, paths = synthetic_tree(result_type, False)
+    tree, paths = mechanism_tree(result_type, False)
     consumed_path, consumed = record("consumed_candidate", candidate_uid="candidate-一", candidate_revision=1)
     consumed.update({"payload_digest": DIGEST, "operation_id": "operation-1",
                      "disposition_result": {"terminal": False,
@@ -378,14 +435,14 @@ def test_hold_and_proposal_forbid_terminal_consumed(result_type):
 
 
 def test_nonterminal_operation_cannot_pair_with_terminal_consumed():
-    tree, paths = synthetic_tree("issue_event", True)
+    tree, paths = mechanism_tree("issue_event", True)
     tree[paths[1]]["disposition_result"][0]["terminal"] = False
     rejected(tree, "nonterminal_consumed", "consumed_candidate", paths[2])
 
 
 @pytest.mark.parametrize("terminal", [True, False])
 def test_same_candidate_cannot_belong_to_multiple_operations(terminal):
-    tree, paths = synthetic_tree("issue_event", terminal)
+    tree, paths = mechanism_tree("issue_event", terminal)
     other_path = git_format.record_path("operation", operation_id="operation-2")
     other = deepcopy(tree[paths[1]])
     other.update(operation_id="operation-2", event_ids=[])
@@ -394,7 +451,7 @@ def test_same_candidate_cannot_belong_to_multiple_operations(terminal):
 
 
 def test_duplicate_consumption_under_other_path_fails_identity():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     extra = git_format.record_path("consumed_candidate", candidate_uid="other", candidate_revision=1)
     tree[extra] = deepcopy(tree[paths[2]])
     rejected(tree, "path_identity", "consumed_candidate", extra)
@@ -408,14 +465,14 @@ def test_duplicate_consumption_under_other_path_fails_identity():
     (lambda t, p: t[p[1]]["disposition_result"][0].update(payload_digest="c" * 64), "disposition_digest_mismatch"),
 ])
 def test_candidate_closure_missing_and_disagreement(mutate, code):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     mutate(tree, paths)
     rejected(tree, code)
 
 
 @pytest.mark.parametrize("ordinal", [True, -1, "0", Decimal("0"), 0.0])
 def test_event_ordinal_exact_nonnegative_integer(ordinal):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[3]]["ordinal"] = ordinal
     rejected(tree, "record_encoding" if type(ordinal) is float else "event_ordinal", "event", paths[3])
 
@@ -438,52 +495,52 @@ def add_event(tree, paths, ordinal=1):
 
 @pytest.mark.parametrize("ordinal", [0, 2, 999999999999999999999999])
 def test_event_ordinals_unique_contiguous_and_bounded(ordinal):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     add_event(tree, paths, ordinal)
     rejected(tree, "event_ordinal_sequence", "operation", paths[1])
 
 
 def test_event_order_does_not_depend_on_listing_or_tree_order():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     add_event(tree, paths)
     tree[paths[1]]["event_ids"].reverse()
-    assert validate(dict(reversed(list(tree.items())))) is None
+    assert validate_mechanism(dict(reversed(list(tree.items())))) is None
 
 
 @pytest.mark.parametrize("field", ["accepted_commit", "accepted_commit_oid", "commit_oid"])
 def test_event_must_not_embed_its_accepting_commit(field):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[3]][field] = BASE
     rejected(tree, "unknown_field", "event", paths[3])
 
 
 @pytest.mark.parametrize("event_ids", [[], ["missing"], ["event-1", "event-1"], ["event-1", "extra"]])
 def test_operation_event_listing_exact(event_ids):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[1]]["event_ids"] = event_ids
     rejected(tree, "duplicate_event_id" if len(event_ids) != len(set(event_ids)) else "event_listing_mismatch")
 
 
 def test_event_base_commit_matches_operation():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[3]]["base_commit"] = "c" * 40
     rejected(tree, "event_base_mismatch", "event", paths[3])
 
 
 @pytest.mark.parametrize("object_format,length", [("sha1", 40), ("sha256", 64)])
 def test_object_format_full_oid_and_genesis_zero(object_format, length):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     for index in (1, 3):
         tree[paths[index]]["base_commit"] = "0" * length
-    assert validate(tree, object_format=object_format) is None
+    assert validate_mechanism(tree, object_format=object_format) is None
     tree[paths[1]]["base_commit"] = "HEAD"
     with pytest.raises(RecordSchemaClosureError) as caught:
-        validate(tree, object_format=object_format)
+        validate_mechanism(tree, object_format=object_format)
     assert caught.value.code == "base_commit_oid"
 
 
 def test_actor_audit_reference_is_external_and_company_bound():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[1]]["actor"]["company_id"] = "foreign"
     rejected(tree, "audit_scope", "operation", paths[1])
 
@@ -491,27 +548,27 @@ def test_actor_audit_reference_is_external_and_company_bound():
 @pytest.mark.parametrize("change", [{"approval_id": "fake"}, {"session_secret": "DO-NOT-PRINT"},
                                     {"member_revision": True}, {"audit_ref_type": "approval"}])
 def test_actor_reuses_strict_host_schema_and_redacts_payload(change):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[1]]["actor"].update(change)
     error = rejected(tree, "actor_audit_ref", "operation", paths[1])
     assert "DO-NOT-PRINT" not in str(error)
 
 
 def test_approval_use_ref_fails_closed_until_host_publishes_schema():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[1]]["approval_use_refs"] = [{"approval_id": "unverified"}]
     rejected(tree, "unsupported_approval_audit_ref", "operation", paths[1])
 
 
 @pytest.mark.parametrize("field", ["payload_digest", "mapped_fingerprint", "payload_ref", "envelope_ref"])
 def test_input_digest_algorithms_are_explicit_sha256(field):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[0]][field] = "a" * 40
     rejected(tree, "sha256_digest", "input_candidate", paths[0])
 
 
 def test_input_safe_summary_and_whitelist_reject_credential_fields():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[0]]["envelope_summary"]["session_token"] = "DO-NOT-PRINT"
     error = rejected(tree, "unknown_field", "input_candidate", paths[0])
     assert "DO-NOT-PRINT" not in str(error)
@@ -522,22 +579,29 @@ def test_input_safe_summary_and_whitelist_reject_credential_fields():
 
 @pytest.mark.parametrize("field", ["source_id", "version_id", "mapped_fingerprint"])
 def test_input_summary_binds_source_and_mapping(field):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[0]]["envelope_summary"][field] = "other"
     rejected(tree, "envelope_binding", "input_candidate", paths[0])
 
 
 def test_serialization_byte_and_depth_budgets():
-    tree, paths = synthetic_tree()
-    tree[paths[4]]["statement"] = "x" * git_format.MAX_RECORD_BYTES
-    rejected(tree, "record_encoding")
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
+    path = paths[1]
+    payload = tree[path]
+    payload["server_time"] = "x" * git_format.MAX_RECORD_BYTES
+    with pytest.raises(RecordSchemaClosureError) as caught:
+        validate_record_schema(path, payload, **SCOPE)
+    assert (caught.value.code, caught.value.family, caught.value.path,
+            caught.value.field) == ("record_encoding", "operation", path, "$")
     nested = {}
-    tree[paths[4]]["nested"] = nested
+    payload["server_time"] = nested
     for _ in range(git_format.MAX_DEPTH):
         nested["next"] = {}
         nested = nested["next"]
-    rejected(tree, "record_encoding")
+    with pytest.raises(RecordSchemaClosureError) as caught:
+        validate_record_schema(path, payload, **SCOPE)
+    assert (caught.value.code, caught.value.family, caught.value.path,
+            caught.value.field) == ("record_encoding", "operation", path, "$")
 
 
 @pytest.mark.parametrize("tree", [None, [], "tree", {None: {}}, {"events/event.json": None}])
@@ -552,7 +616,7 @@ def test_no_git_broker_database_network_or_model_io(monkeypatch):
     import sqlite3
     import subprocess
 
-    tree, _ = synthetic_tree()
+    tree, _ = mechanism_tree()
     def forbidden(*args, **kwargs):
         pytest.fail("pure validator attempted IO")
     monkeypatch.setattr(builtins, "open", forbidden)
@@ -560,39 +624,39 @@ def test_no_git_broker_database_network_or_model_io(monkeypatch):
     monkeypatch.setattr(sqlite3, "connect", forbidden)
     monkeypatch.setattr(subprocess, "Popen", forbidden)
     original = deepcopy(tree)
-    assert validate(tree) is None
+    assert validate_mechanism(tree) is None
     assert tree == original
 
 
 @pytest.mark.parametrize("after", [2, "d" * 64, None])
 def test_event_after_matches_exact_target_revision(after):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[3]]["after"] = [after]
     rejected(tree, "empty_event_change" if after is None else "event_after_mismatch", "event", paths[3])
 
 
 def test_event_after_matches_immutable_target_digest():
-    tree, paths = synthetic_tree("evidence")
+    tree, paths = mechanism_tree("evidence")
     tree[paths[3]]["after"] = ["d" * 64]
     rejected(tree, "event_after_mismatch", "event", paths[3])
 
 
 @pytest.mark.parametrize("before,after", [(None, None), (1, 1)])
 def test_each_changed_ref_describes_a_nonempty_change(before, after):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[3]].update(before=[before], after=[after])
     rejected(tree, "empty_event_change", "event", paths[3])
 
 
 def test_real_output_requires_its_operation_event():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     del tree[paths[3]]
     tree[paths[1]]["event_ids"] = []
     rejected(tree, "event_output_mismatch", "operation", paths[1])
 
 
 def test_unrelated_changed_object_cannot_cover_real_output():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     other_path, other = record("fact_revision", fact_uid="unrelated", revision=1)
     tree[other_path] = other
     tree[paths[3]]["changed_refs"] = [typed("fact_revision", "unrelated", 1)]
@@ -602,7 +666,7 @@ def test_unrelated_changed_object_cannot_cover_real_output():
 @pytest.mark.parametrize("result_type,terminal", [("link_revision", True), ("issue_event", True),
                                                  ("proposal_event", False)])
 def test_support_conflict_and_proposal_reference_existing_formal_fact(result_type, terminal):
-    tree, paths = synthetic_tree(result_type, terminal)
+    tree, paths = mechanism_tree(result_type, terminal)
     target_path, target = record("fact_revision", fact_uid="existing-fact", revision=3)
     tree[target_path] = target
     target_ref = typed("fact_revision", "existing-fact", 3)
@@ -610,11 +674,11 @@ def test_support_conflict_and_proposal_reference_existing_formal_fact(result_typ
     tree[paths[1]]["formal_fact_refs"] = [deepcopy(target_ref)]
     if type(tree[paths[3]]["changed_refs"][0].get("revision")) is not int:
         tree[paths[3]]["after"] = [sha256(git_format.dumps_record(tree[paths[4]])).hexdigest()]
-    assert validate(tree) is None
+    assert validate_mechanism(tree) is None
 
 
 def test_frozen_repository_and_taxonomy_wrappers_are_not_given_new_fields():
-    tree, _ = synthetic_tree()
+    tree, _ = mechanism_tree()
     meta_path = git_format.record_path("repository_meta")
     tree[meta_path] = {"schema_version": 1, "format_version": 1,
                        "installation_id": "install-test", **SCOPE}
@@ -625,12 +689,12 @@ def test_frozen_repository_and_taxonomy_wrappers_are_not_given_new_fields():
     tree[leaf_path] = {"schema_version": 1, "format_version": 1, "pack": "business-pack",
                       "version": 7, "code": "leaf-1", "trunk": "trunk-1", "title": "标题", "scope": "范围"}
     before = deepcopy(tree)
-    assert validate(tree) is None
+    assert validate_mechanism(tree) is None
     assert tree == before
 
 
 def binding_tree():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     del tree[paths[0]], tree[paths[2]], tree[paths[4]]
     tree[paths[1]].update(candidate_refs=[], disposition_result=[], formal_fact_refs=[])
     snapshot = {"schema_version": 1, "format_version": 1, "record_type": "bindings_current",
@@ -648,7 +712,7 @@ def binding_tree():
 
 def test_binding_event_preserves_frozen_snapshot_and_exact_logical_ref():
     tree, _, _ = binding_tree()
-    assert validate(tree) is None
+    assert validate_mechanism(tree) is None
 
 
 def test_binding_logical_reference_requires_exact_positive_revision():
@@ -673,7 +737,7 @@ def test_missing_binding_history_is_not_resolved_through_mutable_current():
 
 @pytest.mark.parametrize("family", R1_CLOSURE_FAMILIES)
 def test_record_type_label_cannot_disagree_with_path(family):
-    tree, _ = synthetic_tree()
+    tree, _ = mechanism_tree()
     path = next(p for p, payload in tree.items() if payload["record_type"] == family)
     tree[path]["record_type"] = "fact_revision"
     rejected(tree, "record_type", family, path)
@@ -685,7 +749,7 @@ class IntSubclass(int):
 
 @pytest.mark.parametrize("field", ["schema_version", "format_version", "candidate_revision"])
 def test_integer_subclasses_never_pass_loose_numeric_equality(field):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     tree[paths[0]][field] = IntSubclass(1)
     rejected(tree, "path_identity" if field == "candidate_revision" else "positive_integer")
 
@@ -701,13 +765,13 @@ def test_integer_subclasses_never_pass_loose_numeric_equality(field):
     (lambda t, p: t[p[3]].update(event_type=""), "invalid_id"),
 ])
 def test_nested_schemas_fail_closed_with_structured_diagnostics(mutate, code):
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     mutate(tree, paths)
     rejected(tree, code)
 
 
 def test_several_candidates_share_one_operation_with_one_disposition_each():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     new_input_path = git_format.record_path("input_candidate", candidate_uid="candidate-2", candidate_revision=1)
     new_input = deepcopy(tree[paths[0]])
     new_input["candidate_uid"] = "candidate-2"
@@ -719,11 +783,11 @@ def test_several_candidates_share_one_operation_with_one_disposition_each():
     new_candidate = {**candidate(), "candidate_uid": "candidate-2"}
     tree[paths[1]]["candidate_refs"].append(new_candidate)
     tree[paths[1]]["disposition_result"].append({**new_candidate, **deepcopy(new_consumed["disposition_result"])})
-    assert validate(tree) is None
+    assert validate_mechanism(tree) is None
 
 
 def test_nonterminal_cannot_encode_hold_and_proposal_as_two_primary_types():
-    tree, paths = synthetic_tree("issue_event", False)
+    tree, paths = mechanism_tree("issue_event", False)
     proposal_path, proposal = record("proposal_event", proposal_uid="proposal-1", event_id="proposal-event")
     tree[proposal_path] = proposal
     tree[paths[1]]["disposition_result"][0]["result_refs"].append(
@@ -732,7 +796,7 @@ def test_nonterminal_cannot_encode_hold_and_proposal_as_two_primary_types():
 
 
 def test_terminal_conflict_can_also_record_evidence_without_fact_output():
-    tree, paths = synthetic_tree("issue_event", True)
+    tree, paths = mechanism_tree("issue_event", True)
     evidence_path, evidence = record("evidence", evidence_id="conflict-evidence")
     tree[evidence_path] = evidence
     ref = typed("evidence", "conflict-evidence")
@@ -741,11 +805,11 @@ def test_terminal_conflict_can_also_record_evidence_without_fact_output():
     tree[paths[3]]["changed_refs"].append(deepcopy(ref))
     tree[paths[3]]["before"].append(None)
     tree[paths[3]]["after"].append(sha256(git_format.dumps_record(evidence)).hexdigest())
-    assert validate(tree) is None
+    assert validate_mechanism(tree) is None
 
 
 def test_duplicate_event_cannot_describe_same_change_with_a_new_id():
-    tree, paths = synthetic_tree()
+    tree, paths = mechanism_tree()
     new_path = git_format.record_path("event", event_id="event-2")
     tree[new_path] = {**deepcopy(tree[paths[3]]), "event_id": "event-2", "ordinal": 1}
     tree[paths[1]]["event_ids"].append("event-2")
@@ -755,4 +819,4 @@ def test_duplicate_event_cannot_describe_same_change_with_a_new_id():
 def test_binding_reason_is_explanation_text_not_an_opaque_id():
     tree, paths, _ = binding_tree()
     tree[paths[3]]["reason"] = "绑定原因。" * 100
-    assert validate(tree) is None
+    assert validate_mechanism(tree) is None

@@ -42,7 +42,7 @@ from ._primitives import (
     RecordSchemaClosureError, _canonical, _exact, _fail, _id, _path_identity,
     _positive, _target_index, bindings_current, git_format,
 )
-from ._registry import _freeze_registries
+from ._registry import _freeze_registries, get_sample_builder, register_sample
 
 
 # Every non-private module in this package is a self-registering plugin.
@@ -51,13 +51,15 @@ for _module_name in sorted(info.name for info in _iter_modules(__path__)
                            if not info.name.startswith("_")):
     _import_module(f"{__name__}.{_module_name}")
 
-SCHEMA_VALIDATORS, CLOSURE_VALIDATORS, SCHEMA_FIELDS = _freeze_registries()
+SCHEMA_VALIDATORS, CLOSURE_VALIDATORS, SCHEMA_FIELDS, SCHEMA_BUILDERS = _freeze_registries()
+assert set(SCHEMA_BUILDERS) <= set(SCHEMA_FIELDS), "sample registered without schema"
 _BINDING_EVENT_FIELDS = SCHEMA_FIELDS["event"] | {"actor", "reason", "approval_use_refs"}
 
 
 __all__ = [
     "RecordSchemaClosureError", "SCHEMA_FIELDS", "SCHEMA_VALIDATORS",
-    "CLOSURE_VALIDATORS", "validate_record_schema", "loads_schema_record",
+    "CLOSURE_VALIDATORS", "SCHEMA_BUILDERS", "get_sample_builder", "register_sample",
+    "validate_record_schema", "loads_schema_record",
     "validate_record_schema_closure",
 ]
 
