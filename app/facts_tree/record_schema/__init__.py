@@ -64,6 +64,12 @@ __all__ = [
 ]
 
 
+# Minimal schema-plugin packages need not contain the optional column metadata.
+if any(info.name == "columns" for info in _iter_modules(__path__)):
+    SCHEMA_COLUMNS = _import_module(f"{__name__}.columns").SCHEMA_COLUMNS
+    __all__.append("SCHEMA_COLUMNS")
+
+
 def validate_record_schema(path, payload, *, repo_id, company_id,
                            object_format="sha1"):
     """Validate one record; no cross-record closure or authorization claim."""
