@@ -185,9 +185,11 @@ from app.facts_tree.record_schema._primitives import _fail
 FAMILY = {family!r}
 IDS = {ids!r}
 FIELDS = frozenset({COMMON!r}) | set(IDS) | {{"probe_token"}}
+VALIDATED = []
 
 @register_schema(FAMILY, fields=FIELDS)
 def validate(payload, family, path, oid_length):
+    VALIDATED.append(path)
     if payload["probe_token"] != "sample-was-used":
         _fail(family, path, "probe_token", "probe_token")
 
@@ -245,15 +247,85 @@ def test_temporary_plugin_automatically_enables_closure5_target(tmp_path, family
     enabled = sum(f == family for f, _ in STRUCTURAL_RESULT_TARGETS)
     body = '''
 import pytest
-raise SystemExit(pytest.main([
+exit_code = pytest.main([
     "-q", "-rs", "tests/test_facts_tree_record_schema_closure.py",
-    "-k", "test_structural_results_new_support_revision_placement_conflict_hold_propose",
-]))
+])
+assert record_schema.sample_probe.VALIDATED, "business schema was never checked"
+raise SystemExit(exit_code)
 '''
     result = run_discovery_probe(tmp_path, probe_plugin(family, ids), body)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert f"{enabled} passed" in result.stdout
+    assert f"{220 + enabled} passed" in result.stdout
     assert f"{len(STRUCTURAL_RESULT_TARGETS) - enabled} skipped" in result.stdout
     assert f"{family} family sample pending" not in result.stdout
     assert not (tmp_path / "record_schema").exists()
     assert dict(record_schema.SCHEMA_BUILDERS) == original_builders
+
+
+def test_all_business_schemas_leave_entire_r1_suite_independent(tmp_path):
+    # Derive path identities from the path authority, not an appendix field table.
+    # Frozen wrappers and the frozen binding format are not new business plugins.
+    families = set(git_format.RECORD_TYPES) - set(R1_CLOSURE_FAMILIES) - {
+        "repository_meta", "taxonomy_manifest", "taxonomy_leaf", "bindings_current"}
+    source = ["PROBES = []"]
+    for family in sorted(families):
+        ids = {name: 1 if name in git_format._REVISION_NAMES else "probe-id"
+               for name in git_format._TEMPLATES[family][1]}
+        source += ["namespace = {}", f"exec({probe_plugin(family, ids)!r}, namespace)",
+                   "PROBES.append(namespace)"]
+    result = run_discovery_probe(tmp_path, "\n".join(source), '''
+import pytest
+exit_code = pytest.main(["-q", "-rs", "tests/test_facts_tree_record_schema_closure.py"])
+targets = {f for f, _ in __import__(
+    "tests.test_facts_tree_record_schema_closure", fromlist=["STRUCTURAL_RESULT_TARGETS"]
+).STRUCTURAL_RESULT_TARGETS}
+assert all(p["VALIDATED"] for p in record_schema.sample_probe.PROBES if p["FAMILY"] in targets)
+raise SystemExit(exit_code)
+''')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "227 passed" in result.stdout
+    assert "skipped" not in result.stdout
+    assert not (tmp_path / "record_schema").exists()
+
+
+@pytest.mark.parametrize("family", ["fact_revision", "evidence"])
+def test_mechanism_uses_real_closures_without_business_schema(monkeypatch, family):
+    from tests.test_facts_tree_record_schema_closure import (
+        SCOPE, mechanism_tree, validate_mechanism,
+    )
+
+    tree, paths = mechanism_tree(family)
+    output_path = paths[4]
+    calls = []
+
+    def reject_business(payload, actual_family, path, oid_length):
+        raise AssertionError("business schema reached by mechanism test")
+
+    validators = {**record_schema.SCHEMA_VALIDATORS, family: reject_business}
+    fields = {**record_schema.SCHEMA_FIELDS, family: frozenset(tree[output_path])}
+    monkeypatch.setattr(record_schema, "SCHEMA_VALIDATORS", validators)
+    monkeypatch.setattr(record_schema, "SCHEMA_FIELDS", fields)
+    for number in (1, 5):
+        original = record_schema.CLOSURE_VALIDATORS[number]
+
+        def closure(*args, number=number, original=original):
+            calls.append(number)
+            return original(*args)
+
+        # The exported mapping stays immutable; only the test module's view is replaced.
+        from tests import test_facts_tree_record_schema_closure as r1
+        monkeypatch.setattr(r1, "CLOSURE_VALIDATORS", {**r1.CLOSURE_VALIDATORS, number: closure})
+
+    assert validate_mechanism(tree) is None
+    assert calls == [1, 5]
+    with pytest.raises(AssertionError, match="business schema reached"):
+        record_schema.validate_record_schema(output_path, tree[output_path], **SCOPE)
+
+
+def test_mechanism_preserves_nested_reference_field_coordinates():
+    from tests.test_facts_tree_record_schema_closure import mechanism_tree, rejected, typed
+
+    tree, paths = mechanism_tree()
+    tree[paths[4]]["nested"] = [{"source_ref": typed("source_version", "missing", "v1")}]
+    error = rejected(tree, "unresolved_typed_ref", "fact_revision", paths[4])
+    assert error.field == "$.nested[0].source_ref"
