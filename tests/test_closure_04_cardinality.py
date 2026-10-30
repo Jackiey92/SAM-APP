@@ -1,4 +1,4 @@
-"""R2-CL4: appendix B v1.1 §5, rules 4.1 (reject) and 4.4 (retain)."""
+"""R2-CL4: appendix B v1.2 §5, rules 4.1 (reject) and 4.4 (retain)."""
 from copy import deepcopy
 
 import pytest
@@ -24,15 +24,16 @@ def validate(tree):
     return validate_record_schema_closure(tree, **SCOPE)
 
 
-def reject(tree, fact_uid="fact-1"):
+def reject(tree, fact_uid="fact-1", *, code="active_fact_without_primary_placement",
+           family="fact_current", field="fact_uid"):
     before = deepcopy(tree)
     with pytest.raises(RecordSchemaClosureError) as caught:
         validate(tree)
     error = caught.value
-    assert error.code == "active_fact_without_primary_placement"
-    assert error.family == "fact_current"
-    assert error.path == git_format.record_path("fact_current", fact_uid=fact_uid)
-    assert error.field == "fact_uid"
+    assert error.code == code
+    assert error.family == family
+    assert error.path == git_format.record_path(family, fact_uid=fact_uid)
+    assert error.field == field
     assert tree == before
 
 
@@ -71,13 +72,14 @@ def test_active_fact_without_placement_current_is_rejected_despite_history():
 def test_active_fact_with_dangling_placement_current_is_rejected():
     tree = full_tree()
     tree[PLACEMENT_CURRENT]["revision"] = 99
-    reject(tree)
+    # Appendix B v1.2: closure 2 owns dangling integer current pointers.
+    reject(tree, code="current_dangling", family="placement_current", field="revision")
 
 
 def test_active_fact_without_pointed_placement_revision_is_rejected():
     tree = full_tree()
     del tree[PLACEMENT_REVISION]
-    reject(tree)
+    reject(tree, code="current_dangling", family="placement_current", field="revision")
 
 
 @pytest.mark.parametrize("status", sorted(s for s in FACT_CURRENT_STATUSES if s != "active"))
@@ -124,9 +126,10 @@ def test_other_facts_placements_do_not_satisfy_active_fact(missing):
     add_fact(tree, "another-fact")
     if missing == "current":
         del tree[PLACEMENT_CURRENT]
+        reject(tree)
     else:
         del tree[PLACEMENT_REVISION]
-    reject(tree)
+        reject(tree, code="current_dangling", family="placement_current", field="revision")
 
 
 def test_every_active_fact_is_checked():

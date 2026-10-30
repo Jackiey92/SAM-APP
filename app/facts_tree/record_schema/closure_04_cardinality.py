@@ -1,6 +1,7 @@
-"""Appendix B v1.1 (7928e55), §5: active facts need a primary placement.
+"""Appendix B v1.2 (5455060), §5: active facts need a primary placement.
 
-Only rule 4.1 adds a rejection. Source exit preserves historical evidence
+Only placement_current file existence is checked here; dangling revisions
+belong to closure 2's current_dangling. Source exit preserves historical evidence
 (4.4); support counting, template matching and external objects are deferred.
 """
 from ._primitives import _fail, git_format
@@ -22,8 +23,4 @@ def _closure_4(ordered, index):
         current_path = git_format.record_path("placement_current", fact_uid=fact_uid)
         current = ordered.get(current_path)
         if current is None:
-            _fail("fact_current", path, "active_fact_without_primary_placement", "fact_uid")
-        revision_path = git_format.record_path(
-            "placement_revision", fact_uid=fact_uid, revision=current["revision"])
-        if revision_path not in ordered:
             _fail("fact_current", path, "active_fact_without_primary_placement", "fact_uid")
