@@ -394,7 +394,7 @@ def test_hash_availability_and_quote_binding_are_deferred():
 
 
 def test_evidence_builder_self_reference_in_r1_terminal_tree():
-    from tests.test_facts_tree_record_schema_closure import synthetic_tree
+    from tests.test_facts_tree_record_schema_closure import synthetic_tree, validate_mechanism
 
     tree, paths = synthetic_tree("evidence", True)
     path, payload = sample("evidence")
@@ -408,4 +408,4 @@ def test_evidence_builder_self_reference_in_r1_terminal_tree():
     assert result["result_refs"] == [payload["source_version_ref"]]
     assert operation["formal_fact_refs"] == []
     assert not any(r["record_type"] == "fact_revision" for r in tree.values())
-    assert record_schema.validate_record_schema_closure(tree, **SCOPE) is None
+    assert validate_mechanism(tree) is None
