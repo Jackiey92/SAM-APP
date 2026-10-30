@@ -6,7 +6,7 @@ from ._registry import register_closure
 
 
 @register_closure(5)
-def _operation_closure(tree):
+def _operation_closure(tree, index=None):
     inputs, operations, consumed, events = {}, {}, {}, {}
     events_by_operation = {}
     for path, payload in tree.items():

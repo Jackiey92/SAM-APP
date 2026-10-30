@@ -128,6 +128,6 @@ def validate_record_schema_closure(tree, *, repo_id, company_id,
     for path, payload in ordered.items():
         validate_record_schema(path, payload, repo_id=repo_id,
                                company_id=company_id, object_format=object_format)
-    CLOSURE_VALIDATORS[1](ordered, _target_index(ordered))
-    CLOSURE_VALIDATORS[5](ordered)
+    for _n in sorted(CLOSURE_VALIDATORS):
+        CLOSURE_VALIDATORS[_n](ordered, _target_index(ordered))
     return None

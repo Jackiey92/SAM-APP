@@ -137,7 +137,7 @@ def validate_mechanism(tree, *, object_format="sha1"):
         if family in R1_CLOSURE_FAMILIES:
             validate_record_schema(path, payload, **SCOPE, object_format=object_format)
     CLOSURE_VALIDATORS[1](ordered, _target_index(ordered))
-    CLOSURE_VALIDATORS[5](ordered)
+    CLOSURE_VALIDATORS[5](ordered, _target_index(ordered))
     return None
 
 
@@ -191,7 +191,7 @@ def test_structural_results_new_support_revision_placement_conflict_hold_propose
 def test_empty_tree_and_registration_boundaries():
     assert validate({}) is None
     assert set(SCHEMA_VALIDATORS) == set(SCHEMA_FIELDS)
-    assert set(CLOSURE_VALIDATORS) == {1, 5}
+    assert {1, 5} <= set(CLOSURE_VALIDATORS)
     assert set(SCHEMA_FIELDS) < set(git_format.RECORD_TYPES)
     with pytest.raises(TypeError):
         SCHEMA_FIELDS["fact_revision"] = frozenset()
@@ -820,3 +820,61 @@ def test_binding_reason_is_explanation_text_not_an_opaque_id():
     tree, paths, _ = binding_tree()
     tree[paths[3]]["reason"] = "绑定原因。" * 100
     assert validate_mechanism(tree) is None
+
+
+# Registry discovery probes replay this R1 module with deliberately minimal
+# business plugins. Full-family integration cases require the real field schemas;
+# do not collect them in those probes or change their frozen pass/skip counts.
+if all(family in SCHEMA_BUILDERS and field in SCHEMA_FIELDS.get(family, ())
+       for family, field in (
+           ("entity_revision", "raw_name"), ("entity_current", "status"),
+           ("fact_revision", "qualifiers"), ("fact_current", "status"),
+           ("source_version", "content_fingerprint"), ("source_lifecycle", "version_scope"),
+           ("evidence", "quote_excerpt_ref"), ("link_revision", "link"),
+           ("placement_revision", "fact_ref"), ("placement_current", "revision"),
+           ("issue_event", "disposition_result"), ("proposal_event", "input_impact"),
+       )):
+    def test_full_family_tree_passes_schema_and_registered_closures():
+        from tests.facts_tree_full_fixture import full_tree
+
+        tree = full_tree()
+        original = deepcopy(tree)
+        business_families = {
+            "entity_revision", "entity_current", "fact_revision", "fact_current",
+            "source_version", "source_lifecycle", "evidence", "link_revision",
+            "placement_revision", "placement_current", "issue_event", "proposal_event",
+        }
+        assert {record["record_type"] for record in tree.values()} == (
+            business_families | set(R1_CLOSURE_FAMILIES))
+        assert len(tree) == 18  # Sixteen families plus the entity/fact second revisions.
+        assert validate_record_schema_closure(tree, **SCOPE) is None
+        assert tree == original
+        for revision in (1, 2):
+            fact = tree[git_format.record_path("fact_revision", fact_uid="fact-1", revision=revision)]
+            assert fact["entity_ref"] == typed("entity_revision", "entity-1", 1)
+        for family, ids in (("entity_current", {"entity_uid": "entity-1"}),
+                            ("fact_current", {"fact_uid": "fact-1"})):
+            current = tree[git_format.record_path(family, **ids)]
+            assert current["revision"] == 2
+            assert current["status"] == "active"
+        placement = tree[git_format.record_path("placement_current", fact_uid="fact-1")]
+        assert set(placement) == {
+            "schema_version", "format_version", "record_type", "repo_id", "company_id",
+            "fact_uid", "revision",
+        }
+        assert full_tree() == original
+
+
+    def test_dangling_current_example_preserves_original_and_single_record_schema():
+        from tests.facts_tree_full_fixture import full_tree, with_dangling_fact_current
+
+        tree = full_tree()
+        original = deepcopy(tree)
+        mutated = with_dangling_fact_current(tree)
+        path = git_format.record_path("fact_current", fact_uid="fact-1")
+        revision = mutated[path]["revision"]
+        assert git_format.record_path("fact_revision", fact_uid="fact-1", revision=revision) not in mutated
+        assert tree == original
+        assert mutated != tree
+        # A dangling integer pointer is schema-valid; closure 2 will resolve it.
+        assert validate_record_schema(path, mutated[path], **SCOPE) is None
