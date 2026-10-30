@@ -16,6 +16,17 @@ _PROJECT = Path(__file__).resolve().parents[1]
 _PROTECTED = [_PROJECT / 'data', Path('/tmp/sam-m5')]
 _PROTECTED += [Path(value).resolve() for key, value in os.environ.items()
                if key.startswith('SAM_') and key.endswith('DB') and value]
+# Kernel read-only open probes require real files, before audit hooks are active.
+# Exclusive creation preserves existing contents and mtimes, including on races.
+for sentinel in (_PROJECT / 'data/app.db', Path('/tmp/sam-m5/main.db')):
+    if not sentinel.exists():
+        if not sentinel.parent.exists():
+            sentinel.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with sentinel.open('xb'):
+                pass
+        except FileExistsError:
+            pass
 for key in data_keys(os.environ):
     os.environ[key] = str(_ROOT / key.lower())
 # The content-addressed object store creates only its configured leaf and

@@ -11,6 +11,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv
 venv/
 .pytest_cache/
 
@@ -38,7 +39,9 @@ data/sales_app/
 .oc-runtime/
 .oc-runtime.installer/
 .sam-isolated/
+.sam-isolated
 poc/memory_m0/model-cache/
+poc/memory_m0/model-cache
 harness-openclaw/state/**
 !harness-openclaw/state/openclaw.example.json
 harness-openclaw/state/openclaw.json
