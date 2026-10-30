@@ -11,6 +11,8 @@ R1_CLOSURE_FAMILIES = (
 _schema_validators = {}
 _closure_validators = {}
 _schema_fields = {}
+_sample_builders = {}
+SCHEMA_BUILDERS = MappingProxyType({})
 
 
 def register_schema(family, *, fields):
@@ -35,8 +37,34 @@ def register_closure(number):
     return register
 
 
+def register_sample(family):
+    """Register a minimal payload builder after its schema, without wrapping it.
+
+    Builders return a fresh dict without a path. Optional keyword arguments
+    override path identities only; callers supply their own repo/company scope.
+    Business fields and defaults belong exclusively to the family plugin.
+    """
+    def register(builder):
+        if family in _sample_builders:
+            raise ValueError(f"duplicate sample registration: {family!r}")
+        if family not in _schema_fields:
+            raise ValueError(f"sample without schema registration: {family!r}")
+        if not callable(builder):
+            raise TypeError("sample builder must be callable")
+        _sample_builders[family] = builder
+        return builder
+    return register
+
+
+def get_sample_builder(family, default=None):
+    """Look up a builder in the published discovery snapshot."""
+    return SCHEMA_BUILDERS.get(family, default)
+
+
 def _freeze_registries():
     """Publish immutable snapshots after every discovered plugin has loaded."""
+    global SCHEMA_BUILDERS
+    SCHEMA_BUILDERS = MappingProxyType(dict(_sample_builders))
     return (MappingProxyType(dict(_schema_validators)),
             MappingProxyType(dict(_closure_validators)),
-            MappingProxyType(dict(_schema_fields)))
+            MappingProxyType(dict(_schema_fields)), SCHEMA_BUILDERS)

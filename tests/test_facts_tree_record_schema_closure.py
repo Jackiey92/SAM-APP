@@ -1,4 +1,7 @@
-"""Synthetic C only: strict four-family schemas and closure 1/5 (F-001-R1)."""
+"""Synthetic C only: strict four-family schemas and closure 1/5 (F-001-R1).
+
+族卡注册样例后自动转为真实校验，最终须 0 skipped。
+"""
 from copy import deepcopy
 from decimal import Decimal
 from hashlib import sha256
@@ -8,7 +11,7 @@ import pytest
 from app.facts_tree import git_format
 from app.facts_tree.record_schema._registry import R1_CLOSURE_FAMILIES
 from app.facts_tree.record_schema_closure import (
-    CLOSURE_VALIDATORS, SCHEMA_FIELDS, SCHEMA_VALIDATORS,
+    CLOSURE_VALIDATORS, SCHEMA_FIELDS, SCHEMA_VALIDATORS, SCHEMA_BUILDERS,
     RecordSchemaClosureError, loads_schema_record, validate_record_schema,
     validate_record_schema_closure,
 )
@@ -17,6 +20,13 @@ from app.facts_tree.record_schema_closure import (
 SCOPE = {"repo_id": "repo-test", "company_id": "company-test"}
 DIGEST = "a" * 64
 BASE = "b" * 40
+
+# Explicit closure-5 coverage targets; schema plugins supply all business fields.
+STRUCTURAL_RESULT_TARGETS = (
+    ("fact_revision", True), ("evidence", True), ("link_revision", True),
+    ("placement_revision", True), ("issue_event", True),
+    ("issue_event", False), ("proposal_event", False),
+)
 
 
 def record(family, **ids):
@@ -120,18 +130,31 @@ def rejected(tree, code, family=None, path=None):
 def test_each_family_valid_standalone_and_in_closed_tree(family):
     tree, _ = synthetic_tree()
     path, payload = next((p, r) for p, r in tree.items() if r["record_type"] == family)
+    if family in SCHEMA_BUILDERS:
+        payload = SCHEMA_BUILDERS[family](**git_format._match_template(family, path))
+        payload.update(SCOPE)
+        tree[path] = payload
     assert validate_record_schema(path, payload, **SCOPE) is None
     assert validate(tree) is None
     assert set(payload) == SCHEMA_FIELDS[family]
 
 
 @pytest.mark.parametrize("result_type,terminal", [
-    ("fact_revision", True), ("evidence", True), ("link_revision", True),
-    ("placement_revision", True), ("issue_event", True),
-    ("issue_event", False), ("proposal_event", False),
+    pytest.param(family, terminal, marks=(
+        () if family in SCHEMA_BUILDERS else
+        pytest.mark.skip(reason=f"{family} family sample pending")))
+    for family, terminal in STRUCTURAL_RESULT_TARGETS
 ])
 def test_structural_results_new_support_revision_placement_conflict_hold_propose(result_type, terminal):
-    tree, _ = synthetic_tree(result_type, terminal)
+    tree, paths = synthetic_tree(result_type, terminal)
+    result_path = paths[4]
+    output = SCHEMA_BUILDERS[result_type](**git_format._match_template(result_type, result_path))
+    output.update(SCOPE)
+    tree[result_path] = output
+    event = tree[paths[3]]
+    result_ref = event["changed_refs"][0]
+    event["after"] = [result_ref["revision"] if type(result_ref.get("revision")) is int
+                      else sha256(git_format.dumps_record(output)).hexdigest()]
     assert validate(tree) is None
 
 
