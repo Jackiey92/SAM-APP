@@ -70,6 +70,190 @@ def _positive(value, family, path, field):
         _fail(family, path, "positive_integer", field)
 
 
+_int_plus = _positive
+_int_positive = _positive
+
+
+def _str(value, family, path, field):
+    if type(value) is not str or not value:
+        _fail(family, path, "nonempty_string", field)
+
+
+def _bool(value, family, path, field):
+    if type(value) is not bool:
+        _fail(family, path, "boolean_type", field)
+
+
+def _ts(value, family, path, field):
+    """Non-negative builtin Unix seconds, as in operation.server_time."""
+    if type(value) is not int or value < 0:
+        _fail(family, path, "timestamp", field)
+
+
+def _enum(allowed):
+    """Build a validator from a caller-owned controlled set; no coercion."""
+    allowed = frozenset(allowed)
+
+    def validate(value, family, path, field):
+        # Typed equality also refuses True for 1 and unhashable input safely.
+        if not any(type(value) is type(item) and value == item for item in allowed):
+            _fail(family, path, "enum_value", field)
+    return validate
+
+
+def _optional(validator):
+    """Allow explicit null; the enclosing object still requires the key."""
+    def validate(value, family, path, field):
+        if value is not None:
+            return validator(value, family, path, field)
+    return validate
+
+
+def _child(field, key):
+    return f"{field}.{key}"
+
+
+def _closed_keys(value, allowed, required, family, path, field):
+    """New composable objects report the offending child, not the parent."""
+    if not isinstance(value, dict) or any(type(key) is not str for key in value):
+        _fail(family, path, "object_type", field)
+    unknown = set(value) - allowed
+    if unknown:
+        _fail(family, path, "unknown_field", _child(field, min(unknown)))
+    missing = required - set(value)
+    if missing:
+        _fail(family, path, "missing_field", _child(field, min(missing)))
+
+
+def _object(spec):
+    """Exact required keys mapped to (value, family, path, field) validators."""
+    spec = dict(spec)
+    keys = frozenset(spec)
+
+    def validate(value, family, path, field):
+        _closed_keys(value, keys, keys, family, path, field)
+        for key, validator in spec.items():
+            validator(value[key], family, path, _child(field, key))
+    return validate
+
+
+def _array_of(item_validator):
+    """Validate every item with its index; duplicates are caller policy."""
+    def validate(value, family, path, field):
+        _array(value, family, path, field)
+        for index, item in enumerate(value):
+            item_validator(item, family, path, f"{field}[{index}]")
+    return validate
+
+
+def _require_any(fields):
+    """Require one present, non-null key; false/zero/empty containers count.
+
+    Compose after _object for field types. This only checks presence, never
+    truthiness or business meaning; it does not make missing keys optional.
+    """
+    fields = tuple(fields)
+
+    def validate(value, family, path, field):
+        if not isinstance(value, dict):
+            _fail(family, path, "object_type", field)
+        if not any(value.get(key) is not None for key in fields):
+            _fail(family, path, "require_any", field)
+    return validate
+
+
+def _require_together(a, b):
+    """Require both keys to be non-null together, or both absent/null."""
+    def validate(value, family, path, field):
+        if not isinstance(value, dict):
+            _fail(family, path, "object_type", field)
+        if (value.get(a) is None) != (value.get(b) is None):
+            missing = a if value.get(a) is None else b
+            _fail(family, path, "require_together", _child(field, missing))
+    return validate
+
+
+def _json_value(value, family, path, field):
+    """Keep the serializer's exact JSON types/budgets, with a local coordinate."""
+    try:
+        git_format.dumps_record({"value": value})
+    except (TypeError, ValueError, RecursionError, OverflowError):
+        _fail(family, path, "record_encoding", field)
+
+
+def _located_text(value, family, path, field, *, require_known=False,
+                  value_validator=_json_value):
+    """Frozen LocatedText shape; closure-3 known binding is opt-in only.
+
+    Non-null values default to canonical JSON; callers may supply the
+    field-specific normalized-value validator. No defaults are inferred.
+    """
+    _object({
+        "status": _enum(frozenset({"known", "not_stated", "not_applicable", "ambiguous"})),
+        "text": _optional(_str), "value": _optional(value_validator),
+        "evidence_refs": _refs, "reason": _optional(_str),
+    })(value, family, path, field)
+    if require_known:
+        known = value["status"] == "known"
+        for key in ("text", "value"):
+            if (value[key] is not None) != known:
+                _fail(family, path, "located_text_binding", _child(field, key))
+
+
+def _tagged_union(discriminator, branches):
+    """Select an exact branch spec; the discriminator is always required.
+
+    Branch specs may omit the discriminator validator: selection supplies
+    its exact typed value, and the key is part of the branch's closed shape.
+    """
+    branches = dict(branches)
+    validators = {tag: _object({**spec, discriminator: _enum(frozenset({tag}))})
+                  for tag, spec in branches.items()}
+    tags = _enum(frozenset(branches))
+
+    def validate(value, family, path, field):
+        if not isinstance(value, dict) or any(type(key) is not str for key in value):
+            _fail(family, path, "object_type", field)
+        if discriminator not in value:
+            _fail(family, path, "missing_field", _child(field, discriminator))
+        try:
+            tags(value[discriminator], family, path, _child(field, discriminator))
+        except RecordSchemaClosureError:
+            _fail(family, path, "unknown_subtype", _child(field, discriminator))
+        validators[value[discriminator]](value, family, path, field)
+    return validate
+
+
+def _actor(value, family, path, field):
+    """Reuse the host actor shape only; this does not assert authorization."""
+    try:
+        validate_actor_audit_ref(value)
+    except ActorAuditRefInvalid:
+        invalid = True
+    else:
+        invalid = False
+    if invalid:
+        _fail(family, path, "actor_audit_ref", field)
+
+
+def _audit_refs(value, family, path, field):
+    """F-007 has not published approval-use shapes: only [] is supported."""
+    _array(value, family, path, field)
+    if value:
+        _fail(family, path, "unsupported_approval_audit_ref", field)
+
+
+def _legacy_block(allowed_keys):
+    """Optional legacy keys are caller-whitelisted; values stay canonical JSON."""
+    allowed = frozenset(allowed_keys)
+
+    def validate(value, family, path, field):
+        _closed_keys(value, allowed, frozenset(), family, path, field)
+        for key, item in value.items():
+            _json_value(item, family, path, _child(field, key))
+    return validate
+
+
 def _digest(value, family, path, field):
     if type(value) is not str or len(value) != 64 or not set(value) <= _HEX:
         _fail(family, path, "sha256_digest", field)
