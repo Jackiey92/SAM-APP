@@ -414,6 +414,10 @@ class SnapshotReadError(GitRepositoryError):
     """A pinned historical snapshot read failed; nothing was modified."""
 
 
+class CommitChainError(GitRepositoryError):
+    """Read-only authoritative commit chain enumeration failed closed."""
+
+
 class MaintenancePinError(GitRepositoryError):
     """A maintenance pin operation failed closed; no ref was moved."""
 
@@ -1748,6 +1752,81 @@ class FactsGitRepository:
                 "bound-identity, single-parent chain and object "
                 "integrity checks: %s" % (pin_ref, commit_oid, exc)) \
                 from exc
+
+    def list_commit_chain(self, from_commit, to_commit=None) -> tuple[str, ...]:
+        """Return an inclusive, oldest-first interval on captured authority H.
+
+        Zero from means genesis. Verify H's complete identity/history and
+        object integrity before probing ancestry, then defensively walk the
+        interval. Only commit metadata is read; every refusal is wrapped as
+        CommitChainError. No objects, refs or configuration are written.
+        """
+        try:
+            if self._expected_meta is None:
+                raise CommitChainError("repository identity is not bound")
+            if to_commit is None:
+                head = self.head_oid()
+                to_commit = head
+            else:
+                self._require_oid(to_commit, "to_commit")
+                head = None
+            if self._object_type(to_commit, _VERIFY_ENV) != "commit":
+                raise CommitChainError("to_commit is not a commit")
+            self._require_oid(from_commit, "from_commit", allow_zero=True)
+            from_zero = from_commit == self.zero_oid
+            if not from_zero and self._object_type(
+                    from_commit, _VERIFY_ENV) != "commit":
+                raise CommitChainError("from_commit is not a commit")
+            if head is None:
+                head = self.head_oid()
+            genesis, _ = self._verify_identity_chain(head)
+            probes = [(to_commit, head,
+                       "to is not on the authoritative chain")]
+            if not from_zero:
+                probes.append((from_commit, to_commit,
+                               "from is not an ancestor of to"))
+            for older, newer, refusal in probes:
+                probe = self._git(
+                    ["merge-base", "--is-ancestor", older, newer],
+                    check=False, env_extra=_VERIFY_ENV)
+                if probe.returncode == 1:
+                    raise CommitChainError(refusal)
+                if probe.returncode != 0:
+                    raise GitCommandError("git merge-base failed", probe)
+            current = to_commit
+            seen = set()
+            reverse_chain = []
+            while True:
+                if current in seen:
+                    raise CommitChainError("commit chain revisits " + current)
+                seen.add(current)
+                if self._object_type(current, _VERIFY_ENV) != "commit":
+                    raise CommitChainError("chain entry is not a commit")
+                if self._read_meta(current, _VERIFY_ENV) != self._expected_meta:
+                    raise CommitChainError("commit identity does not match binding")
+                parents = self._commit_parents(current, _VERIFY_ENV)
+                if len(parents) > 1 or (not parents and current != genesis):
+                    raise CommitChainError(
+                        "chain must have one parent per non-genesis")
+                reverse_chain.append(current)
+                if not from_zero and current == from_commit:
+                    break
+                if not parents:
+                    if not from_zero:
+                        raise CommitChainError(
+                            "from commit not found on the chain to to")
+                    break
+                current = parents[0]
+            result = tuple(reversed(reverse_chain))
+            if not result or result[0] != (genesis if from_zero else from_commit) \
+                    or result[-1] != to_commit:
+                raise CommitChainError("commit chain endpoints are inconsistent")
+            return result
+        except CommitChainError:
+            raise
+        except (GitRepositoryError, ValueError, TypeError) as exc:
+            raise CommitChainError(
+                "commit chain enumeration failed: %s" % exc) from exc
 
     def read_snapshot_at(self, commit_oid):
         """Read the record paths and raw canonical bytes of one commit.
