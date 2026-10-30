@@ -185,7 +185,7 @@ def test_structural_results_new_support_revision_placement_conflict_hold_propose
     result_ref = event["changed_refs"][0]
     event["after"] = [result_ref["revision"] if type(result_ref.get("revision")) is int
                       else sha256(git_format.dumps_record(output)).hexdigest()]
-    assert validate(tree) is None
+    assert validate_mechanism(tree) is None
 
 
 def test_empty_tree_and_registration_boundaries():
