@@ -1842,8 +1842,8 @@ class FactsGitRepository:
             self._verify_identity_chain(head)
         except GitRepositoryError as exc:
             raise SnapshotReadError(
-                "authoritative history behind the captured head %s fails "
-                "the bound-identity, single-parent chain and object "
+                "authoritative history behind the captured head %s is unreadable "
+                "or fails the bound-identity, single-parent chain and object "
                 "integrity checks: %s" % (head, exc)) from exc
         # Reachability against the single H captured above: only commits
         # on the authoritative history may be read. merge-base with
