@@ -10,6 +10,7 @@ from threading import RLock
 
 from .ports import MemoryProvider, ModelProvider, RuntimeProvider
 from .model_provider import OpenAICompatibleProvider
+from .model_house import resolve_embedding
 from .runtime_config import RuntimeConfig
 from .null_memory import NullMemoryProvider
 from .memory.provider import LocalVectorMemoryProvider
@@ -30,7 +31,7 @@ def memory_provider(config: RuntimeConfig, *, env: dict[str, str] | None = None)
         raise ValueError("OV 已摘除；SAM_MEMORY_BACKEND=ov 不再支持，请移除遗留配置")
     if backend != "localvector":
         raise ValueError("SAM_MEMORY_BACKEND must be localvector")
-    return LocalVectorMemoryProvider(config.main_db)
+    return LocalVectorMemoryProvider(config.main_db, embedding=resolve_embedding(env=values))
 
 
 def model_provider(config: RuntimeConfig, *, env: dict[str, str] | None = None) -> ModelProvider:

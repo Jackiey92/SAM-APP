@@ -1,14 +1,17 @@
 """Synthetic M1 fixtures only; no real diligence corpus or production DB writes."""
 import hashlib
+import json
 import socket
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 
 import pytest
 
 from app.memory import paths
 from app.memory.chunking import split_markdown
-from app.memory.embedding import LocalBgeProvider, RemoteOpenAICompatibleProvider
+from app.memory.embedding import EmbeddingRequestError, LocalBgeProvider, RemoteOpenAICompatibleProvider
 from app.memory.projection import chunk_id
 from tests.memory_setup import migrated_memory
 from app.memory.provider import ProjectionError
@@ -219,17 +222,53 @@ def test_chunking_and_determinism():
     assert any(link in c.text for c in split_markdown('中' * 400 + link + '文' * 400))
 
 
-def test_remote_disabled():
+def test_remote_disabled_and_local_call(monkeypatch):
     with pytest.raises(ValueError):
         RemoteOpenAICompatibleProvider()
     with pytest.raises(ValueError):
         RemoteOpenAICompatibleProvider(enabled=True)
-    p = RemoteOpenAICompatibleProvider(enabled=True, endpoint='https://example.invalid',
-                                       api_key='synthetic-not-a-key', model='synthetic')
-    with pytest.raises(NotImplementedError):
-        p.embed_query('x')
-    with pytest.raises(NotImplementedError):
-        p.embed_texts(['x'])
+    original_connect = socket.socket.connect
+
+    def loopback_only(sock, address):
+        assert address[0] == '127.0.0.1', 'external connection forbidden'
+        return original_connect(sock, address)
+
+    monkeypatch.setattr(socket.socket, 'connect', loopback_only)
+    monkeypatch.setattr('urllib.request.getproxies', lambda: {})
+    status = [200]
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            rows = [{'index': 0, 'embedding': [0.1, 0.2]},
+                    {'index': 1, 'embedding': [0.3, 0.4]}]
+            # Query sends one input, so its response must contain one vector.
+            body = json.dumps({'data': rows[:len(request['input'])], 'model': 'm', 'usage': {}}).encode()
+            self.send_response(status[0])
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = Thread(target=server.serve_forever, kwargs={'poll_interval': 0.01})
+    thread.start()
+    try:
+        p = RemoteOpenAICompatibleProvider(
+            enabled=True, endpoint=f'http://127.0.0.1:{server.server_port}/v1/',
+            api_key='dummy-test-key', model='m', dim=2)
+        assert p.embed_texts(['a', 'b']) == [[0.1, 0.2], [0.3, 0.4]]
+        assert p.embed_query('q') == [0.1, 0.2]
+        status[0] = 503
+        with pytest.raises(EmbeddingRequestError):
+            p.embed_query('q')
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 def test_local_bge_offline(monkeypatch, tmp_path):

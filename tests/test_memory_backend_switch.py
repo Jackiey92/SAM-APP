@@ -2,6 +2,8 @@
 from dataclasses import replace
 import json
 import subprocess
+from pathlib import Path
+import socket
 
 import pytest
 
@@ -35,7 +37,7 @@ def configuration(tmp_path):
 
 
 def test_defaults_localvector_and_rejects_retired_backend(tmp_path, monkeypatch):
-    monkeypatch.setattr('app.memory.provider.LocalBgeProvider', SyntheticEmbedding)
+    monkeypatch.setattr('app.memory.embedding.LocalBgeProvider', SyntheticEmbedding)
     config = configuration(tmp_path)
     init_db(config.main_db, embedding=SyntheticEmbedding())
     local = memory_provider(config, env={})
@@ -86,3 +88,70 @@ def test_cloud_bypasses_both_backends(tmp_path, monkeypatch):
 def test_unknown_backend_fails_explicitly(tmp_path):
     with pytest.raises(ValueError, match='SAM_MEMORY_BACKEND'):
         memory_provider(configuration(tmp_path), env={'SAM_MEMORY_BACKEND': 'guess'})
+
+
+def test_default_selection_is_lazy_and_offline(tmp_path, monkeypatch):
+    from app.providers import LazyMemoryProvider
+
+    constructed = []
+
+    class LocalStub(SyntheticEmbedding):
+        embedder = 'local-bge'
+        model_version = 'BAAI/bge-small-zh-v1.5@7999e1d3359715c523056ef9478215996d62a620'
+        dim = 512
+
+        def __init__(self):
+            constructed.append(self)
+
+    def no_network(*args, **kwargs):
+        pytest.fail('default assembly attempted network')
+
+    monkeypatch.setattr(socket.socket, 'connect', no_network)
+    monkeypatch.setattr('app.memory.embedding.LocalBgeProvider', LocalStub)
+    monkeypatch.setattr('app.providers.LocalVectorMemoryProvider', lambda database, *, embedding: embedding)
+    lazy = LazyMemoryProvider(configuration(tmp_path), env={})
+    assert constructed == []
+    assert lazy.embedder == 'local-bge'
+    assert len(constructed) == 1
+    assert (lazy.embedder, lazy.model_version, lazy.dim) == (
+        'local-bge', 'BAAI/bge-small-zh-v1.5@7999e1d3359715c523056ef9478215996d62a620', 512)
+
+
+@pytest.mark.parametrize('case', ['enabled', 'pending', 'missing-key', 'bad-catalog'])
+def test_model_house_composition(tmp_path, monkeypatch, case):
+    import app.model_house.embedding_catalog as catalog_module
+    from app.memory.embedding import RemoteOpenAICompatibleProvider
+    from app.model_house import EmbeddingCatalogError
+
+    raw = json.loads((Path(catalog_module.__file__).parent / 'embeddings.json').read_text())
+    if case != 'pending':
+        raw['resources'][1]['status'] = 'enabled'
+    path = tmp_path / 'catalog.json'
+    path.write_text('{' if case == 'bad-catalog' else json.dumps(raw))
+    loader = catalog_module.load_embedding_catalog
+    monkeypatch.setattr(catalog_module, 'load_embedding_catalog', lambda: loader(path))
+    assembled = []
+
+    def store(database, *, embedding):
+        assembled.append(embedding)
+        return embedding
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('selection attempted local fallback or network')
+
+    monkeypatch.setattr('app.providers.LocalVectorMemoryProvider', store)
+    monkeypatch.setattr('app.memory.embedding.LocalBgeProvider', forbidden)
+    monkeypatch.setattr(socket.socket, 'connect', forbidden)
+    env = {'SAM_EMBEDDING_MODEL': 'qwen3.7-text'}
+    if case != 'missing-key':
+        env['SAM_EMBEDDING_API_KEY'] = 'test-only-credential'
+    if case == 'enabled':
+        result = memory_provider(configuration(tmp_path), env=env)
+        assert isinstance(result, RemoteOpenAICompatibleProvider)
+        assert (result.embedder, result.model_version, result.dim) == ('qwen3.7-text', 'qwen3.7-text-embedding', 1024)
+        assert assembled == [result]
+    else:
+        with pytest.raises(EmbeddingCatalogError) as error:
+            memory_provider(configuration(tmp_path), env=env)
+        assert 'test-only-credential' not in str(error.value)
+        assert assembled == []

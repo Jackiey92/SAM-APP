@@ -248,3 +248,28 @@ def test_resolve_remote_instance_no_network(tmp_path, raw, monkeypatch):
     assert isinstance(provider, RemoteOpenAICompatibleProvider)
     assert (provider.embedder, provider.model_version, provider.dim) == ('qwen3.7-text', 'qwen3.7-text-embedding', 1024)
     assert provider.enabled and provider.timeout == 30.0
+
+
+def test_migrate_uses_pure_default_spec(tmp_path, monkeypatch):
+    import sqlite3
+    from app.db.migrate import main
+
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        assert name.split('.')[0] not in {'torch', 'transformers', 'huggingface_hub', 'urllib'}
+        return original_import(name, *args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('migration attempted provider construction or network')
+
+    monkeypatch.delenv('SAM_EMBEDDING_MODEL', raising=False)
+    monkeypatch.delenv('SAM_EMBEDDING_API_KEY', raising=False)
+    monkeypatch.setattr(builtins, '__import__', guarded_import)
+    monkeypatch.setattr(socket.socket, 'connect', forbidden)
+    monkeypatch.setattr('app.memory.embedding.LocalBgeProvider', forbidden)
+    path = tmp_path / 'migrated.db'
+    main(['--db', str(path)])
+    with sqlite3.connect(path) as db:
+        row = db.execute('SELECT embedder,model_version,dim FROM m1_projection_config WHERE singleton=1').fetchone()
+    assert row == ('local-bge', 'BAAI/bge-small-zh-v1.5@7999e1d3359715c523056ef9478215996d62a620', 512)

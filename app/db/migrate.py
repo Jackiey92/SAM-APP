@@ -23,8 +23,10 @@ def main(argv=None):
         print(f'migrated snapshot {args.db}')
         return
     from types import SimpleNamespace
-    from ..memory.embedding import MODEL, REVISION
-    init_db(args.db, embedding=SimpleNamespace(embedder="local-bge", model_version=MODEL + "@" + REVISION, dim=512))
+    from ..model_house import resolve_embedding_spec
+    _spec = resolve_embedding_spec()
+    init_db(args.db, embedding=SimpleNamespace(
+        embedder=_spec.embedder, model_version=_spec.model_version, dim=_spec.dim))
     print(f"migrated {args.db} to schema {SCHEMA_VERSION}")
 
 
