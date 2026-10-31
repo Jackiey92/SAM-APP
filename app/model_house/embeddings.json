@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "default_resource_id": "local-bge",
+  "resources": [
+    {
+      "resource_id": "local-bge",
+      "display_name": "本地 BGE small zh v1.5（默认）",
+      "provider_kind": "local-bge",
+      "modality": ["text"],
+      "status": "enabled",
+      "is_default": true,
+      "connection": {
+        "base_url": null,
+        "api_key_env": null,
+        "model_id": "BAAI/bge-small-zh-v1.5@7999e1d3359715c523056ef9478215996d62a620",
+        "protocol": "local"
+      },
+      "capabilities": {
+        "dim_default": 512,
+        "dims_allowed": [512],
+        "context_tokens": 512,
+        "sparse": false,
+        "input_modes": ["text"],
+        "text_type_param": false
+      },
+      "limits": { "rpm": null, "tpm": null },
+      "pricing": { "currency": "CNY", "per_million_input": null, "per_million_image": null },
+      "evidence": {
+        "source_url": "local://poc/memory_m0/model-cache",
+        "reviewed_at": "2026-10-31",
+        "notes": "本地确定性权重，pinned revision；query 带 QUERY_PREFIX；dim=model.config.hidden_size=512。"
+      }
+    },
+    {
+      "resource_id": "qwen3.7-text",
+      "display_name": "通义千问 qwen3.7 文本向量",
+      "provider_kind": "openai-compatible",
+      "modality": ["text"],
+      "status": "pending_verification",
+      "is_default": false,
+      "connection": {
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "api_key_env": "SAM_EMBEDDING_API_KEY",
+        "model_id": "qwen3.7-text-embedding",
+        "protocol": "openai-embeddings-v1"
+      },
+      "capabilities": {
+        "dim_default": 1024,
+        "dims_allowed": [256, 512, 1024, 2048, 2560],
+        "context_tokens": 131072,
+        "sparse": true,
+        "input_modes": ["text"],
+        "text_type_param": false
+      },
+      "limits": { "rpm": 24000, "tpm": 1000000 },
+      "pricing": { "currency": "CNY", "per_million_input": 0.5, "per_million_image": null },
+      "evidence": {
+        "source_url": "https://help.aliyun.com/zh/model-studio/qwen3-7-text-embedding",
+        "reviewed_at": "2026-10-31",
+        "notes": "规格为厂商文档声明，尚未真云核验；一期走 OpenAI 兼容 /embeddings，不发 text_type；稀疏/维度/错误码/限流二期联调确认。"
+      }
+    }
+  ]
+}
