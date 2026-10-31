@@ -87,3 +87,22 @@ def test_real_wire_values_have_declared_types():
             else:
                 assert type(value) is {"TEXT": str, "INTEGER": int, "REAL": float}[column.sql_type]
     assert not any(c.sql_type == "REAL" for columns in SCHEMA_COLUMNS.values() for c in columns)
+
+
+def test_searchable_columns_exact_and_read_only():
+    from app.facts_tree.record_schema import SEARCHABLE_COLUMNS
+    expected = {
+        "entity_revision": ("raw_name", "canonical_name"),
+        "fact_revision": ("statement_raw", "reason", "value_raw"),
+        "evidence": ("usage",), "link_revision": ("reason",),
+        "issue_event": ("basis",), "proposal_event": ("basis",),
+        "source_lifecycle": ("reason",), "source_version": ("display_name",),
+    }
+    assert {f: names for f, names in SEARCHABLE_COLUMNS.items() if names} == expected
+    assert sum(map(len, SEARCHABLE_COLUMNS.values())) == 11
+    for family, columns in SCHEMA_COLUMNS.items():
+        assert set(SEARCHABLE_COLUMNS[family]) <= SCHEMA_FIELDS[family]
+        assert all(c.sql_type == "TEXT" for c in columns if c.searchable)
+    with pytest.raises(TypeError):
+        SEARCHABLE_COLUMNS["event"] = ()
+    assert ColumnSpec("old", "TEXT", True).searchable is False

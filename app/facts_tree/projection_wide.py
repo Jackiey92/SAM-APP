@@ -221,7 +221,12 @@ def _verify(path, expected, meta, source_rows):
     with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as connection:
         _healthy(connection)
         connection.execute("BEGIN")
-        if _table_names(connection) != {"wide_meta", *("dw_" + f for f in SCHEMA_COLUMNS)}:
+        required = {"wide_meta", *("dw_" + f for f in SCHEMA_COLUMNS)}
+        # FTS5 owns shadow tables; only its two public component tables count.
+        tables = _table_names(connection) - {row[0] for row in connection.execute(
+            "SELECT name FROM pragma_table_list WHERE schema='main' AND type='shadow'")}
+        extras = tables - required
+        if not required <= tables or extras not in (set(), {"fts_meta", "fts_records"}):
             raise WideBuildError("wide table set mismatch")
         if connection.execute("SELECT * FROM wide_meta ORDER BY key").fetchall() != sorted(meta.items()):
             raise WideBuildError("wide metadata mismatch")

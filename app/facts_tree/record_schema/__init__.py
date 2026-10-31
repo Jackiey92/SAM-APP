@@ -67,7 +67,8 @@ __all__ = [
 # Minimal schema-plugin packages need not contain the optional column metadata.
 if any(info.name == "columns" for info in _iter_modules(__path__)):
     SCHEMA_COLUMNS = _import_module(f"{__name__}.columns").SCHEMA_COLUMNS
-    __all__.append("SCHEMA_COLUMNS")
+    SEARCHABLE_COLUMNS = _import_module(f"{__name__}.columns").SEARCHABLE_COLUMNS
+    __all__.extend(("SCHEMA_COLUMNS", "SEARCHABLE_COLUMNS"))
 
 
 def validate_record_schema(path, payload, *, repo_id, company_id,

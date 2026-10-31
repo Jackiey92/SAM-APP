@@ -87,7 +87,9 @@ def test_full_family_independent_oracle_and_where(tmp_path):
         result.ready = False
     with connect(source.db_path) as src, connect(result.db_path) as dest:
         tables = {r[0] for r in dest.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert tables == {"wide_meta", *("dw_" + family for family in SCHEMA_COLUMNS)}
+        required = {"wide_meta", *("dw_" + family for family in SCHEMA_COLUMNS)}
+        assert required <= tables
+        assert tables - required in (set(), {"fts_meta", "fts_records"})
         assert not tables.intersection("dw_" + f for f in NO_SCHEMA)
         meta = dict(dest.execute("SELECT * FROM wide_meta"))
         assert set(meta) == META_KEYS
@@ -374,3 +376,20 @@ def test_ready_is_written_only_after_staging_verification(tmp_path, monkeypatch)
         for family in SCHEMA_COLUMNS:
             names = [r[1] for r in conn.execute("PRAGMA table_info(dw_" + family + ")")]
             assert names[-4:] == ["path", "payload_json", "canonical_sha256", "byte_length"]
+
+
+@pytest.mark.parametrize("extras,valid", [
+    ((), True), (("fts_meta", "fts_records"), True),
+    (("fts_meta",), False), (("fts_records",), False), (("unexpected",), False),
+])
+def test_component_table_allowlist(tmp_path, extras, valid):
+    source = build_standard(tmp_path)
+    result = build(source)
+    with closing(sqlite3.connect(result.db_path)) as conn, conn:
+        for name in extras:
+            conn.execute("CREATE TABLE " + name + "(x)")
+    if valid:
+        assert build(source) == result
+    else:
+        with pytest.raises(wide.WideBuildError, match="table set"):
+            build(source)
