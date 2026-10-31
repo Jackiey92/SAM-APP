@@ -1,16 +1,15 @@
 """Read-only, generation-pinned canonical metadata queries (appendix D4)."""
-import base64
-import binascii
 from dataclasses import dataclass
 from hashlib import sha256
-import hmac
-import json
 import sqlite3
 from typing import Optional
 
+from app.facts_tree.projection_cursor import (
+    CursorError, decode_cursor, encode_cursor, require_cursor_key, set_cursor_key,
+)
+
 DEFAULT_PAGE_LIMIT = 200
 MAX_PAGE_LIMIT = 1000
-_CURSOR_KEY = None
 
 
 @dataclass(frozen=True)
@@ -46,22 +45,14 @@ class SnapshotExpired(ProjectionQueryError):
     """The connection no longer represents the pinned generation."""
 
 
-def set_cursor_key(key: bytes):
-    """Install the host's process-lifetime signing key, without persisting it."""
-    global _CURSOR_KEY
-    if type(key) is not bytes or not key:
-        raise ValueError("cursor key must be nonempty bytes")
-    if _CURSOR_KEY is not None and not hmac.compare_digest(_CURSOR_KEY, key):
-        raise ValueError("cursor key already configured")
-    _CURSOR_KEY = key
-
-
 def _validate(connection, authz_digest):
     if not isinstance(connection, sqlite3.Connection):
         raise ProjectionQueryError("connection must be sqlite3.Connection")
     _text(authz_digest, "authz_digest")
-    if _CURSOR_KEY is None:
-        raise ProjectionQueryError("cursor key not configured")
+    try:
+        require_cursor_key()
+    except CursorError:
+        raise ProjectionQueryError("cursor key not configured") from None
 
 
 def _text(value, name):
@@ -83,51 +74,20 @@ def _meta(connection):
     return generation, commit, int(count)
 
 
-def _b64(value):
-    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
-
-
-def _unb64(value):
-    raw = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
-    if _b64(raw) != value:
-        raise ValueError("noncanonical base64")
-    return raw
-
-
-def _unique(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate key")
-        result[key] = value
-    return result
-
-
 def _decode(token):
     try:
-        if type(token) is not str:
-            raise ValueError("token type")
-        payload, signature = token.split(".")
-        raw, mac = _unb64(payload), _unb64(signature)
-        if not hmac.compare_digest(hmac.digest(_CURSOR_KEY, raw, "sha256"), mac):
-            raise ValueError("signature")
-        data = json.loads(raw, object_pairs_hook=_unique)
-        if (type(data) is not dict or set(data) != {
-                "v", "generation_id", "projected_commit", "query_digest",
-                "authz_digest", "last_path", "limit"}
-                or type(data["v"]) is not int or data["v"] != 1
+        require_cursor_key()
+        data = decode_cursor(token, expected_keys=frozenset({
+            "v", "generation_id", "projected_commit", "query_digest",
+            "authz_digest", "last_path", "limit"}))
+        if (type(data["v"]) is not int or data["v"] != 1
                 or type(data["limit"]) is not int or not 1 <= data["limit"] <= MAX_PAGE_LIMIT):
             raise ValueError("shape")
         for key in ("generation_id", "projected_commit", "query_digest", "authz_digest", "last_path"):
             _text(data[key], key)
         return data
-    except (ValueError, TypeError, UnicodeError, binascii.Error, RecursionError):
+    except (ValueError, TypeError, UnicodeError, RecursionError):
         raise InvalidPageCursor("invalid page cursor") from None
-
-
-def _encode(data):
-    raw = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-    return _b64(raw) + "." + _b64(hmac.digest(_CURSOR_KEY, raw, "sha256"))
 
 
 def list_records(connection: sqlite3.Connection, *, authz_digest: str,
@@ -178,7 +138,7 @@ def list_records(connection: sqlite3.Connection, *, authz_digest: str,
     records = tuple(RecordRow(*row) for row in rows[:limit])
     token = None
     if len(rows) > limit:
-        token = _encode(dict(v=1, generation_id=generation, projected_commit=commit,
+        token = encode_cursor(dict(v=1, generation_id=generation, projected_commit=commit,
                              query_digest=digest, authz_digest=authz_digest,
                              last_path=records[-1].path, limit=limit))
     return RecordPage(records, token, generation, commit, count)

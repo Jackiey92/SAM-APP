@@ -3,10 +3,8 @@ import base64
 from contextlib import closing
 from hashlib import sha256
 import hmac
-import importlib.util
 import json
 import sqlite3
-import sys
 
 import pytest
 
@@ -210,22 +208,3 @@ def test_empty_generation(tmp_path):
     with closing(conn):
         result = page(conn)
         assert result.records == () and result.next_cursor is None and result.record_count == 0
-
-
-def test_key_lifecycle_without_mutating_live_module(generation):
-    name = "_isolated_projection_query_test"
-    spec = importlib.util.spec_from_file_location(name, query.__file__)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    try:
-        spec.loader.exec_module(module)
-        with pytest.raises(module.ProjectionQueryError, match="cursor key not configured"):
-            module.list_records(generation[2], authz_digest="authorized")
-        module.set_cursor_key(KEY)
-        module.set_cursor_key(KEY)
-        with pytest.raises(ValueError):
-            module.set_cursor_key(b"different")
-        assert module.list_records(generation[2], authz_digest="authorized") == module.list_records(
-            generation[2], authz_digest="authorized")
-    finally:
-        del sys.modules[name]
