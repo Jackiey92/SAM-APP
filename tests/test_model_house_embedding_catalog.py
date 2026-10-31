@@ -211,3 +211,40 @@ def test_invalid_catalog_does_not_echo_contents(tmp_path, raw):
     with pytest.raises(EmbeddingCatalogError) as error:
         catalog_from(tmp_path, raw)
     assert dummy not in str(error.value)
+
+
+def test_resolve_local_instance_offline(monkeypatch):
+    from app.memory.embedding import LocalBgeProvider
+    from app.model_house import resolve_embedding
+
+    cache = CATALOG_PATH.parents[2] / 'poc/memory_m0/model-cache'
+    if not cache.is_dir():
+        pytest.skip('local pinned model cache absent in this worktree; no download allowed')
+
+    def no_network(*args, **kwargs):
+        pytest.fail('local provider attempted network access')
+
+    monkeypatch.setattr(socket.socket, 'connect', no_network)
+    provider = resolve_embedding(env={})
+    assert isinstance(provider, LocalBgeProvider)
+    assert (provider.embedder, provider.model_version, provider.dim) == ('local-bge', f'{MODEL}@{REVISION}', 512)
+
+
+def test_resolve_remote_instance_no_network(tmp_path, raw, monkeypatch):
+    from app.memory.embedding import RemoteOpenAICompatibleProvider
+    from app.model_house import resolve_embedding
+
+    def no_network(*args, **kwargs):
+        pytest.fail('factory construction attempted network access')
+
+    monkeypatch.setattr(socket.socket, 'connect', no_network)
+    raw['resources'][1]['status'] = 'enabled'
+    catalog = catalog_from(tmp_path, raw)
+    env = {'SAM_EMBEDDING_MODEL': 'qwen3.7-text'}
+    with pytest.raises(EmbeddingCatalogError, match='SAM_EMBEDDING_API_KEY'):
+        resolve_embedding(catalog=catalog, env=env)
+    env['SAM_EMBEDDING_API_KEY'] = 'test-only-credential'
+    provider = resolve_embedding(catalog=catalog, env=env)
+    assert isinstance(provider, RemoteOpenAICompatibleProvider)
+    assert (provider.embedder, provider.model_version, provider.dim) == ('qwen3.7-text', 'qwen3.7-text-embedding', 1024)
+    assert provider.enabled and provider.timeout == 30.0

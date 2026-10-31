@@ -51,20 +51,69 @@ class LocalBgeProvider:
         return self.embed_texts([QUERY_PREFIX + text])[0]
 
 
+class EmbeddingRequestError(ValueError):
+    """Remote request failed or returned an invalid embedding response."""
+
+
 class RemoteOpenAICompatibleProvider:
-    """Disabled interface only. M1 implements no network client, keys or endpoint."""
+    """Explicitly authorized OpenAI-compatible embedding client, without fallback."""
     embedder = "remote-openai-compatible"
 
     def __init__(self, *, enabled: bool = False, endpoint: str | None = None,
-                 api_key: str | None = None, model: str | None = None, dim: int = 512):
+                 api_key: str | None = None, model: str | None = None,
+                 dim: int = 512, timeout: float = 30.0,
+                 embedder: str = "remote-openai-compatible"):
         if not enabled or not all((endpoint, api_key, model)):
             raise ValueError("remote embedding requires explicit authorization and configuration")
         if type(dim) is not int or dim < 1:
             raise ValueError("invalid embedding dimension")
-        self.dim, self.model_version = dim, model
+        if type(timeout) not in (int, float) or timeout <= 0:
+            raise ValueError("invalid embedding timeout")
+        self.enabled = True
+        self.endpoint = endpoint.rstrip("/")
+        self.api_key, self.model_version, self.dim = api_key, model, dim
+        self.timeout, self.embedder = float(timeout), embedder
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        raise NotImplementedError("M1 remote skeleton: no network implementation")
+        import http.client
+        import json
+        import math
+        import urllib.error
+        import urllib.request
+
+        if not isinstance(texts, list) or any(not isinstance(t, str) or not t.strip() for t in texts):
+            raise ValueError("embedding input must be a list of nonempty strings")
+        if not texts:
+            return []
+        try:
+            request = urllib.request.Request(
+                self.endpoint + "/embeddings",
+                data=json.dumps({"model": self.model_version, "input": texts,
+                                 "dimensions": self.dim, "encoding_format": "float"}).encode("utf-8"),
+                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            rows = data["data"]
+            if not isinstance(rows, list) or len(rows) != len(texts):
+                raise ValueError
+            if any(not isinstance(row, dict) or type(row["index"]) is not int for row in rows):
+                raise ValueError
+            if {row["index"] for row in rows} != set(range(len(texts))):
+                raise ValueError
+            result = []
+            for row in sorted(rows, key=lambda row: row["index"]):
+                vector = row["embedding"]
+                if not isinstance(vector, list) or len(vector) != self.dim:
+                    raise ValueError
+                if any(type(v) not in (int, float) or not math.isfinite(v) for v in vector) or not any(vector):
+                    raise ValueError
+                result.append(vector)
+            return result
+        except (urllib.error.URLError, OSError, http.client.HTTPException,
+                KeyError, IndexError, TypeError, UnicodeError, ValueError, OverflowError):
+            raise EmbeddingRequestError("embedding request failed or returned invalid data") from None
 
     def embed_query(self, text: str) -> list[float]:
-        raise NotImplementedError("M1 remote skeleton: no network implementation")
+        return self.embed_texts([text])[0]
