@@ -316,6 +316,72 @@ def test_v6_concurrent_first_construction_yields_one_private_db(tmp_path):
     assert len({r.digest for r in records}) == thread_count
 
 
+def test_batch_seam_commits_all_registrations_together(world):
+    d1 = world["put"](b"batch one")
+    d2 = world["put"](b"batch two")
+    ledger = world["ledger"]
+    with ledger.registration_batch():
+        r1 = ledger.register_version(
+            logical_source_id="batch-src", digest=d1,
+            size_bytes=len(b"batch one"),
+            installation_id=INSTALL, company_id=COMPANY,
+            source_kind="backfill", source_coordinate="parse_staging#id=1")
+        r2 = ledger.register_version(
+            logical_source_id="batch-src", digest=d2,
+            size_bytes=len(b"batch two"),
+            installation_id=INSTALL, company_id=COMPANY,
+            source_kind="backfill", source_coordinate="parse_staging#id=2")
+    assert (r1.version_no, r2.version_no) == (1, 2)
+    raw = sqlite3.connect(ledger.database_path)
+    try:
+        assert raw.execute(
+            "SELECT COUNT(*) FROM fact_mapping_version_registrations"
+        ).fetchone()[0] == 2
+    finally:
+        raw.close()
+
+
+def test_batch_seam_rolls_back_everything_when_one_candidate_is_a_ghost(world):
+    d1 = world["put"](b"batch good one")
+    ghost = "f" * 64
+    ledger = world["ledger"]
+    with pytest.raises(GhostObjectError):
+        with ledger.registration_batch():
+            ledger.register_version(
+                logical_source_id="batch-src", digest=d1,
+                size_bytes=len(b"batch good one"),
+                installation_id=INSTALL, company_id=COMPANY,
+                source_kind="backfill", source_coordinate="parse_staging#id=1")
+            ledger.register_version(
+                logical_source_id="batch-src", digest=ghost,
+                size_bytes=9,
+                installation_id=INSTALL, company_id=COMPANY,
+                source_kind="backfill", source_coordinate="parse_staging#id=2")
+    raw = sqlite3.connect(ledger.database_path)
+    try:
+        assert raw.execute(
+            "SELECT COUNT(*) FROM fact_mapping_version_registrations"
+        ).fetchone()[0] == 0
+    finally:
+        raw.close()
+    # The failed batch poisoned nothing: a later single call works and
+    # numbers from 1, proving no half batch was committed.
+    result = ledger.register_version(
+        logical_source_id="batch-src", digest=d1,
+        size_bytes=len(b"batch good one"),
+        installation_id=INSTALL, company_id=COMPANY,
+        source_kind="backfill", source_coordinate="parse_staging#id=1")
+    assert result.version_no == 1
+
+
+def test_batch_seam_cannot_be_nested(world):
+    ledger = world["ledger"]
+    with ledger.registration_batch():
+        with pytest.raises(MappingVersionIndexError, match="nested"):
+            with ledger.registration_batch():
+                pass
+
+
 # -- §7.3 V3: no ghost indexes; post-registration gaps -----------------------
 
 def test_v3_digest_absent_from_cabinet_is_refused_without_a_row(world):
@@ -748,24 +814,40 @@ def test_vocabulary_matches_r1_closure_constants():
 
 # -- §7.8 V7: no existing production module imports the new ledger ------------
 
-def test_v7_no_production_module_imports_the_ledger():
+def test_v7_no_live_path_module_imports_the_ledger():
+    # The only sanctioned consumer is the offline R2 backfiller sibling
+    # (a runnable tool, never imported by a live path); it is named
+    # explicitly below so the allow-list cannot silently grow.
     repo_root = Path(__file__).resolve().parents[1]
+    app_root = repo_root / "app"
+    allowed_consumers = {"mapping_version_backfill.py"}
+    target = "app.facts_tree.mapping_version_index"
+
+    def resolved_imports(path, node):
+        if isinstance(node, ast.Import):
+            return [alias.name for alias in node.names]
+        module = node.module or ""
+        if node.level:
+            package = ["app"] + list(
+                path.parent.relative_to(app_root).parts)
+            base = package[:len(package) - node.level + 1]
+            return [".".join(base + ([module] if module else []))]
+        return [module] if module else []
+
     offenders = []
-    for path in (repo_root / "app").rglob("*.py"):
+    consumers = set()
+    for path in app_root.rglob("*.py"):
         if path.name == "mapping_version_index.py":
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"),
                          filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                names = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                names = [node.module]
-            else:
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
                 continue
-            for name in names:
-                if name == "app.facts_tree.mapping_version_index" or \
-                        name.startswith(
-                            "app.facts_tree.mapping_version_index."):
-                    offenders.append(f"{path}: {name}")
+            for name in resolved_imports(path, node):
+                if name == target or name.startswith(target + "."):
+                    consumers.add(path.name)
+                    if path.name not in allowed_consumers:
+                        offenders.append(f"{path}: {name}")
     assert offenders == []
+    assert consumers == allowed_consumers

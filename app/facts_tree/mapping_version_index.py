@@ -69,6 +69,7 @@ recompute checksums and drop triggers is not in scope.
 """
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
 import os
@@ -409,6 +410,10 @@ class MappingVersionLedger:
         self.company_id = _require_identity(company_id, "company_id")
         self._object_store = object_store
         self._lock = threading.RLock()
+        # Additive batch seam (R2 backfiller, V5/V9): when an open
+        # registration_batch() context is active on this thread, register
+        # calls join its transaction instead of opening their own.
+        self._batch_depth = 0
 
         root_fd, is_creator, database_path = self._prepare_root(index_root)
         try:
@@ -701,8 +706,10 @@ class MappingVersionLedger:
         self._verify_cabinet_bytes(digest_hex, size)
 
         registered_at = datetime.now(timezone.utc).isoformat()
+        joined_batch = self._batch_depth > 0
         with self._lock:
-            self._db.execute("BEGIN IMMEDIATE")
+            if not joined_batch:
+                self._db.execute("BEGIN IMMEDIATE")
             try:
                 existing = self._db.execute(
                     "SELECT " + ", ".join(_COLUMNS) + " "
@@ -720,7 +727,8 @@ class MappingVersionLedger:
                         raise LedgerIntegrityError(
                             "stored registration size disagrees with the "
                             "cabinet-verified bytes for the same digest")
-                    self._db.commit()
+                    if not joined_batch:
+                        self._db.commit()
                     return self._result(row, STATUS_REPLAYED)
 
                 next_version = self._db.execute(
@@ -759,9 +767,14 @@ class MappingVersionLedger:
                     raise LedgerIntegrityError(
                         f"registration insert refused by the append-only "
                         f"schema: {exc}") from exc
-                self._db.commit()
+                if not joined_batch:
+                    self._db.commit()
             except BaseException:
-                self._db.rollback()
+                if not joined_batch:
+                    self._db.rollback()
+                # Joined batch: leave the failed transaction for the
+                # registration_batch() context, which rolls back every
+                # registration in the batch together.
                 raise
         return RegistrationResult(
             installation_id=self.installation_id,
@@ -776,6 +789,38 @@ class MappingVersionLedger:
             source_coordinate=source_coordinate,
             h_commit_oid=h_commit_oid,
             status=STATUS_REGISTERED)
+
+    @contextlib.contextmanager
+    def registration_batch(self):
+        """Bind several :meth:`register_version` calls to one transaction.
+
+        Additive seam for the offline, repeatable backfill reconciler
+        (R2 slice 2, V5/V9): every register call made inside this context
+        joins one ``BEGIN IMMEDIATE`` transaction instead of opening its
+        own, so a batch is all-or-nothing — either every version in it is
+        committed together or none of them is.  Register calls outside
+        this context keep their original one-call-one-transaction behavior
+        unchanged.  Each register call still performs its own structural
+        validation, scope check and cabinet verification, and numbering
+        still runs max+1 inside the shared transaction; batches cannot be
+        nested.  A register failure leaves the batch transaction to this
+        context, which rolls it back in full.
+        """
+        with self._lock:
+            if self._batch_depth != 0:
+                raise MappingVersionIndexError(
+                    "registration batches cannot be nested")
+            self._batch_depth = 1
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except BaseException:
+                self._db.rollback()
+                raise
+            else:
+                self._db.commit()
+            finally:
+                self._batch_depth = 0
 
     # -- read surface ---------------------------------------------------------
 
