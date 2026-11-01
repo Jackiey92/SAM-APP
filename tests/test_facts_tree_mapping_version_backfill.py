@@ -575,11 +575,14 @@ def test_backfill_full_flow_succeeds_with_sockets_sealed(world, monkeypatch):
 def test_v7_no_live_path_imports_ledger_or_backfiller():
     repo_root = Path(__file__).resolve().parents[1]
     app_root = repo_root / "app"
-    # The two offline R2 siblings may import each other; everything else
-    # (webapp, harness, employees, broker, storage, backup_* …) may not.
+    # The three offline library siblings may import each other: the
+    # ledger, the R2 backfiller, and the A1 backup assembler (read-only
+    # offline consumer mandated by the A1 freeze brief). Everything else
+    # (webapp, harness, employees, broker, storage, …) may not.
     offline_siblings = {
         "mapping_version_index.py",
         "mapping_version_backfill.py",
+        "backup_assembly.py",
     }
     watched = ("app.facts_tree.mapping_version_index",
                "app.facts_tree.mapping_version_backfill")

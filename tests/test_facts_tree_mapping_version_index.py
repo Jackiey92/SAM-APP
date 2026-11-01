@@ -815,12 +815,19 @@ def test_vocabulary_matches_r1_closure_constants():
 # -- §7.8 V7: no existing production module imports the new ledger ------------
 
 def test_v7_no_live_path_module_imports_the_ledger():
-    # The only sanctioned consumer is the offline R2 backfiller sibling
-    # (a runnable tool, never imported by a live path); it is named
-    # explicitly below so the allow-list cannot silently grow.
+    # The sanctioned consumers are the three offline library siblings:
+    # the R2 backfiller (a runnable tool, never imported by a live path)
+    # and the A1 backup assembler, a read-only offline consumer mandated
+    # by the A1 freeze brief (ledger_shape/ledger_digest/close only).
+    # Live paths (webapp, harness, employees, broker, storage, ...) stay
+    # forbidden; the set is named explicitly below and compared with ==
+    # so the allow-list cannot silently grow.
     repo_root = Path(__file__).resolve().parents[1]
     app_root = repo_root / "app"
-    allowed_consumers = {"mapping_version_backfill.py"}
+    allowed_consumers = {
+        "mapping_version_backfill.py",
+        "backup_assembly.py",
+    }
     target = "app.facts_tree.mapping_version_index"
 
     def resolved_imports(path, node):
