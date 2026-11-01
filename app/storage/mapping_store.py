@@ -13,6 +13,7 @@ import base64
 import errno
 import hashlib
 import json
+import logging
 import os
 import stat
 import tempfile
@@ -30,6 +31,8 @@ from .versioned_mapping_objects import (
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+_LOGGER = logging.getLogger(__name__)
 
 # Preparing the single directory level above an object root must verify and
 # create it relative to a descriptor pinned to its own parent; without
@@ -314,8 +317,50 @@ def _prepare_objects_parent(objects_root: Path | str) -> int:
         os.close(gp_fd)
 
 
+def _online_coordinate(conn, file_hash: str) -> str:
+    """Stable live-path coordinate for the newest parsed staging row."""
+    row = conn.execute(
+        "SELECT id FROM parse_staging WHERE file_hash=? AND status='parsed' "
+        "ORDER BY id DESC LIMIT 1",
+        (file_hash,),
+    ).fetchone()
+    if row is None:
+        # The projection query above proved a parsed row exists in the
+        # same transaction snapshot; keep a stable coordinate even if a
+        # concurrent caller changed the table shape unexpectedly.
+        return f"parse_staging#file_hash={file_hash}"
+    return f"parse_staging#id={row['id']}"
+
+
+def _register_online(conn, registrar, file_hash: str, digest: str,
+                     mapping_bytes: bytes) -> None:
+    """Invoke the optional R3 online-registration seam, degrade-safe.
+
+    The seam is injected by the host wiring (R3 ships the seam, not the
+    production enablement); ``None`` means the historical byte-identical
+    path.  The seam itself is contractually non-raising; this catch is
+    the parsing-link safety net so a misbehaving injected registrar can
+    never fail or roll back the parse after the cabinet put succeeded.
+    Logged fields are class labels only — no exception message, since
+    SQLite errors embed absolute database paths.
+    """
+    try:
+        registrar.register(
+            logical_source_id=file_hash,
+            digest=digest,
+            size_bytes=len(mapping_bytes),
+            source_coordinate=_online_coordinate(conn, file_hash))
+    except Exception as exc:
+        _LOGGER.warning(
+            "online mapping registration seam raised %s; the mapping is "
+            "in the cabinet but stays unregistered until the offline "
+            "backfiller runs",
+            type(exc).__qualname__)
+
+
 def persist_latest_mapping(conn, file_hash: str, path: Path,
-                           objects_root: Path | str) -> str:
+                           objects_root: Path | str, *,
+                           online_registrar: Any = None) -> str:
     """Caller holds the SQLite writer lock while replacing its projection.
 
     ``objects_root`` is the explicit root of the immutable mapping-object
@@ -337,6 +382,13 @@ def persist_latest_mapping(conn, file_hash: str, path: Path,
     file stores are not one atomic transaction: a later DB rollback may
     leave an unreferenced object behind, which inventory is allowed to
     show.
+
+    ``online_registrar`` is the optional R3 online-registration seam.
+    It is invoked only after the cabinet put succeeded; it must never
+    raise, and its outcome is ignored here, so the projection and the
+    parse transaction are byte-identical to the seam-less path whether
+    the registration succeeds, replays or degrades.  ``None`` preserves
+    the historical behavior exactly.
     """
     row = conn.execute(
         "SELECT payload FROM parse_staging WHERE file_hash=? AND status='parsed' ORDER BY id DESC LIMIT 1",
@@ -345,16 +397,26 @@ def persist_latest_mapping(conn, file_hash: str, path: Path,
     if row is None:
         raise KeyError(f"parsed mapping not found: {file_hash}")
     mapping = render_mapping(json.loads(row["payload"]))
+    mapping_bytes = mapping.encode("utf-8")
     parent_fd = _prepare_objects_parent(objects_root)
     try:
-        VersionedMappingObjectStore(objects_root, parent_fd=parent_fd).put(
-            mapping.encode("utf-8"))
+        digest = VersionedMappingObjectStore(
+            objects_root, parent_fd=parent_fd).put(mapping_bytes)
     finally:
         # The store borrows the pinned parent descriptor for its lifetime
         # and never closes it; preparation transferred ownership here, so
         # this call site closes it on the success path and on every
         # object-store failure path alike — no descriptor may leak.
         os.close(parent_fd)
+    # R3 online-registration seam: only after the cabinet put succeeded
+    # (the ledger re-verifies these bytes through its own cabinet get, so
+    # a ghost is refused there). The seam is degrade-never-block by
+    # contract and this call site never inspects its result, so a ledger
+    # fault leaves the projection replacement and the parse transaction
+    # exactly on their historical path; None means the historical path.
+    if online_registrar is not None:
+        _register_online(conn, online_registrar, file_hash, digest,
+                         mapping_bytes)
     write_mapping(path, mapping)
     manifest = json.loads(row["payload"])
     document = manifest.get("document") or {}
@@ -371,8 +433,12 @@ def persist_latest_mapping(conn, file_hash: str, path: Path,
 class SourceMapService:
     """Read mappings and append controlled replace/remove corrections."""
 
-    def __init__(self, db_path, objects_path: Path | str | None = None, *, maps_path=None):
+    def __init__(self, db_path, objects_path: Path | str | None = None, *,
+                 maps_path=None, online_registrar: Any = None):
         self.db_path = db_path
+        # Optional R3 online-registration seam; None keeps every path
+        # byte-identical to the un-wired historical behavior.
+        self._online_registrar = online_registrar
         self.objects_path = Path(objects_path) if objects_path is not None else evidence_root() / "bin"
         self.maps_path = Path(maps_path) if maps_path is not None else self.objects_path.parent / "map"
         # Immutable mapping objects live in the explicit sibling of the maps
@@ -418,7 +484,8 @@ class SourceMapService:
         with connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             return persist_latest_mapping(conn, file_hash, self.map_path(file_hash),
-                                          self.mapping_objects_path)
+                                          self.mapping_objects_path,
+                                          online_registrar=self._online_registrar)
 
     def read_map(self, *, file_hash: str, company_id: str, manifest=None) -> str:
         # Synchronize the DB snapshot and file read with staging writers. This
@@ -482,7 +549,8 @@ class SourceMapService:
                  current["id"] if current is not None else None, _now()),
             )
             persist_latest_mapping(conn, file_hash, self.map_path(file_hash),
-                                   self.mapping_objects_path)
+                                   self.mapping_objects_path,
+                                   online_registrar=self._online_registrar)
             conn.commit()
             row = conn.execute("SELECT * FROM source_edits WHERE id=?", (cur.lastrowid,)).fetchone()
         return dict(row)

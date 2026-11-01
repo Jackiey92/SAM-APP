@@ -22,8 +22,12 @@ def _now() -> str:
 
 
 class StagingStore:
-    def __init__(self, db_path=None, *, maps_path=None):
+    def __init__(self, db_path=None, *, maps_path=None,
+                 online_registrar=None):
         self._db_path = db_path
+        # Optional R3 online-registration seam; None keeps every parse
+        # path byte-identical to the un-wired historical behavior.
+        self._online_registrar = online_registrar
         # Explicit DBs keep test/scoped output away from the product store.
         root = evidence_root() if db_path is None or os.environ.get("SAM_2A_ROOT") else Path(db_path).parent / "2a"
         self.maps_path = Path(maps_path) if maps_path is not None else root / "map"
@@ -41,7 +45,8 @@ class StagingStore:
         from ..storage.archive_paths import hash_relpath
         persist_latest_mapping(conn, file_hash,
                                self.maps_path / hash_relpath(file_hash, mapping=True),
-                               self.mapping_objects_path)
+                               self.mapping_objects_path,
+                               online_registrar=self._online_registrar)
 
     def _conn(self):
         from ..db.database import connect as c

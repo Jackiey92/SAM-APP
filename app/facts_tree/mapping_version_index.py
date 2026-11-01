@@ -420,10 +420,18 @@ class MappingVersionLedger:
             self.database_path = database_path
             # The database name was born 0600 on the O_EXCL create race,
             # so mode=rw (never rwc) only attaches to an existing name.
+            # check_same_thread=False: the parsing main link is
+            # multi-threaded and shares one ledger (hence one connection)
+            # through the R3 online seam. Every post-construction use of
+            # this connection runs inside self._lock (register_version,
+            # registration_batch, list/get/shape/payload, close), so the
+            # connection is still serialized; only construction-time
+            # initialization runs before the object is published.
             self._db = sqlite3.connect(
                 Path(_pinned(root_fd, _DB_FILENAME)).as_uri()
                 + "?mode=rw",
                 uri=True,
+                check_same_thread=False,
             )
         finally:
             os.close(root_fd)
