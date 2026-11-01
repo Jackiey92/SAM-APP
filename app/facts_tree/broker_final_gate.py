@@ -7,11 +7,37 @@ and dependency construction; this module binds its effect to the requested diges
 All Git evidence uses the bound repository, never the SQLite accepted mirror.
 
 The admission is released on every exit. The host retains ownership/lifetime of
-its lease. Unknown re-admission is deliberately refused here: B4-2 can reconcile
-via a separate evidence entry without changing this fresh-acceptance contract.
-Exceptions before CAS reject without retry; exceptions at/after CAS park unknown.
-If even the unknown mirror cannot be persisted, the storage exception propagates:
-a caller must never receive an invented durable outcome.
+its lease. ``accept`` stays the fresh entrance: an operation carrying any
+in_flight/retry_wait/unknown history is refused there and must settle through
+``reconcile_unknown``. Exceptions before CAS reject without retry; exceptions at
+or after CAS park unknown. If even the unknown mirror cannot be persisted, the
+storage exception propagates: a caller must never receive an invented durable
+outcome.
+
+B4-2 ``reconcile_unknown`` settles one operation currently mirrored unknown with
+its one unknown attempt. It has exactly two evidence exits:
+
+- Exit A (Git convergence, zero second CAS): the current legal chain already
+  carries the operation at a first accepting commit C whose canonical effect
+  equals the requested opaque SHA-256. One paired work transaction then mirrors
+  unknown -> accepted on the operation and that same attempt, naming C. No
+  repository CAS, tree/commit build or new attempt happens, and the call is
+  idempotent once the mirror already names C. A different on-chain effect is
+  rejected; locator/chain anomalies quarantine with no work-store write.
+- Exit B (isolated same-attempt re-admission): only when the complete chain
+  proves empty of the operation. The host injects one trusted predicate proving
+  the old executor, descendants included, has actually terminated AND lost
+  ref-write ability (a dead parent PID or a deadline is not such proof), plus a
+  head-bound VerifiedReentryFacts object attesting authorization and immutable
+  dependencies. This module performs no identity resolution, authorization
+  consumption, network, F-007 or model call. Missing/non-True/raising proof,
+  stale or malformed facts, or a broken old-base..head empty proof all fail
+  closed with the pair staying unknown. Only then is the section-7 paired
+  unknown -> in_flight / unknown -> accepting edge used ON THE SAME ATTEMPT,
+  followed by a complete fresh gate (assemble, build/create, B3 validation,
+  durable intent first, one CAS, the same three CAS outcomes), at most two
+  rounds; the second definite loss parks the existing terminal retry_wait pair.
+  A still-ambiguous CAS parks unknown again without retry.
 """
 from dataclasses import dataclass
 from hashlib import sha256
@@ -37,6 +63,38 @@ class FinalGateResult:
     accepted_commit: str | None = None
     attempt_id: str | None = None
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class ReentryEvidence:
+    """Read-only context handed to the host's trusted isolation predicate.
+
+    It identifies the operation, the single attempt parked unknown, that
+    attempt's immutable unknown base commit and the fresh authoritative head
+    the gate captured. It carries no credential and authorizes nothing by
+    itself.
+    """
+
+    operation_id: str
+    attempt_id: str
+    unknown_base_commit: str
+    head_oid: str
+
+
+@dataclass(frozen=True)
+class VerifiedReentryFacts:
+    """Host-verified read-only facts gating an isolated re-admission.
+
+    The host performs all identity/authorization/dependency verification and
+    injects the already-verified result; this module checks only the exact
+    shape, the literal True flags and freshness: ``head_oid`` must equal the
+    fresh authoritative H this gate read itself. Nothing here is parsed as a
+    business rule and no authorization is consumed by this module.
+    """
+
+    head_oid: str
+    authorization_valid: bool
+    dependencies_valid: bool
 
 
 class FinalGateRefusal(ValueError):
@@ -71,6 +129,29 @@ class BrokerFinalGate:
         try:
             with self.coordination.admit(FINAL_ACCEPT, lease=lease) as admission:
                 return self._accept(admission, operation_id, effect, assemble, recorded_at)
+        except (FinalGateRefusal, CoordinationError) as exc:
+            return FinalGateResult("rejected", reason=str(exc))
+
+    def reconcile_unknown(self, *, lease, operation_id, effect, assemble,
+                          recorded_at, prove_executor_isolated=None,
+                          reentry_facts=None):
+        """Settle an operation parked unknown: Git convergence or re-admission.
+
+        Evidence exit A needs no predicate/facts. Evidence exit B calls
+        ``prove_executor_isolated`` exactly once with a ReentryEvidence context
+        and requires ``proved is True``; ``reentry_facts`` must be a
+        VerifiedReentryFacts bound to the fresh head with both literal True
+        flags. Every evidence failure is a rejected result with the unknown
+        pair untouched; storage failures propagate.
+        """
+        effect = git_format.loads_record(git_format.dumps_record(effect))
+        if not isinstance(effect, dict) or not callable(assemble):
+            raise TypeError("expected effect object and pure local assembler")
+        try:
+            with self.coordination.admit(FINAL_ACCEPT, lease=lease) as admission:
+                return self._reconcile_unknown(
+                    admission, operation_id, effect, assemble, recorded_at,
+                    prove_executor_isolated, reentry_facts)
         except (FinalGateRefusal, CoordinationError) as exc:
             return FinalGateResult("rejected", reason=str(exc))
 
@@ -114,9 +195,166 @@ class BrokerFinalGate:
         # A previous round cannot be resumed by calling the fresh entrance again.
         if any(e["state"] == "in_flight" for e in store.list_operation_events(*scope)):
             return FinalGateResult("rejected", reason="prior final gate requires reconciliation")
+        return self._gate_rounds(admission, scope, effect, assemble, recorded_at,
+                                 head, snapshot, None)
 
+    def _reconcile_unknown(self, admission, operation_id, effect, assemble,
+                           recorded_at, prove_isolated, reentry_facts):
+        repo, store = self.repository, self.store
+        scope = (repo._expected_meta["repo_id"], repo._expected_meta["company_id"],
+                 operation_id)
+        digest = _digest(effect)
+        # The same evidence preamble as the fresh gate. The locator either pins
+        # the first accepting commit C on the current legal chain or proves the
+        # complete chain empty; any chain/object/identity anomaly quarantines
+        # before a single work-store write.
+        try:
+            head = repo.head_oid()
+            origin, snapshot = self._evidence(head, operation_id)
+            chain_effect_matches = True
+            if origin.accepted_commit_oid is not None:
+                path = git_format.record_path("operation", operation_id=operation_id)
+                record = next(r for r in snapshot.records if r.path == path)
+                chain_effect_matches = (
+                    git_format.loads_record(record.content).get("effect_digest")
+                    == digest)
+        except Exception as exc:
+            return FinalGateResult("rejected", reason="Git evidence refused: " + str(exc))
+        # Mirror reads replay the full joint history: corrupted/half-recorded
+        # pairs raise ValueError here and deliberately propagate.
+        operation = store.get_operation(*scope)
+        if operation is None:
+            raise FinalGateRefusal("operation requires a recorded request")
+        attempts = [store.get_attempt(*scope, row["attempt_id"])
+                    for row in store.list_attempts(*scope)]
+        if origin.accepted_commit_oid is not None:
+            if not chain_effect_matches:
+                return FinalGateResult("rejected", reason="accepted effect differs")
+            return self._converge_unknown(admission, scope, digest, operation,
+                                          attempts, origin.accepted_commit_oid,
+                                          recorded_at)
+        return self._re_admit_unknown(admission, scope, effect, digest, assemble,
+                                      recorded_at, head, snapshot, operation,
+                                      attempts, prove_isolated, reentry_facts)
+
+    def _converge_unknown(self, admission, scope, digest, operation, attempts,
+                          commit, recorded_at):
+        # Evidence exit A: mirror the Git-proven acceptance as one paired
+        # unknown -> accepted transition, or report it with zero writes when
+        # the mirror already converges on the same C.
+        store = self.store
+        state = operation["current_state"]
+        if state == "accepted":
+            accepted = [a for a in attempts if a["current_state"] == "accepted"]
+            if (operation["accepted_commit"] != commit or len(accepted) != 1
+                    or accepted[0]["accepted_commit"] != commit):
+                raise FinalGateRefusal(
+                    "accepted mirror diverges from Git evidence")
+            return FinalGateResult("accepted", commit, accepted[0]["attempt_id"])
+        if state != "unknown":
+            raise FinalGateRefusal(
+                "Git acceptance cannot settle a %r operation" % state)
+        unknown = [a for a in attempts if a["current_state"] == "unknown"]
+        if (len(unknown) != 1
+                or {a["current_state"] for a in attempts} - {"unknown", "stale"}):
+            raise FinalGateRefusal(
+                "an unknown operation must own exactly one unknown attempt")
+        attempt_id = unknown[0]["attempt_id"]
+        if unknown[0]["effect_sha256"] != digest:
+            raise FinalGateRefusal(
+                "unknown attempt effect differs from the Git-proven effect")
+        detail = {"reason": "unknown_reconciled_on_chain"}
+        with admission.work_transaction():
+            store.mark_accepted(*scope, attempt_id, commit,
+                                uuid4().hex, uuid4().hex, recorded_at,
+                                operation_detail=detail, attempt_detail=dict(detail))
+        if store.db.in_transaction:
+            raise FinalGateRefusal("convergence transaction did not close")
+        operation = store.get_operation(*scope)
+        persisted = store.get_attempt(*scope, attempt_id)
+        if (operation["current_state"] != "accepted"
+                or operation["accepted_commit"] != commit
+                or persisted is None
+                or persisted["current_state"] != "accepted"
+                or persisted["accepted_commit"] != commit):
+            raise FinalGateRefusal("paired convergence was not persisted")
+        return FinalGateResult("accepted", commit, attempt_id)
+
+    def _re_admit_unknown(self, admission, scope, effect, digest, assemble,
+                          recorded_at, head, snapshot, operation, attempts,
+                          prove_isolated, reentry_facts):
+        # Evidence exit B: every gate below must pass before the paired
+        # unknown re-admission edge may be used; none of them performs I/O.
+        repo = self.repository
+        if operation["current_state"] != "unknown":
+            raise FinalGateRefusal(
+                "isolated re-admission requires an unknown operation; an "
+                "accepted mirror without Git evidence is not acceptance proof")
+        unknown = [a for a in attempts if a["current_state"] == "unknown"]
+        if (len(unknown) != 1
+                or {a["current_state"] for a in attempts} - {"unknown", "stale"}):
+            raise FinalGateRefusal(
+                "an unknown operation must own exactly one unknown attempt")
+        attempt = unknown[0]
+        if attempt["effect_sha256"] != digest:
+            raise FinalGateRefusal(
+                "unknown attempt effect differs from the requested effect")
+        if not callable(prove_isolated):
+            raise FinalGateRefusal(
+                "a trusted host executor-isolation predicate is required")
+        # The locator already proved the whole genesis..H chain healthy and
+        # empty; additionally bind that empty proof to exactly the range the
+        # unclear result raced: the attempt's immutable old base .. current H.
+        try:
+            chain = repo.list_commit_chain(attempt["base_commit"], head)
+        except Exception as exc:
+            return FinalGateResult("rejected",
+                                   reason="Git evidence refused: " + str(exc))
+        if (not chain or chain[0] != attempt["base_commit"]
+                or chain[-1] != head):
+            raise FinalGateRefusal(
+                "the empty legal-chain proof does not cover the unknown base")
+        if type(reentry_facts) is not VerifiedReentryFacts:
+            raise FinalGateRefusal(
+                "head-bound verified re-admission facts are required")
+        if (reentry_facts.head_oid != head
+                or type(reentry_facts.authorization_valid) is not bool
+                or type(reentry_facts.dependencies_valid) is not bool
+                or not reentry_facts.authorization_valid
+                or not reentry_facts.dependencies_valid):
+            raise FinalGateRefusal(
+                "re-admission facts are stale or do not authorize")
+        evidence = ReentryEvidence(scope[2], attempt["attempt_id"],
+                                   attempt["base_commit"], head)
+        try:
+            proved = prove_isolated(evidence)
+        except Exception as exc:
+            raise FinalGateRefusal(
+                "executor isolation proof failed: " + str(exc))
+        if proved is not True:
+            raise FinalGateRefusal(
+                "old executor termination and loss of ref-write ability "
+                "are not proven")
+        detail = {"reason": "unknown_re_admission", "head_oid": head,
+                  "unknown_base_commit": attempt["base_commit"]}
+        return self._gate_rounds(admission, scope, effect, assemble,
+                                 recorded_at, head, snapshot,
+                                 (attempt["attempt_id"], detail))
+
+    def _gate_rounds(self, admission, scope, effect, assemble, recorded_at,
+                     head, snapshot, readmit):
+        # The shared final gate. readmit is None for the fresh entrance, or
+        # (attempt_id, detail) for the B4-2 same-attempt re-admission, whose
+        # first round reuses the existing unknown attempt instead of
+        # registering a new one.
+        repo, store = self.repository, self.store
+        digest = _digest(effect)
+        readmit_attempt = None if readmit is None else readmit[0]
+        readmit_detail = None if readmit is None else readmit[1]
         for round_index in (1, 2):
-            attempt_id = uuid4().hex
+            reused = readmit_attempt if (readmit is not None
+                                         and round_index == 1) else None
+            attempt_id = reused or uuid4().hex
             def pair(method, **kwargs):
                 with admission.work_transaction():
                     return method(*scope, attempt_id,
@@ -133,9 +371,9 @@ class BrokerFinalGate:
                 # immutable byte instances reach build_tree and B3, even if the
                 # host later mutates its dictionary.
                 records = MappingProxyType(dict(assembled.records))
-                path = git_format.record_path("operation", operation_id=operation_id)
+                path = git_format.record_path("operation", operation_id=scope[2])
                 op = git_format.loads_record(records[path])
-                if (op.get("operation_id") != operation_id
+                if (op.get("operation_id") != scope[2]
                         or op.get("effect_digest") != digest
                         or op.get("base_commit") != head):
                     raise FinalGateRefusal("assembled operation binding differs")
@@ -151,18 +389,26 @@ class BrokerFinalGate:
                         commit_oid=commit, head_oid=head, object_format=repo.object_format)
                 validate()
                 with admission.work_transaction():
-                    store.record_attempt(*scope, attempt_id, recorded_at, head,
-                                         assembled.plan, effect, assembled.dependencies,
-                                         object_format=repo.object_format,
-                                         prepared_event_id=uuid4().hex, prepared_at=recorded_at)
+                    if reused is None:
+                        store.record_attempt(*scope, attempt_id, recorded_at, head,
+                                             assembled.plan, effect, assembled.dependencies,
+                                             object_format=repo.object_format,
+                                             prepared_event_id=uuid4().hex, prepared_at=recorded_at)
+                    admit_kwargs = {}
+                    if reused is not None:
+                        admit_kwargs["operation_detail"] = readmit_detail
+                        admit_kwargs["attempt_detail"] = readmit_detail
                     store.admit_execution(*scope, attempt_id, uuid4().hex,
-                                          uuid4().hex, recorded_at)
+                                          uuid4().hex, recorded_at, **admit_kwargs)
                 if store.db.in_transaction:
                     raise FinalGateRefusal("intent transaction did not close")
                 persisted = store.get_attempt(*scope, attempt_id)
                 if (persisted is None or persisted["current_state"] != "accepting"
-                        or persisted["base_commit"] != head
                         or persisted["effect_sha256"] != digest
+                        or (reused is None and persisted["base_commit"] != head)
+                        or (reused is not None
+                            and persisted["base_commit"]
+                            != readmit_detail["unknown_base_commit"])
                         or store.get_operation(*scope)["current_state"] != "in_flight"):
                     raise FinalGateRefusal("paired intent was not persisted")
                 intent = True
@@ -183,7 +429,7 @@ class BrokerFinalGate:
                 chain = repo.list_commit_chain(head, successor)
                 if successor == head or head not in chain:
                     raise FinalGateRefusal("CAS loss is not a healthy successor")
-                origin, snapshot = self._evidence(successor, operation_id)
+                origin, snapshot = self._evidence(successor, scope[2])
                 if origin.accepted_commit_oid is not None:
                     raise FinalGateRefusal("operation appeared during CAS loss")
                 if _digest(assembled.effect) != digest:
