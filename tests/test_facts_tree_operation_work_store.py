@@ -1241,3 +1241,351 @@ def test_complex_legal_history_with_stale_attempt_and_unknown_cycle():
     assert store.get_attempt(
         _REPO, _COMPANY, _OP, _ATT)["current_state"] == ATTEMPT_STALE
     conn.rollback()
+
+
+# -- CHG-071: certified lost-CAS paired recycling ---------------------------
+
+def _lost_cas(store, *, attempt_id=_ATT, op_event="evt-op-recycle",
+              att_event="evt-att-recycle", **kwargs):
+    args = dict(lost_from_head=_SHA1_BASE, lost_to_head=_SHA1_C,
+                round_index=1)
+    args.update(kwargs)
+    return store.recycle_lost_cas_attempt(
+        _REPO, _COMPANY, _OP, attempt_id, op_event, att_event, _T4, **args)
+
+
+def _lost_cas_seed(conn, store):
+    _seed_prepared_attempt(conn, store)
+    _admit(conn, store)
+
+
+def _lost_cas_second(conn, store):
+    _record_attempt(conn, store, attempt_id=_ATT2, base=_SHA1_C,
+                    prepared_event_id="evt-att2-prepared")
+    _admit(conn, store, attempt_id=_ATT2, op_event="evt-op-inflight2",
+           att_event="evt-att2-accepting")
+
+
+def _lost_cas_counts(conn):
+    return tuple(_count(conn, table) for table in
+                 (_OP_EVENTS_TABLE, _ATT_EVENTS_TABLE, _ATTEMPTS_TABLE))
+
+
+@pytest.mark.parametrize("outcome", ["reserved", "accepting", "accepted", "unknown"])
+def test_lost_cas_two_round_reads_and_replay(outcome):
+    conn, store = _open()
+    conn.execute("BEGIN")
+    _lost_cas_seed(conn, store)
+    trace = []
+    conn.set_trace_callback(trace.append)
+    result = _lost_cas(store, operation_detail={"host": "op"},
+                       attempt_detail={"host": "attempt"})
+    conn.set_trace_callback(None)
+    inserts = list(dict.fromkeys(
+        sql for sql in trace if sql.startswith("INSERT INTO")))
+    assert len(inserts) == 2
+    assert _ATT_EVENTS_TABLE in inserts[0]
+    assert _OP_EVENTS_TABLE in inserts[1]
+    assert sum(sql.startswith("SAVEPOINT ") for sql in trace) == 1
+    assert sum(sql.startswith("RELEASE SAVEPOINT ") for sql in trace) == 1
+    assert result["operation_event"]["state"] == OPERATION_RESERVED
+    assert result["attempt_event"]["state"] == ATTEMPT_STALE
+    for event in result.values():
+        assert event["accepted_commit"] is None
+        assert "accepted_commit" not in event["detail"]
+        assert event["detail"]["reason"] == "lost_cas"
+        assert event["detail"]["lost_from_head"] == _SHA1_BASE
+        assert event["detail"]["lost_to_head"] == _SHA1_C
+        assert event["detail"]["round_index"] == 1
+    if outcome != "reserved":
+        _lost_cas_second(conn, store)
+        if outcome == "accepted":
+            _accept(conn, store, attempt_id=_ATT2)
+        elif outcome == "unknown":
+            _unknown(conn, store, attempt_id=_ATT2)
+            # The existing unknown re-admission remains on the SAME attempt.
+            _admit(conn, store, attempt_id=_ATT2,
+                   op_event="evt-readmit2", att_event="evt-att-readmit2")
+            _unknown(conn, store, attempt_id=_ATT2,
+                     op_event="evt-unknown2", att_event="evt-att-unknown2")
+    before = _lost_cas_counts(conn)
+    replay = _lost_cas(store, operation_detail={"host": "op"},
+                       attempt_detail={"host": "attempt"})
+    assert all(e["replayed"] for e in replay.values())
+    assert _lost_cas_counts(conn) == before
+    for key, event in result.items():
+        assert replay[key]["event_id"] == event["event_id"]
+        assert replay[key]["seq"] == event["seq"]
+    conn.commit()
+    assert store.verify_integrity() is None
+    assert store.get_operation(_REPO, _COMPANY, _OP)["current_state"] == {
+        "reserved": OPERATION_RESERVED, "accepting": OPERATION_IN_FLIGHT,
+        "accepted": OPERATION_ACCEPTED, "unknown": OPERATION_UNKNOWN}[outcome]
+    assert store.get_attempt(_REPO, _COMPANY, _OP, _ATT)["current_state"] == ATTEMPT_STALE
+    assert len(store.list_attempts(_REPO, _COMPANY, _OP)) == (1 if outcome == "reserved" else 2)
+    if outcome != "reserved":
+        assert store.get_attempt(_REPO, _COMPANY, _OP, _ATT2)["base_commit"] == _SHA1_C
+    store.list_operation_events(_REPO, _COMPANY, _OP)
+    store.list_attempt_events(_REPO, _COMPANY, _OP, _ATT)
+
+
+@pytest.mark.parametrize("state", ["prepared", "approval_required", "reserved",
+                                   "unknown", "accepted", "rejected", "stale",
+                                   "wrong_attempt"])
+def test_lost_cas_invalid_joint_state_has_no_writes(state):
+    conn, store = _open()
+    conn.execute("BEGIN")
+    _seed_prepared_attempt(conn, store)
+    if state in ("approval_required", "reserved"):
+        store.mark_approval_required(_REPO, _COMPANY, _OP, "evt-approval", _T3)
+        if state == "reserved":
+            store.mark_reserved(_REPO, _COMPANY, _OP, "evt-reserve", _T3)
+    elif state in ("unknown", "accepted", "wrong_attempt"):
+        _admit(conn, store)
+        if state == "unknown":
+            _unknown(conn, store)
+        elif state == "accepted":
+            _accept(conn, store)
+    elif state == "rejected":
+        store.mark_attempt_stale(_REPO, _COMPANY, _OP, _ATT, "evt-expire", _T3)
+        store.reject_operation(_REPO, _COMPANY, _OP, "evt-reject", _T3)
+    elif state == "stale":
+        store.mark_attempt_stale(_REPO, _COMPANY, _OP, _ATT, "evt-stale", _T3)
+    before = _lost_cas_counts(conn)
+    op_before = store.get_operation(_REPO, _COMPANY, _OP)
+    att_before = store.get_attempt(_REPO, _COMPANY, _OP, _ATT)
+    with pytest.raises(IllegalStateTransition):
+        _lost_cas(store, attempt_id="missing" if state == "wrong_attempt" else _ATT)
+    assert before == _lost_cas_counts(conn)
+    assert store.get_operation(_REPO, _COMPANY, _OP) == op_before
+    assert store.get_attempt(_REPO, _COMPANY, _OP, _ATT) == att_before
+    store.verify_integrity()
+
+
+@pytest.mark.parametrize("round_index", [2, 0, -1, True, 1.0, "1", None])
+def test_lost_cas_round_is_exact_integer_one(round_index):
+    conn, store = _open()
+    conn.execute("BEGIN")
+    _lost_cas_seed(conn, store)
+    before = _lost_cas_counts(conn)
+    with pytest.raises(IllegalStateTransition):
+        _lost_cas(store, round_index=round_index)
+    assert _lost_cas_counts(conn) == before
+    assert store.get_operation(_REPO, _COMPANY, _OP)["current_state"] == OPERATION_IN_FLIGHT
+    assert store.get_attempt(_REPO, _COMPANY, _OP, _ATT)["current_state"] == ATTEMPT_ACCEPTING
+
+
+def test_lost_cas_budget_cannot_be_bypassed_by_round_one():
+    conn, store = _open()
+    conn.execute("BEGIN")
+    _lost_cas_seed(conn, store)
+    _lost_cas(store)
+    _lost_cas_second(conn, store)
+    before = _lost_cas_counts(conn)
+    with pytest.raises(IllegalStateTransition, match="budget exhausted"):
+        _lost_cas(store, attempt_id=_ATT2, op_event="evt-recycle2",
+                  att_event="evt-att-recycle2")
+    assert _lost_cas_counts(conn) == before
+    store.verify_integrity()
+
+
+def test_lost_cas_atomic_failure_rolls_back_both_halves(monkeypatch):
+    conn, store = _open()
+    conn.execute("BEGIN")
+    _lost_cas_seed(conn, store)
+    before = _lost_cas_counts(conn)
+    original = store._insert_op_event
+
+    def fail(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError("injected recycle operation failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_insert_op_event", fail)
+        with pytest.raises(RuntimeError, match="injected"):
+            _lost_cas(store)
+    assert conn.in_transaction
+    assert _lost_cas_counts(conn) == before
+    store.verify_integrity()
+    _lost_cas(store)
+    conn.commit()
+    store.verify_integrity()
+
+
+@pytest.mark.parametrize("change", ["head", "op_detail", "att_detail", "half", "cross_id"])
+def test_lost_cas_replay_conflict_fails_without_rows(change):
+    conn, store = _open()
+    conn.execute("BEGIN")
+    _lost_cas_seed(conn, store)
+    _lost_cas(store)
+    before = _lost_cas_counts(conn)
+    kwargs = {
+        "head": {"lost_to_head": "b" * 40},
+        "op_detail": {"operation_detail": {"changed": True}},
+        "att_detail": {"attempt_detail": {"changed": True}},
+        "half": {"att_event": "new-half"},
+        "cross_id": {"op_event": "evt-att-recycle"},
+    }[change]
+    error = {"head": OperationEventConflict, "op_detail": OperationEventConflict,
+             "att_detail": AttemptEventConflict, "half": ValueError,
+             "cross_id": IllegalStateTransition}[change]
+    with pytest.raises(error):
+        _lost_cas(store, **kwargs)
+    assert _lost_cas_counts(conn) == before
+    store.verify_integrity()
+
+
+@pytest.mark.parametrize("state", ["accepting", "unknown"])
+def test_lost_cas_does_not_open_generic_stale_entry(state):
+    conn, store = _open()
+    conn.execute("BEGIN")
+    _lost_cas_seed(conn, store)
+    if state == "unknown":
+        _unknown(conn, store)
+    before = _lost_cas_counts(conn)
+    with pytest.raises(IllegalStateTransition):
+        store.mark_attempt_stale(_REPO, _COMPANY, _OP, _ATT, "generic-stale", _T4)
+    assert _lost_cas_counts(conn) == before
+    store.verify_integrity()
+
+
+def _lost_cas_stamp(op_id, att_id):
+    return dict(reason="lost_cas", lost_from_head=_SHA1_BASE,
+                lost_to_head=_SHA1_C, round_index=1,
+                operation_event_id=op_id, attempt_event_id=att_id)
+
+
+@pytest.mark.parametrize("damage", [
+    "operation_only", "attempt_only", "two_live", "unknown_stale",
+    "commit_mismatch", "seq_gap", "event_reuse", "second_recycle",
+    "fingerprint", "uncertified", "wrong_order"])
+def test_lost_cas_corrupted_history_fails_joint_reads(damage):
+    conn, store = _open()
+    conn.execute("BEGIN")
+    _lost_cas_seed(conn, store)
+    if damage == "operation_only":
+        _plant_op_event(store, 3, OPERATION_RESERVED)
+    elif damage == "attempt_only":
+        _plant_att_event(store, 3, ATTEMPT_STALE)
+    elif damage == "unknown_stale":
+        _unknown(conn, store)
+        _plant_att_event(store, 4, ATTEMPT_STALE)
+        _plant_op_event(store, 4, OPERATION_RESERVED)
+    elif damage in ("fingerprint", "uncertified", "wrong_order", "event_reuse"):
+        detail = _lost_cas_stamp("bad-op", "bad-att")
+        op_detail = dict(detail)
+        if damage == "fingerprint":
+            op_detail["lost_to_head"] = "b" * 40
+        elif damage == "uncertified":
+            detail = op_detail = {}
+        elif damage == "event_reuse":
+            detail = op_detail = _lost_cas_stamp("bad-op", "bad-op")
+        _plant_att_event(store, 3, ATTEMPT_STALE,
+                         event_id="bad-op" if damage == "event_reuse" else "bad-att",
+                         detail=detail)
+        _plant_op_event(store, 3,
+                        OPERATION_UNKNOWN if damage == "wrong_order" else OPERATION_RESERVED,
+                        event_id="bad-op", detail=op_detail)
+    else:
+        _lost_cas(store)
+        if damage == "two_live":
+            for aid in (_ATT2, "att-third"):
+                _plant_attempt_row(conn, store, aid)
+                _plant_att_event(store, 1, ATTEMPT_PREPARED, attempt_id=aid,
+                                 event_id=aid + "-prepared")
+                _plant_att_event(store, 2, ATTEMPT_ACCEPTING, attempt_id=aid,
+                                 event_id=aid + "-accepting")
+            _plant_op_event(store, 4, OPERATION_IN_FLIGHT)
+        else:
+            _lost_cas_second(conn, store)
+            if damage == "commit_mismatch":
+                _plant_att_event(store, 3, ATTEMPT_ACCEPTED, attempt_id=_ATT2,
+                                 commit=_SHA1_C)
+                _plant_op_event(store, 5, OPERATION_ACCEPTED, commit="b" * 40)
+            elif damage == "seq_gap":
+                _plant_att_event(store, 4, ATTEMPT_UNKNOWN, attempt_id=_ATT2)
+                _plant_op_event(store, 5, OPERATION_UNKNOWN)
+            elif damage == "second_recycle":
+                detail = _lost_cas_stamp("bad-op2", "bad-att2")
+                _plant_att_event(store, 3, ATTEMPT_STALE, attempt_id=_ATT2,
+                                 event_id="bad-att2", detail=detail)
+                _plant_op_event(store, 5, OPERATION_RESERVED,
+                                event_id="bad-op2", detail=detail)
+    conn.commit()
+    for read in (store.verify_integrity,
+                 lambda: store.get_operation(_REPO, _COMPANY, _OP),
+                 lambda: store.get_attempt(_REPO, _COMPANY, _OP, _ATT),
+                 lambda: store.list_operation_events(_REPO, _COMPANY, _OP),
+                 lambda: store.list_attempt_events(_REPO, _COMPANY, _OP, _ATT)):
+        with pytest.raises(ValueError):
+            read()
+
+
+@pytest.mark.parametrize("kwargs,error", [
+    ({"lost_to_head": _SHA1_BASE}, IllegalStateTransition),
+    ({"lost_to_head": "bad-oid"}, ValueError),
+    ({"operation_detail": {"accepted_commit": _SHA1_C}}, IllegalStateTransition),
+    ({"attempt_detail": {"accepted_commit": _SHA1_C}}, IllegalStateTransition),
+    ({"operation_detail": {"reason": "unknown"}}, IllegalStateTransition),
+    ({"attempt_detail": {"round_index": 2}}, IllegalStateTransition),
+    ({"op_event": "same-id", "att_event": "same-id"}, IllegalStateTransition),
+])
+def test_lost_cas_invalid_metadata_cannot_write(kwargs, error):
+    conn, store = _open()
+    conn.execute("BEGIN")
+    _lost_cas_seed(conn, store)
+    before = _lost_cas_counts(conn)
+    with pytest.raises(error):
+        _lost_cas(store, **kwargs)
+    assert _lost_cas_counts(conn) == before
+    store.verify_integrity()
+
+
+def test_lost_cas_requires_caller_transaction():
+    conn, store = _open()
+    with conn:
+        conn.execute("BEGIN")
+        _lost_cas_seed(conn, store)
+    before = _lost_cas_counts(conn)
+    with pytest.raises(ValueError, match="active caller transaction"):
+        _lost_cas(store)
+    assert not conn.in_transaction
+    assert _lost_cas_counts(conn) == before
+
+
+def test_lost_cas_preflight_expiries_before_and_between_rounds():
+    conn, store = _open()
+    conn.execute("BEGIN")
+    _seed_prepared(conn, store)
+    for aid in ("expired-before",):
+        _record_attempt(conn, store, attempt_id=aid,
+                        prepared_event_id=aid + "-prepared")
+        store.mark_attempt_stale(_REPO, _COMPANY, _OP, aid, aid + "-stale", _T3)
+    store.mark_approval_required(_REPO, _COMPANY, _OP, "evt-approval", _T3)
+    store.mark_reserved(_REPO, _COMPANY, _OP, "evt-reserved", _T3)
+    _record_attempt(conn, store)
+    _admit(conn, store)
+    _lost_cas(store)
+    _record_attempt(conn, store, attempt_id="expired-between",
+                    prepared_event_id="between-prepared", base=_SHA1_C)
+    store.mark_attempt_stale(_REPO, _COMPANY, _OP, "expired-between",
+                             "between-stale", _T4)
+    _lost_cas_second(conn, store)
+    _accept(conn, store, attempt_id=_ATT2)
+    store.verify_integrity()
+    assert len(store.list_attempts(_REPO, _COMPANY, _OP)) == 4
+
+
+def test_lost_cas_sha256_heads_and_edge_allowlists():
+    from app.facts_tree.operation_work_store import _ATTEMPT_EDGES, _OPERATION_EDGES
+
+    assert _ATTEMPT_EDGES[ATTEMPT_ACCEPTING] == {
+        ATTEMPT_ACCEPTED, ATTEMPT_UNKNOWN, ATTEMPT_STALE}
+    assert _ATTEMPT_EDGES[ATTEMPT_UNKNOWN] == {ATTEMPT_ACCEPTED, ATTEMPT_ACCEPTING}
+    assert _OPERATION_EDGES[OPERATION_UNKNOWN] == {OPERATION_ACCEPTED, OPERATION_IN_FLIGHT}
+    conn, store = _open()
+    conn.execute("BEGIN")
+    _seed_prepared_attempt(conn, store, base=_SHA256_BASE, object_format="sha256")
+    _admit(conn, store)
+    _lost_cas(store, lost_from_head=_SHA256_BASE, lost_to_head=_SHA256_C)
+    store.verify_integrity()

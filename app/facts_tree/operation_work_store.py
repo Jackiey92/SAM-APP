@@ -264,7 +264,8 @@ _OPERATION_EDGES = {
     OPERATION_APPROVAL_REQUIRED: frozenset({OPERATION_RESERVED}),
     OPERATION_RESERVED: frozenset({
         OPERATION_IN_FLIGHT, OPERATION_REJECTED}),
-    OPERATION_IN_FLIGHT: frozenset({OPERATION_ACCEPTED, OPERATION_UNKNOWN}),
+    OPERATION_IN_FLIGHT: frozenset({
+        OPERATION_ACCEPTED, OPERATION_UNKNOWN, OPERATION_RESERVED}),
     # unknown -> in_flight is the section-7 same-operation re-admission.
     OPERATION_UNKNOWN: frozenset({OPERATION_ACCEPTED, OPERATION_IN_FLIGHT}),
     OPERATION_ACCEPTED: frozenset(),
@@ -287,11 +288,12 @@ _ATTEMPT_STATES = frozenset({
 
 _ATTEMPT_EDGES = {
     ATTEMPT_PREPARED: frozenset({ATTEMPT_ACCEPTING, ATTEMPT_STALE}),
-    # An accepting attempt exits only through a paired section-7 outcome.
-    # There is deliberately no accepting -> stale edge: while the final
-    # gate is open, non-acceptance is not definite, and an expired gate is
-    # parked as unknown and recovered through re-admission.
-    ATTEMPT_ACCEPTING: frozenset({ATTEMPT_ACCEPTED, ATTEMPT_UNKNOWN}),
+    # Reading only: accepting -> stale recognizes the CHG-071 certified
+    # lost-CAS pair. General gate expiry still cannot use this edge;
+    # only recycle_lost_cas_attempt authorizes its paired write, after
+    # the caller's hard evidence gate. Existing write allowlists stand.
+    ATTEMPT_ACCEPTING: frozenset({
+        ATTEMPT_ACCEPTED, ATTEMPT_UNKNOWN, ATTEMPT_STALE}),
     # unknown -> accepting is the section-7 re-admission path; there is
     # deliberately no unknown -> stale edge: stale/retry_wait are
     # scheduling states after a DEFINITE non-acceptance and can never
@@ -1212,6 +1214,94 @@ class OperationWorkStore:
             operation_detail, attempt_detail, OPERATION_IN_FLIGHT,
             ATTEMPT_ACCEPTING, None, "admit_execution")
 
+    def recycle_lost_cas_attempt(
+            self, repo_id, company_id, operation_id, attempt_id,
+            operation_event_id, attempt_event_id, recorded_at, *,
+            lost_from_head, lost_to_head, round_index,
+            operation_detail=None, attempt_detail=None):
+        """Record definite first-round non-acceptance as one atomic pair.
+
+        The caller owns ALL five hard evidence checks (coordination lease,
+        definite CAS loss, healthy successor chain, absence of acceptance,
+        unchanged effect). This store checks no Git or external evidence.
+        Only (in_flight, accepting) can become (reserved, stale), once per
+        operation. The shared detail fields bind the two audit halves;
+        they are structural checksums, not authentication of the caller.
+        """
+        for name, value in (("repo_id", repo_id), ("company_id", company_id),
+                            ("operation_id", operation_id),
+                            ("attempt_id", attempt_id),
+                            ("operation_event_id", operation_event_id),
+                            ("attempt_event_id", attempt_event_id)):
+            self._require_id(name, value)
+        self._require_timestamp("recorded_at", recorded_at)
+        if type(round_index) is not int or round_index != 1:
+            raise IllegalStateTransition("lost-CAS recycling requires round_index=1")
+        stamp = dict(reason="lost_cas", lost_from_head=lost_from_head,
+                     lost_to_head=lost_to_head, round_index=round_index,
+                     operation_event_id=operation_event_id,
+                     attempt_event_id=attempt_event_id)
+        details = []
+        for name, value in (("operation_detail", operation_detail),
+                            ("attempt_detail", attempt_detail)):
+            value = dict(self._require_object(name, value, allow_none=True))
+            if "accepted_commit" in value or any(
+                    key in value and value[key] != item
+                    for key, item in stamp.items()):
+                raise IllegalStateTransition("conflicting lost-CAS detail")
+            value.update(stamp)
+            details.append(self._canonical(name, value))
+        (op_blob, op_sha), (att_blob, att_sha) = details
+
+        def core():
+            self._verify_operation_full(repo_id, company_id, operation_id)
+            if (operation_event_id == attempt_event_id
+                    or self._fetch_att_event_by_event_id(
+                        repo_id, company_id, operation_event_id) is not None
+                    or self._fetch_op_event_by_event_id(
+                        repo_id, company_id, attempt_event_id) is not None):
+                raise IllegalStateTransition("lost-CAS event ids must be distinct and unused")
+            op_old = self._fetch_op_event_by_event_id(
+                repo_id, company_id, operation_event_id)
+            att_old = self._fetch_att_event_by_event_id(
+                repo_id, company_id, attempt_event_id)
+            if (op_old is None) != (att_old is None):
+                raise ValueError("lost-CAS pair is half recorded")
+            if op_old is not None:
+                return {
+                    "operation_event": self._replay_or_conflict_op_event(
+                        op_old, operation_id, OPERATION_RESERVED, op_blob, None),
+                    "attempt_event": self._replay_or_conflict_att_event(
+                        att_old, operation_id, attempt_id, ATTEMPT_STALE,
+                        att_blob, None)}
+            op_rows = self._fetch_op_event_rows(repo_id, company_id, operation_id)
+            att_rows = self._fetch_att_event_rows(
+                repo_id, company_id, operation_id, attempt_id)
+            if (not op_rows or op_rows[-1]["state"] != OPERATION_IN_FLIGHT
+                    or not att_rows or att_rows[-1]["state"] != ATTEMPT_ACCEPTING):
+                raise IllegalStateTransition(
+                    "lost-CAS recycling requires in_flight/accepting")
+            if any(previous["state"] == OPERATION_IN_FLIGHT
+                   and event["state"] == OPERATION_RESERVED
+                   for previous, event in zip(op_rows, op_rows[1:])):
+                raise IllegalStateTransition("lost-CAS recycling budget exhausted")
+            attempt = self._load_attempt_row(self._fetch_attempt_row(
+                repo_id, company_id, operation_id, attempt_id))
+            self._require_oid("lost_from_head", lost_from_head, attempt["object_format"])
+            self._require_oid("lost_to_head", lost_to_head, attempt["object_format"])
+            if lost_from_head == lost_to_head:
+                raise IllegalStateTransition("lost-CAS heads must differ")
+            att_event = self._insert_att_event(
+                repo_id, company_id, operation_id, attempt_id,
+                att_rows[-1]["seq"] + 1, attempt_event_id, ATTEMPT_STALE,
+                None, recorded_at, att_blob, att_sha, replayed=False)
+            op_event = self._insert_op_event(
+                repo_id, company_id, operation_id, op_rows[-1]["seq"] + 1,
+                operation_event_id, OPERATION_RESERVED, None, recorded_at,
+                op_blob, op_sha, replayed=False)
+            return {"operation_event": op_event, "attempt_event": att_event}
+        return self._write(core)
+
     def mark_unknown(self, repo_id, company_id, operation_id, attempt_id,
                      operation_event_id, attempt_event_id, recorded_at,
                      operation_detail=None, attempt_detail=None):
@@ -1733,6 +1823,7 @@ class OperationWorkStore:
         ATTEMPT_ACCEPTING: OPERATION_IN_FLIGHT,
         ATTEMPT_UNKNOWN: OPERATION_UNKNOWN,
         ATTEMPT_ACCEPTED: OPERATION_ACCEPTED,
+        ATTEMPT_STALE: OPERATION_RESERVED,
     }
 
     def _verify_joint_history(self, operation_id, attempts, op_events,
@@ -1749,9 +1840,6 @@ class OperationWorkStore:
                     for attempt, chain in
                     ((attempt, chains[attempt["attempt_id"]])
                      for attempt in attempts)}
-        op_pairs = [event for event in op_events
-                    if event["state"] in _PAIRED_OPERATION_STATES]
-
         live = [attempt_id for attempt_id, state in currents.items()
                 if state in (ATTEMPT_ACCEPTING, ATTEMPT_UNKNOWN,
                              ATTEMPT_ACCEPTED)]
@@ -1778,100 +1866,103 @@ class OperationWorkStore:
                 "corrupted state history"
                 % (operation_id, op_final))
 
+        # Attempt snapshots are fetched in insertion order; seq is local
+        # to each attempt, so globally sorting seq would interleave rounds.
+        # Only one attempt may cross the gate at a time. Concatenate its
+        # paired units in snapshot order, retaining each chain's seq order.
+        op_pairs = [event for index, event in enumerate(op_events)
+                    if event["state"] in _PAIRED_OPERATION_STATES
+                    or (index and event["state"] == OPERATION_RESERVED
+                        and op_events[index - 1]["state"] == OPERATION_IN_FLIGHT)]
         att_pairs = []
-        if live:
-            live_chain = chains[live[0]]
-            att_pairs = [event for event in live_chain
-                         if event["state"]
-                         in self._PAIRED_ATTEMPT_TO_OPERATION]
+        for attempt in attempts:
+            chain = chains[attempt["attempt_id"]]
+            for previous, event in zip(chain, chain[1:]):
+                if (event["state"] in self._PAIRED_ATTEMPT_TO_OPERATION
+                        and (event["state"] != ATTEMPT_STALE
+                             or previous["state"] == ATTEMPT_ACCEPTING)):
+                    att_pairs.append(event)
         if len(att_pairs) != len(op_pairs):
             raise ValueError(
-                "operation %r records %d paired operation events but its "
-                "attempt history records %d paired events; paired "
-                "transitions must be written together; refusing to "
-                "trust corrupted state history"
-                % (operation_id, len(op_pairs), len(att_pairs)))
+                "paired event counts differ; refusing to trust corrupted state history")
+        recoveries = 0
         for op_event, att_event in zip(op_pairs, att_pairs):
-            expected = self._PAIRED_ATTEMPT_TO_OPERATION[
-                att_event["state"]]
-            if op_event["state"] != expected:
+            if op_event["state"] != self._PAIRED_ATTEMPT_TO_OPERATION[att_event["state"]]:
                 raise ValueError(
-                    "operation %r paired event %r does not match attempt "
-                    "event %r (expected operation state %r); refusing "
-                    "to trust corrupted state history"
-                    % (operation_id, op_event["event_id"],
-                       att_event["event_id"], expected))
-            if op_event["state"] == OPERATION_ACCEPTED and \
-                    op_event["state_commit"] != att_event["state_commit"]:
+                    "paired events mismatch; refusing to trust corrupted state history")
+            if op_event["state_commit"] != att_event["state_commit"]:
                 raise ValueError(
-                    "operation %r accepted event commit %r does not "
-                    "match the paired attempt accepted commit %r; "
-                    "refusing to trust corrupted state history"
-                    % (operation_id, op_event["state_commit"],
-                       att_event["state_commit"]))
+                    "paired accepted commits mismatch; refusing to trust corrupted state history")
+            if att_event["state"] == ATTEMPT_STALE:
+                recoveries += 1
+                keys = ("reason", "lost_from_head", "lost_to_head", "round_index",
+                        "operation_event_id", "attempt_event_id")
+                detail = att_event["detail"]
+                if (recoveries > 1 or detail.get("reason") != "lost_cas"
+                        or type(detail.get("round_index")) is not int
+                        or detail["round_index"] != 1
+                        or detail.get("operation_event_id") != op_event["event_id"]
+                        or detail.get("attempt_event_id") != att_event["event_id"]
+                        or op_event["event_id"] == att_event["event_id"]
+                        or any(detail.get(key) != op_event["detail"].get(key)
+                               for key in keys)
+                        or "accepted_commit" in detail
+                        or "accepted_commit" in op_event["detail"]
+                        or op_event["recorded_at"] != att_event["recorded_at"]
+                        or detail.get("lost_from_head") == detail.get("lost_to_head")
+                        or any(e["event_id"] == op_event["event_id"]
+                               for chain in chains.values() for e in chain)
+                        or any(e["event_id"] == att_event["event_id"] for e in op_events)):
+                    raise ValueError(
+                        "invalid lost-CAS pair; refusing to trust corrupted state history")
+                attempt = next(a for a in attempts
+                               if a["attempt_id"] == att_event["attempt_id"])
+                for key in ("lost_from_head", "lost_to_head"):
+                    self._require_oid(key, detail.get(key), attempt["object_format"])
 
-        # Walk the canonical legal ordering; every prefix must be a
-        # stable joint state. Dead attempts (prepared -> stale) come
-        # first, then a still-waiting prepared attempt, then the live
-        # attempt's prepared event, then any remaining pre-flight
-        # operation events (approval_required/reserved are mutually
-        # order-insensitive with pre-flight attempt events: every such
-        # combination is stable), then the paired units.
+        # Canonical timeline: introduce pre-flight attempts only while the
+        # operation is pre-flight. A recovered chain is walked at its real
+        # gate position, never flattened into an ordinary prepared expiry.
         current = {}
-        self._assert_stable_joint_state(operation_id, None, current)
-        # The operation edge/chain checks already guarantee the first
-        # event is prepared and only pre-flight states precede the first
-        # paired event; walk those operation events in seq order,
-        # interleaving the attempt pre-flight events at their only legal
-        # position.
-        pre_flight_op = [event for event in op_events
-                         if event["state"] in _PRE_FLIGHT_STATES]
-        paired = list(zip(op_pairs, att_pairs)) if live else []
-        dead_ids = [attempt["attempt_id"] for attempt in attempts
-                    if currents[attempt["attempt_id"]] == ATTEMPT_STALE]
-        # op prepared first and alone.
-        op_state = pre_flight_op[0]["state"] if pre_flight_op else None
-        if op_state != OPERATION_PREPARED:
-            raise ValueError(
-                "operation %r first state must be prepared; refusing to "
-                "trust corrupted state history" % operation_id)
+        op_state = None
+        next_attempt = 0
+        pair_index = 0
+
+        def introduce_until(target=None):
+            nonlocal next_attempt
+            while next_attempt < len(attempts):
+                aid = attempts[next_attempt]["attempt_id"]
+                chain = chains[aid]
+                current[aid] = ATTEMPT_PREPARED
+                self._assert_stable_joint_state(operation_id, op_state, current)
+                next_attempt += 1
+                if len(chain) == 2 and chain[-1]["state"] == ATTEMPT_STALE:
+                    current[aid] = ATTEMPT_STALE
+                    self._assert_stable_joint_state(operation_id, op_state, current)
+                elif aid != target and target is not None:
+                    raise ValueError(
+                        "attempt order mismatch; refusing to trust corrupted state history")
+                if aid == target:
+                    return
+
         self._assert_stable_joint_state(operation_id, op_state, current)
-        for attempt_id in dead_ids:
-            current[attempt_id] = ATTEMPT_PREPARED
-            self._assert_stable_joint_state(
-                operation_id, op_state, current)
-            current[attempt_id] = ATTEMPT_STALE
-            self._assert_stable_joint_state(
-                operation_id, op_state, current)
-        for attempt_id in waiting:
-            current[attempt_id] = ATTEMPT_PREPARED
-            self._assert_stable_joint_state(
-                operation_id, op_state, current)
-        if live:
-            current[live[0]] = ATTEMPT_PREPARED
-            self._assert_stable_joint_state(
-                operation_id, op_state, current)
-        # Remaining pre-flight operation events (approval_required,
-        # reserved), in seq order, skipping the first prepared.
-        for event in pre_flight_op[1:]:
-            op_state = event["state"]
-            self._assert_stable_joint_state(
-                operation_id, op_state, current)
-        for op_event, att_event in paired:
-            current[live[0]] = att_event["state"]
-            op_state = op_event["state"]
-            # Stability is asserted only after BOTH halves: the window
-            # between halves exists solely inside one SAVEPOINT and is
-            # never a committable stable state.
-            self._assert_stable_joint_state(
-                operation_id, op_state, current)
-        # A rejected terminal event (only reachable pre-flight per the
-        # edge table) is the final operation event and not part of the
-        # paired walk.
-        if op_final == OPERATION_REJECTED:
-            op_state = OPERATION_REJECTED
-            self._assert_stable_joint_state(
-                operation_id, op_state, current)
+        for event in op_events:
+            if pair_index < len(op_pairs) and event is op_pairs[pair_index]:
+                att_event = att_pairs[pair_index]
+                aid = att_event["attempt_id"]
+                if aid not in current:
+                    introduce_until(aid)
+                current[aid] = att_event["state"]
+                op_state = event["state"]
+                pair_index += 1
+            else:
+                # Finish pre-flight expiry audit before a rejection.
+                if event["state"] == OPERATION_REJECTED:
+                    introduce_until()
+                op_state = event["state"]
+            self._assert_stable_joint_state(operation_id, op_state, current)
+        if next_attempt < len(attempts):
+            introduce_until()
         if op_state != op_final:
             raise ValueError(
                 "operation %r replayed joint history ends in %r but the "
