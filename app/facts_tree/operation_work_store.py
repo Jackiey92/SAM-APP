@@ -21,6 +21,14 @@ host-supplied accepted_commit as an OID-shaped mirror reference without
 checking any ref, chain or reachability, and a state record here is never
 an authorization, an approval or a business success.
 
+B4 extension: retry_wait is a durable terminal operation/attempt pair,
+reachable only through park_exhausted_cas_attempt after one certified lost-CAS
+recovery. It has no outgoing edges, carries no accepted commit and owns no live
+attempt. The section-7 scheduling discussion below describes the baseline;
+this dedicated trajectory preserves existing public transition allowlists.
+Existing databases with the old SQL CHECK constraints fail closed on this new
+state; schema migration is outside this runtime primitive.
+
 Record model
 ------------
 
@@ -79,6 +87,13 @@ CHG-064 section 7 (F-007 state names):
     unknown -> accepted | in_flight
     accepted and rejected are terminal
 
+The B4 extensions add exactly two store-recognized operation edges,
+each writable only through its dedicated paired primitive, never via
+the generic transition calls: B4-0 in_flight -> reserved (certified
+first-round lost-CAS recovery) and B4-1 in_flight -> retry_wait
+(terminal parking after exactly one such recovery); retry_wait is
+terminal like accepted/rejected.
+
 The approved design does not freeze attempt states beyond
 accepting/accepted/unknown and the scheduling note on stale/retry_wait.
 Implementation conventions of THIS store (not formal Git semantics):
@@ -94,20 +109,28 @@ Implementation conventions of THIS store (not formal Git semantics):
       accepting -> accepted | unknown
       unknown -> accepted | accepting
       accepted and stale are terminal
-  There is deliberately no accepting -> stale edge and no unknown ->
-  stale edge. ``stale`` means a *definite* pre-acceptance expiry of an
-  attempt that never entered the final gate (CHG-064 section 7
-  interruption rows: object persisted but C absent, candidate revised or
-  coverage invalidated while Git H may not even have moved): it is
-  reachable only from prepared, and only while the operation itself is
-  still in prepared/approval_required/reserved. Once an attempt is
-  accepting the operation is in_flight, whose only section-7 exits are
-  the paired accepted/unknown outcomes; a gate-time H change or a CAS
-  that is not a clear success is parked as unknown and recovered through
-  the section-7 re-admission proof, never retroactively turned into a
-  definite failure. ``retry_wait`` is deliberately not a stored state:
-  section 7 assigns it to scheduling, and neither stale nor retry_wait
-  may clear unknown.
+  The generic write surface deliberately has no accepting -> stale
+  edge and no unknown -> stale edge; reads additionally recognize
+  exactly two certified trajectories, each writable only through its
+  dedicated primitive: B4-0 accepting -> stale
+  (``recycle_lost_cas_attempt``, once per operation) and B4-1
+  accepting -> retry_wait (``park_exhausted_cas_attempt``, terminal,
+  only after exactly one B4-0 recovery). ``stale`` otherwise means a
+  *definite* pre-acceptance expiry of an attempt that never entered the
+  final gate (CHG-064 section 7 interruption rows: object persisted but
+  C absent, candidate revised or coverage invalidated while Git H may
+  even have moved): it is reachable from prepared through
+  ``mark_attempt_stale`` only while the operation itself is still in
+  prepared/approval_required/reserved. Apart from the certified B4
+  pairs, an accepting attempt belongs to an in_flight operation whose
+  only section-7 exits are the paired accepted/unknown outcomes; a
+  gate-time H change or a CAS that is not a clear success is parked as
+  unknown and recovered through the section-7 re-admission proof,
+  never retroactively turned into a definite failure. Baseline
+  section 7 assigns retry_wait to scheduling; the B4-1 stored
+  retry_wait terminal pair is the explicit extension documented at
+  the top of this module, and neither stale nor retry_wait may clear
+  unknown.
 
 Paired transitions are one call and one SAVEPOINT. CHG-064 section 7
 defines three states only as joint operation/attempt outcomes, so this
@@ -131,6 +154,12 @@ entries are semantic transitions:
   OID-shaped accepted_commit mirror) and the operation accepted event
   naming the same commit, in that order, in one SAVEPOINT; the current
   pair is (in_flight, accepting) or (unknown, unknown).
+- ``recycle_lost_cas_attempt`` (B4-0) writes the certified pair
+  accepting -> stale / in_flight -> reserved, at most once per
+  operation; ``park_exhausted_cas_attempt`` (B4-1) writes the terminal
+  pair accepting -> retry_wait / in_flight -> retry_wait, only after
+  exactly one B4-0 recovery. Both bind the lost head range, the round
+  index and both paired event ids into each event's detail.
 
 A failed paired call rolls back to its savepoint, so neither half is
 visible or committable. Reads and ``verify_integrity`` replay BOTH event
@@ -157,6 +186,7 @@ state):
     unknown                exactly one attempt unknown, others stale
     accepted               exactly one attempt accepted (same commit),
                            others stale
+    retry_wait             exactly one attempt retry_wait, others stale
     rejected               no attempt accepting or unknown
 
 Cross-record admission conventions applied on the write path (they order
@@ -246,6 +276,7 @@ OPERATION_IN_FLIGHT = "in_flight"
 OPERATION_ACCEPTED = "accepted"
 OPERATION_UNKNOWN = "unknown"
 OPERATION_REJECTED = "rejected"
+OPERATION_RETRY_WAIT = "retry_wait"
 
 _OPERATION_STATES = frozenset({
     OPERATION_PREPARED,
@@ -254,7 +285,7 @@ _OPERATION_STATES = frozenset({
     OPERATION_IN_FLIGHT,
     OPERATION_ACCEPTED,
     OPERATION_UNKNOWN,
-    OPERATION_REJECTED,
+    OPERATION_REJECTED, OPERATION_RETRY_WAIT,
 })
 
 _OPERATION_EDGES = {
@@ -265,11 +296,13 @@ _OPERATION_EDGES = {
     OPERATION_RESERVED: frozenset({
         OPERATION_IN_FLIGHT, OPERATION_REJECTED}),
     OPERATION_IN_FLIGHT: frozenset({
-        OPERATION_ACCEPTED, OPERATION_UNKNOWN, OPERATION_RESERVED}),
+        OPERATION_ACCEPTED, OPERATION_UNKNOWN, OPERATION_RESERVED,
+        OPERATION_RETRY_WAIT}),
     # unknown -> in_flight is the section-7 same-operation re-admission.
     OPERATION_UNKNOWN: frozenset({OPERATION_ACCEPTED, OPERATION_IN_FLIGHT}),
     OPERATION_ACCEPTED: frozenset(),
     OPERATION_REJECTED: frozenset(),
+    OPERATION_RETRY_WAIT: frozenset(),
 }
 
 ATTEMPT_PREPARED = "prepared"
@@ -277,13 +310,14 @@ ATTEMPT_ACCEPTING = "accepting"
 ATTEMPT_ACCEPTED = "accepted"
 ATTEMPT_UNKNOWN = "unknown"
 ATTEMPT_STALE = "stale"
+ATTEMPT_RETRY_WAIT = "retry_wait"
 
 _ATTEMPT_STATES = frozenset({
     ATTEMPT_PREPARED,
     ATTEMPT_ACCEPTING,
     ATTEMPT_ACCEPTED,
     ATTEMPT_UNKNOWN,
-    ATTEMPT_STALE,
+    ATTEMPT_STALE, ATTEMPT_RETRY_WAIT,
 })
 
 _ATTEMPT_EDGES = {
@@ -301,6 +335,7 @@ _ATTEMPT_EDGES = {
     ATTEMPT_UNKNOWN: frozenset({ATTEMPT_ACCEPTED, ATTEMPT_ACCEPTING}),
     ATTEMPT_ACCEPTED: frozenset(),
     ATTEMPT_STALE: frozenset(),
+    ATTEMPT_RETRY_WAIT: frozenset(),
 }
 
 # Operation states before the final gate is ever opened. An attempt may be
@@ -319,7 +354,8 @@ _ATTEMPT_LIVE_STATES = frozenset({
 # Operation states reached ONLY together with the matching attempt event
 # (attempt half first, operation half second, one SAVEPOINT).
 _PAIRED_OPERATION_STATES = frozenset({
-    OPERATION_IN_FLIGHT, OPERATION_UNKNOWN, OPERATION_ACCEPTED})
+    OPERATION_IN_FLIGHT, OPERATION_UNKNOWN, OPERATION_ACCEPTED,
+    OPERATION_RETRY_WAIT})
 
 _OID_HEX_LENGTHS = {"sha1": 40, "sha256": 64}
 _HEX_DIGITS = frozenset("0123456789abcdef")
@@ -354,7 +390,7 @@ CREATE TABLE IF NOT EXISTS fact_operation_work_events (
     PRIMARY KEY (repo_id, company_id, operation_id, seq),
     UNIQUE (repo_id, company_id, event_id),
     CHECK (state IN ('prepared', 'approval_required', 'reserved',
-                    'in_flight', 'accepted', 'unknown', 'rejected')),
+                    'in_flight', 'accepted', 'unknown', 'rejected', 'retry_wait')),
     CHECK ((state = 'accepted') = (state_commit IS NOT NULL))
 );
 
@@ -393,7 +429,7 @@ CREATE TABLE IF NOT EXISTS fact_operation_attempt_events (
     PRIMARY KEY (repo_id, company_id, operation_id, attempt_id, seq),
     UNIQUE (repo_id, company_id, event_id),
     CHECK (state IN ('prepared', 'accepting', 'accepted',
-                    'unknown', 'stale')),
+                    'unknown', 'stale', 'retry_wait')),
     CHECK ((state = 'accepted') = (state_commit IS NOT NULL))
 );
 
@@ -1302,6 +1338,86 @@ class OperationWorkStore:
             return {"operation_event": op_event, "attempt_event": att_event}
         return self._write(core)
 
+    def park_exhausted_cas_attempt(
+            self, repo_id, company_id, operation_id, attempt_id,
+            operation_event_id, attempt_event_id, recorded_at, *,
+            lost_from_head, lost_to_head, round_index,
+            operation_detail=None, attempt_detail=None):
+        """Park the second definite loss after exactly one certified recovery.
+
+        Caller proves the same five evidence gates as first-round recycling.
+        Both retry_wait states are terminal and cannot clear unknown. This is
+        a new trajectory only; existing public transition allowlists stand.
+        """
+        for name, value in (("repo_id", repo_id), ("company_id", company_id),
+                            ("operation_id", operation_id),
+                            ("attempt_id", attempt_id),
+                            ("operation_event_id", operation_event_id),
+                            ("attempt_event_id", attempt_event_id)):
+            self._require_id(name, value)
+        self._require_timestamp("recorded_at", recorded_at)
+        if type(round_index) is not int or round_index != 2:
+            raise IllegalStateTransition("lost-CAS recycling requires round_index=2")
+        stamp = dict(reason="lost_cas_exhausted", lost_from_head=lost_from_head,
+                     lost_to_head=lost_to_head, round_index=round_index,
+                     operation_event_id=operation_event_id,
+                     attempt_event_id=attempt_event_id)
+        details = []
+        for name, value in (("operation_detail", operation_detail),
+                            ("attempt_detail", attempt_detail)):
+            value = dict(self._require_object(name, value, allow_none=True))
+            if "accepted_commit" in value or any(
+                    key in value and value[key] != item
+                    for key, item in stamp.items()):
+                raise IllegalStateTransition("conflicting lost-CAS detail")
+            value.update(stamp)
+            details.append(self._canonical(name, value))
+        (op_blob, op_sha), (att_blob, att_sha) = details
+
+        def core():
+            self._verify_operation_full(repo_id, company_id, operation_id)
+            if (operation_event_id == attempt_event_id
+                    or self._fetch_att_event_by_event_id(
+                        repo_id, company_id, operation_event_id) is not None
+                    or self._fetch_op_event_by_event_id(
+                        repo_id, company_id, attempt_event_id) is not None):
+                raise IllegalStateTransition("lost-CAS event ids must be distinct and unused")
+            op_old = self._fetch_op_event_by_event_id(
+                repo_id, company_id, operation_event_id)
+            att_old = self._fetch_att_event_by_event_id(
+                repo_id, company_id, attempt_event_id)
+            if (op_old is None) != (att_old is None):
+                raise ValueError("lost-CAS pair is half recorded")
+            if op_old is not None:
+                raise IllegalStateTransition("exhausted-CAS parking is terminal")
+            op_rows = self._fetch_op_event_rows(repo_id, company_id, operation_id)
+            att_rows = self._fetch_att_event_rows(
+                repo_id, company_id, operation_id, attempt_id)
+            if (not op_rows or op_rows[-1]["state"] != OPERATION_IN_FLIGHT
+                    or not att_rows or att_rows[-1]["state"] != ATTEMPT_ACCEPTING):
+                raise IllegalStateTransition(
+                    "lost-CAS recycling requires in_flight/accepting")
+            if sum(previous["state"] == OPERATION_IN_FLIGHT
+                   and event["state"] == OPERATION_RESERVED
+                   for previous, event in zip(op_rows, op_rows[1:])) != 1:
+                raise IllegalStateTransition("parking requires exactly one certified recovery")
+            attempt = self._load_attempt_row(self._fetch_attempt_row(
+                repo_id, company_id, operation_id, attempt_id))
+            self._require_oid("lost_from_head", lost_from_head, attempt["object_format"])
+            self._require_oid("lost_to_head", lost_to_head, attempt["object_format"])
+            if lost_from_head == lost_to_head:
+                raise IllegalStateTransition("lost-CAS heads must differ")
+            att_event = self._insert_att_event(
+                repo_id, company_id, operation_id, attempt_id,
+                att_rows[-1]["seq"] + 1, attempt_event_id, ATTEMPT_RETRY_WAIT,
+                None, recorded_at, att_blob, att_sha, replayed=False)
+            op_event = self._insert_op_event(
+                repo_id, company_id, operation_id, op_rows[-1]["seq"] + 1,
+                operation_event_id, OPERATION_RETRY_WAIT, None, recorded_at,
+                op_blob, op_sha, replayed=False)
+            return {"operation_event": op_event, "attempt_event": att_event}
+        return self._write(core)
+
     def mark_unknown(self, repo_id, company_id, operation_id, attempt_id,
                      operation_event_id, attempt_event_id, recorded_at,
                      operation_detail=None, attempt_detail=None):
@@ -1824,6 +1940,7 @@ class OperationWorkStore:
         ATTEMPT_UNKNOWN: OPERATION_UNKNOWN,
         ATTEMPT_ACCEPTED: OPERATION_ACCEPTED,
         ATTEMPT_STALE: OPERATION_RESERVED,
+        ATTEMPT_RETRY_WAIT: OPERATION_RETRY_WAIT,
     }
 
     def _verify_joint_history(self, operation_id, attempts, op_events,
@@ -1886,6 +2003,7 @@ class OperationWorkStore:
             raise ValueError(
                 "paired event counts differ; refusing to trust corrupted state history")
         recoveries = 0
+        parked = False
         for op_event, att_event in zip(op_pairs, att_pairs):
             if op_event["state"] != self._PAIRED_ATTEMPT_TO_OPERATION[att_event["state"]]:
                 raise ValueError(
@@ -1893,14 +2011,19 @@ class OperationWorkStore:
             if op_event["state_commit"] != att_event["state_commit"]:
                 raise ValueError(
                     "paired accepted commits mismatch; refusing to trust corrupted state history")
-            if att_event["state"] == ATTEMPT_STALE:
-                recoveries += 1
+            if att_event["state"] in {ATTEMPT_STALE, ATTEMPT_RETRY_WAIT}:
+                parking = att_event["state"] == ATTEMPT_RETRY_WAIT
+                if parking and (recoveries != 1 or parked):
+                    raise ValueError("parking requires exactly one certified recovery")
+                parked = parked or parking
+                if not parking:
+                    recoveries += 1
                 keys = ("reason", "lost_from_head", "lost_to_head", "round_index",
                         "operation_event_id", "attempt_event_id")
                 detail = att_event["detail"]
-                if (recoveries > 1 or detail.get("reason") != "lost_cas"
+                if (recoveries > 1 or detail.get("reason") != ("lost_cas_exhausted" if parking else "lost_cas")
                         or type(detail.get("round_index")) is not int
-                        or detail["round_index"] != 1
+                        or detail["round_index"] != (2 if parking else 1)
                         or detail.get("operation_event_id") != op_event["event_id"]
                         or detail.get("attempt_event_id") != att_event["event_id"]
                         or op_event["event_id"] == att_event["event_id"]
@@ -1988,6 +2111,9 @@ class OperationWorkStore:
         if op_state in _PRE_FLIGHT_STATES or op_state == OPERATION_REJECTED:
             allowed = {ATTEMPT_PREPARED, ATTEMPT_STALE}
             exact = None
+        elif op_state == OPERATION_RETRY_WAIT:
+            allowed = {ATTEMPT_STALE, ATTEMPT_RETRY_WAIT}
+            exact = ATTEMPT_RETRY_WAIT
         elif op_state == OPERATION_IN_FLIGHT:
             allowed = {ATTEMPT_ACCEPTING, ATTEMPT_STALE}
             exact = ATTEMPT_ACCEPTING
@@ -2090,7 +2216,9 @@ class OperationWorkStore:
                 "attempt %r first state must be prepared, got %r"
                 % (events[0]["attempt_id"], events[0]["state"]))
         for previous, event in zip(events, events[1:]):
-            if event["state"] not in _ATTEMPT_EDGES[previous["state"]]:
+            new_terminal_edge = (previous["state"] == ATTEMPT_ACCEPTING
+                                 and event["state"] == ATTEMPT_RETRY_WAIT)
+            if not new_terminal_edge and event["state"] not in _ATTEMPT_EDGES[previous["state"]]:
                 raise ValueError(
                     "attempt %r state history contains illegal migration "
                     "%r -> %r; refusing to trust corrupted state history"

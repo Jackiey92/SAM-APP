@@ -1589,3 +1589,139 @@ def test_lost_cas_sha256_heads_and_edge_allowlists():
     _admit(conn, store)
     _lost_cas(store, lost_from_head=_SHA256_BASE, lost_to_head=_SHA256_C)
     store.verify_integrity()
+
+# B4-1 durable two-round exhaustion, distinct from uncertain outcomes.
+def _park(store, **kwargs):
+    args = dict(lost_from_head=_SHA1_C, lost_to_head="b" * 40, round_index=2)
+    args.update(kwargs)
+    return store.park_exhausted_cas_attempt(
+        _REPO, _COMPANY, _OP, _ATT2, "park-op", "park-att", _T6, **args)
+
+
+def _parking_seed(conn, store):
+    _lost_cas_seed(conn, store)
+    _lost_cas(store)
+    _lost_cas_second(conn, store)
+
+
+def test_exhausted_cas_complete_timeline_and_terminal_admission():
+    conn, store = _open()
+    conn.execute("BEGIN")
+    _parking_seed(conn, store)
+    _park(store)
+    conn.commit()
+    assert store.get_operation(_REPO, _COMPANY, _OP)["current_state"] == "retry_wait"
+    assert [store.get_attempt(_REPO, _COMPANY, _OP, a["attempt_id"])["current_state"]
+            for a in store.list_attempts(_REPO, _COMPANY, _OP)] == ["stale", "retry_wait"]
+    for aid in (_ATT, _ATT2):
+        store.get_attempt(_REPO, _COMPANY, _OP, aid)
+        store.list_attempt_events(_REPO, _COMPANY, _OP, aid)
+    store.list_operation_events(_REPO, _COMPANY, _OP)
+    store.verify_integrity()
+    conn.execute("BEGIN")
+    before = _lost_cas_counts(conn)
+    for action in (lambda: _park(store),
+                   lambda: _record_attempt(conn, store, attempt_id="third", prepared_event_id="third-p"),
+                   lambda: _admit(conn, store, attempt_id=_ATT2, op_event="third-o", att_event="third-a")):
+        with pytest.raises(IllegalStateTransition):
+            action()
+        assert _lost_cas_counts(conn) == before
+    conn.rollback()
+
+
+@pytest.mark.parametrize("damage", ["no_recovery", "wrong_attempt", "unknown", "round", "reason", "ids", "heads"])
+def test_exhausted_cas_write_guards(damage):
+    conn, store = _open()
+    conn.execute("BEGIN")
+    if damage == "no_recovery":
+        _lost_cas_seed(conn, store)
+    else:
+        _parking_seed(conn, store)
+    kwargs = {}
+    if damage == "wrong_attempt":
+        # First attempt is already terminal; cannot consume the second's pair.
+        with pytest.raises(IllegalStateTransition):
+            store.park_exhausted_cas_attempt(_REPO, _COMPANY, _OP, _ATT,
+                "p-o", "p-a", _T6, lost_from_head=_SHA1_C,
+                lost_to_head="b" * 40, round_index=2)
+    elif damage == "unknown":
+        _unknown(conn, store, attempt_id=_ATT2, op_event="u-o", att_event="u-a")
+    elif damage == "round":
+        kwargs["round_index"] = True
+    elif damage == "reason":
+        kwargs["operation_detail"] = {"reason": "lost_cas"}
+    elif damage == "ids":
+        kwargs["attempt_detail"] = {"operation_event_id": "foreign"}
+    elif damage == "heads":
+        kwargs["lost_to_head"] = _SHA1_C
+    before = _lost_cas_counts(conn)
+    if damage != "wrong_attempt":
+        with pytest.raises(IllegalStateTransition):
+            _park(store, **kwargs)
+    assert _lost_cas_counts(conn) == before
+    conn.rollback()
+
+
+@pytest.mark.parametrize("damage", ["no_recovery", "operation_only", "attempt_only", "reason", "event_id", "cross_attempt", "cross_op", "twice", "live"])
+def test_exhausted_cas_corrupted_history_rejected_by_all_reads(damage):
+    conn, store = _open()
+    conn.execute("BEGIN")
+    if damage == "no_recovery":
+        _lost_cas_seed(conn, store)
+        aid, seq = _ATT, 3
+    else:
+        _parking_seed(conn, store)
+        aid, seq = _ATT2, 5
+    detail = dict(reason="lost_cas_exhausted", round_index=2,
+                  lost_from_head=_SHA1_C, lost_to_head="b" * 40,
+                  operation_event_id="bad-p-o", attempt_event_id="bad-p-a")
+    other = dict(detail)
+    if damage == "reason":
+        other["reason"] = "lost_cas"
+    if damage == "event_id":
+        other["attempt_event_id"] = "foreign"
+    if damage != "operation_only":
+        _plant_att_event(store, 4 if damage == "cross_attempt" else 3, "retry_wait", attempt_id=_ATT if damage == "cross_attempt" else aid,
+                         event_id="bad-p-a", detail=detail)
+    if damage != "attempt_only":
+        if damage == "cross_op":
+            _record_operation(conn, store, operation_id=_OP2, idempotency_key="key2")
+            _prepare(conn, store, operation_id=_OP2, event_id="op2-prepared")
+        if damage == "cross_op":
+            blob = git_format.dumps_record(other)
+            store._insert_op_event(_REPO, _COMPANY, _OP2, 2, "bad-p-o",
+                "retry_wait", None, _T3, blob, hashlib.sha256(blob).hexdigest(), replayed=False)
+        else:
+            _plant_op_event(store, seq, "retry_wait", event_id="bad-p-o", detail=other)
+    if damage == "twice":
+        _plant_att_event(store, 4, "retry_wait", attempt_id=aid, event_id="bad-p-a2", detail=detail)
+        _plant_op_event(store, 6, "retry_wait", event_id="bad-p-o2", detail=detail)
+    if damage == "live":
+        _plant_attempt_row(conn, store, "extra")
+        _plant_att_event(store, 1, ATTEMPT_PREPARED, attempt_id="extra", event_id="extra-p")
+    conn.commit()
+    for read in (store.verify_integrity,
+                 lambda: store.get_operation(_REPO, _COMPANY, _OP),
+                 lambda: store.list_attempt_events(_REPO, _COMPANY, _OP, aid),
+                 lambda: store.list_operation_events(_REPO, _COMPANY, _OP),
+                 lambda: store.get_attempt(_REPO, _COMPANY, _OP, aid)):
+        with pytest.raises(ValueError):
+            read()
+
+
+def test_exhausted_cas_pair_atomic_rollback(monkeypatch):
+    conn, store = _open()
+    conn.execute("BEGIN")
+    _parking_seed(conn, store)
+    before = _lost_cas_counts(conn)
+    original = store._insert_op_event
+    def fail(*args, **kwargs):
+        raise RuntimeError("parking operation half failed")
+    monkeypatch.setattr(store, "_insert_op_event", fail)
+    with pytest.raises(RuntimeError, match="parking operation"):
+        _park(store)
+    assert _lost_cas_counts(conn) == before
+    monkeypatch.setattr(store, "_insert_op_event", original)
+    _park(store)
+    conn.commit()
+    store.verify_integrity()
