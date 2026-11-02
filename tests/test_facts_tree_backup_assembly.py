@@ -27,7 +27,13 @@ Section 4 scenario map:
   4.5 damaged position ..... test_damaged_package_position_is_conflict_and_never_overwritten
   4.6 stable digests ....... test_two_location_reinstall_reproduces_digests_without_secrets
   non-frozen refusal ....... test_non_frozen_and_absent_records_are_refused
-  sha256 closure gap ....... test_sha256_cut_fails_closed_on_40_hex_closure_contract
+  S64 sha256 assembly ...... test_s64_sha256_cut_assembles_full_closure_and_replays_in_clean_room
+                             test_s64_sha256_tampered_record_resealed_still_fails_digest_replay
+                             test_s64_sha256_flipped_r_byte_fails_closed_after_reseal
+                             test_s64_plan_repository_format_mismatch_raises_scope_mismatch
+                             test_s64_sha256_cross_format_oid_collision_is_fail_closed_and_distinguishable
+                             test_s64_git_default_hash_flips_implicit_init_but_explicit_sha1_wins
+                             test_s64_git_test_default_hash_leaves_explicit_init_formats_unchanged
   4.9 network sealed ....... test_assembly_succeeds_with_all_sockets_disabled
   4.7/A7 wiring ............ test_no_wiring_and_offline_import_graph
   A2 self-contained ........ test_green_path (payload section), test_package_directory_alone_*
@@ -1244,26 +1250,29 @@ def test_non_frozen_and_absent_records_are_refused(world, bad_state):
 
 
 # ---------------------------------------------------------------------------
-# Known closure seam: sha256 cuts fail closed on the 40-hex H contract
+# S64: sha256 (64-hex oid) cuts run the full R closure and replay it in a
+# clean room, with independent record/byte replay and format collision gates
 # ---------------------------------------------------------------------------
 
 
-def test_sha256_cut_fails_closed_on_40_hex_closure_contract(world, monkeypatch):
-    captured = []
-    build = assembly._build_core_payload
-    def capture(**kwargs):
-        core = build(**kwargs)
-        captured.append(core)
-        return core
-    monkeypatch.setattr(assembly, '_build_core_payload', capture)
+def _s64_sha256_cut(world, bid):
+    """Freeze one real sha256 cut backed by two real R physical objects.
+
+    One archive original is declared by two logical ids (so one physical
+    file backs two closure entries) and one mapping-object byte is landed
+    through the real VersionedMappingObjectStore and declared with
+    storage_class="mapping_objects"; no mapping ledger is involved because
+    the collector never reads one.
+    """
     repository = FactsGitRepository.initialize(
-        world["tmp"] / "facts-256.git", object_format="sha256", **_IDS)
+        world["tmp"] / ("facts-256-%s.git" % bid),
+        object_format="sha256", **_IDS)
     broker_db = sqlite3.connect(":memory:")
     coordination = BrokerCoordination(
-        world["tmp"] / "domain-256", _IDS["repo_id"], broker_db)
+        world["tmp"] / ("domain-256-%s" % bid), _IDS["repo_id"], broker_db)
 
     # One real WAL work database carrying the in-scope company id.
-    connection = sqlite3.connect(world["tmp"] / "w256.db")
+    connection = sqlite3.connect(world["tmp"] / ("w256-%s.db" % bid))
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute(
         "CREATE TABLE work_state ("
@@ -1280,7 +1289,7 @@ def test_sha256_cut_fails_closed_on_40_hex_closure_contract(world, monkeypatch):
         scope_watermark={"max_id": 1},
     )
     evidence = freeze_consistent_cut(FreezeAssembly(
-        backup_id="bkp-a1-sha256",
+        backup_id=bid,
         identity=_IDENTITY,
         coordination=coordination,
         repository=repository,
@@ -1288,40 +1297,321 @@ def test_sha256_cut_fails_closed_on_40_hex_closure_contract(world, monkeypatch):
         retention_root=world["retention"],
         budget=BarrierBudget(5.0, 30.0, 0.01),
     ))
-    assert evidence.frozen
+    assert evidence.frozen, evidence.reason
+    barrier = evidence.barrier_id
+    commit = evidence.authority.commit_oid
+
+    archive_digest, archive_size = world["put_blob"](
+        b"s64-sha256-original-immutable-bytes", name="s64-contract.txt")
+    mapping_body = b"s64-sha256-mapping-render-v1"
+    mapping_digest = world["mapping_store"].put(mapping_body)
+
+    def w_cite(anchor):
+        return AssemblyCitation(
+            kind="W",
+            coordinate="cuts/%s/%s/w_items.sqlite#%s" % (bid, barrier, anchor),
+            root_id=barrier,
+        )
+
+    archive_ref = AssemblyReference(
+        logical_id="obj-s64-orig",
+        object_type=OBJECT_ORIGINAL,
+        version="v1",
+        scope_kind=SCOPE_COMPANY,
+        citations=(
+            AssemblyCitation(
+                kind="H", coordinate="facts:fact_current/obj-s64-orig"),
+            w_cite("row=1"),
+        ),
+        sha256_digest="sha256:" + archive_digest,
+    )
+    refs = (
+        archive_ref,
+        # Same storage_class + digest + size under a second logical id:
+        # the package must still ship one physical file for both entries.
+        dataclasses.replace(archive_ref, logical_id="obj-s64-orig-alias"),
+        AssemblyReference(
+            logical_id="map-s64-1",
+            object_type=OBJECT_MAPPING_VERSION,
+            version="v1",
+            scope_kind=SCOPE_COMPANY,
+            citations=(
+                AssemblyCitation(
+                    kind="H", coordinate="facts:fact_current/src-s64/v1"),
+                w_cite("mappings"),
+            ),
+            sha256_digest="sha256:" + mapping_digest,
+            storage_class=STORAGE_MAPPING_OBJECTS,
+        ),
+    )
     plan = AssemblyPlan(
         identity=_IDENTITY,
         repository=repository,
         retention_root=world["retention"],
         stores=world["stores"],
-        references=(),
+        references=refs,
         version_index_root=None,
     )
-    result = assemble_backup(plan, "bkp-a1-sha256")
-    assert result.status == "failed"
-    assert captured and captured[-1]['closure'] is None
-    assert result.current is None
-    assert any(
-        f.family == "R"
-        and f.reason == "closure_unsupported_object_format"
-        for f in result.failures)
+    return {
+        "bid": bid,
+        "barrier": barrier,
+        "commit": commit,
+        "plan": plan,
+        "package": _package_dir(world, bid, barrier),
+        "archive_digest": archive_digest,
+        "archive_size": archive_size,
+        "mapping_digest": mapping_digest,
+        "mapping_size": len(mapping_body),
+        "broker_db": broker_db,
+        "connection": connection,
+    }
 
-    # A2 consequence, upstream gap (closure primitive's H-root contract is
-    # 40-hex only; 64-hex support is not implemented upstream): the payload
-    # leg never runs on a red R family, so no sha256 repository can ship an
-    # R-bearing self-contained package yet -- rather than silently dropping
-    # R objects. No payload.check is reported and no package position is
-    # claimed; the failure outcome's report is the only artifact.
-    assert result.package is None
-    state = scan_assembly_state(world["retention"], identity=_IDENTITY)
-    assert state.packages == ()
-    assert len(state.outcomes) == 1
-    leaf = _assembly_root(world) / state.outcomes[0].coordinate
-    outcome_report = _load_json(leaf / "report.json")
-    assert "payload.copy" not in outcome_report["checks"]
 
-    broker_db.close()
-    connection.close()
+def _s64_verdict_checks(verdict):
+    return {check.name: check for check in verdict.checks}
+
+
+def _s64_reseal_package(package_dir, mutate):
+    """Mutate the core, then rebuild the outer manifest/report digest chain."""
+    from app.facts_tree.backup_manifest import build_final_manifest
+    manifest = _load_json(package_dir / "manifest.json")
+    mutate(manifest["core"])
+    report = build_verification_report(manifest["core"])
+    manifest = build_final_manifest(manifest["core"], report)
+    (package_dir / "report.json").write_bytes(dumps_record(report))
+    (package_dir / "manifest.json").write_bytes(dumps_record(manifest))
+
+
+def test_s64_sha256_cut_assembles_full_closure_and_replays_in_clean_room(
+        world, tmp_path):
+    cut = _s64_sha256_cut(world, "bkp-s64-green")
+    try:
+        result = assemble_backup(cut["plan"], cut["bid"])
+        assert result.status == "published"
+        assert result.failures == ()
+
+        package = cut["package"]
+        manifest = _load_json(package / "manifest.json")
+        core = manifest["core"]
+        assert len(cut["commit"]) == 64
+        assert core["authority"]["object_format"] == "sha256"
+        closure = core["closure"]
+        assert closure["status"] == "complete"
+        assert closure["publishable"] is True
+        assert closure["counts"]["present"] == 3
+        record = closure["canonical_record"]
+        assert record["commit_oid"] == cut["commit"]
+
+        r_block = core["payload"]["r"]
+        assert r_block["present_entries"] == 3
+        assert r_block["physical_files"] == 2
+        assert r_block["by_class"]["archive"] == {
+            "entries": 2, "files": 1, "bytes": cut["archive_size"]}
+        assert r_block["by_class"]["mapping_objects"] == {
+            "entries": 1, "files": 1, "bytes": cut["mapping_size"]}
+
+        # Both cabinet root paths carry one real physical R file each, at
+        # the content-derived payload/r/<class>/<2-hex>/<64-hex> coordinate.
+        archive_leaf = (package / "payload/r/archive"
+                        / cut["archive_digest"][:2] / cut["archive_digest"])
+        mapping_leaf = (package / "payload/r/mapping_objects"
+                        / cut["mapping_digest"][:2] / cut["mapping_digest"])
+        assert archive_leaf.is_file()
+        assert mapping_leaf.is_file()
+        assert hashlib.sha256(archive_leaf.read_bytes()).hexdigest() == \
+            cut["archive_digest"]
+        assert hashlib.sha256(mapping_leaf.read_bytes()).hexdigest() == \
+            cut["mapping_digest"]
+
+        # Independent clean room: the copied package directory alone, with
+        # no cuts, cabinets or ledger nearby, passes the offline verifier.
+        moved = tmp_path / "s64-clean-room"
+        shutil.copytree(package, moved)
+        from app.facts_tree.recovery_verifier import verify_recovery_package
+        verdict = verify_recovery_package(moved)
+        assert verdict.recoverable, verdict.blockers
+        assert verdict.object_format == "sha256"
+        assert len(verdict.bundle_head_oid) == 64
+        checks = _s64_verdict_checks(verdict)
+        assert checks["R.closure_digest"].passed
+        assert checks["R.closure_bytes"].passed
+        assert "closure_replay_deferred" not in verdict.advisories
+    finally:
+        cut["broker_db"].close()
+        cut["connection"].close()
+
+
+def test_s64_sha256_tampered_record_resealed_still_fails_digest_replay(
+        world, tmp_path):
+    # A3 sha256: change one canonical-record entry and rebuild only the
+    # outer envelope digest chain; the independent R-list digest replay
+    # must still catch the drift (r_list_digest anchors are not resealable
+    # from package bytes alone).
+    cut = _s64_sha256_cut(world, "bkp-s64-rec")
+    try:
+        assert assemble_backup(cut["plan"], cut["bid"]).status == "published"
+        tampered = tmp_path / "tampered-record"
+        shutil.copytree(cut["package"], tampered)
+
+        def mutate(core):
+            core["closure"]["canonical_record"]["entries"][0]["version"] = \
+                "after-reseal"
+
+        _s64_reseal_package(tampered, mutate)
+        from app.facts_tree.recovery_verifier import verify_recovery_package
+        verdict = verify_recovery_package(tampered)
+        assert not verdict.recoverable
+        assert "r_list_digest_mismatch" in verdict.blockers
+        checks = _s64_verdict_checks(verdict)
+        assert not checks["R.closure_digest"].passed
+        assert "r_list_digest_mismatch" in checks["R.closure_digest"].reasons
+    finally:
+        cut["broker_db"].close()
+        cut["connection"].close()
+
+
+def test_s64_sha256_flipped_r_byte_fails_closed_after_reseal(world, tmp_path):
+    # A3 sha256: flip one landed R byte (payload/r/<class>/<2-hex>/<bare
+    # 64-hex content digest, no sha256: prefix) and rebuild the outer
+    # chain; the byte-coordinate replay closes the package.
+    cut = _s64_sha256_cut(world, "bkp-s64-byte")
+    try:
+        assert assemble_backup(cut["plan"], cut["bid"]).status == "published"
+        flipped = tmp_path / "flipped-byte"
+        shutil.copytree(cut["package"], flipped)
+        target = flipped / "payload/r/archive" / \
+            cut["archive_digest"][:2] / cut["archive_digest"]
+        target.write_bytes(b"X" + target.read_bytes()[1:])
+        _s64_reseal_package(flipped, lambda core: None)
+
+        from app.facts_tree.recovery_verifier import verify_recovery_package
+        verdict = verify_recovery_package(flipped)
+        assert not verdict.recoverable
+        assert "r_byte_mismatch" in verdict.blockers
+        checks = _s64_verdict_checks(verdict)
+        assert checks["R.closure_digest"].passed
+        assert not checks["R.closure_bytes"].passed
+        assert "r_byte_mismatch" in checks["R.closure_bytes"].reasons
+    finally:
+        cut["broker_db"].close()
+        cut["connection"].close()
+
+
+def test_s64_plan_repository_format_mismatch_raises_scope_mismatch(world):
+    # Assembly-side collision: the frozen cut is sha256 but the plan opens
+    # a sha1 repository. This is an object_format_mismatch exception (not
+    # a failure record); 40/64 package-tamper collisions are verified on
+    # the offline package in the drill below.
+    cut = _s64_sha256_cut(world, "bkp-s64-mismatch")
+    try:
+        plan = AssemblyPlan(
+            identity=_IDENTITY,
+            repository=world["repo"],
+            retention_root=world["retention"],
+            stores=world["stores"],
+            references=(),
+            version_index_root=None,
+        )
+        with pytest.raises(AssemblyScopeMismatchError) as exc:
+            assemble_backup(plan, cut["bid"])
+        assert exc.value.reason == "object_format_mismatch"
+        assert not cut["package"].exists()
+    finally:
+        cut["broker_db"].close()
+        cut["connection"].close()
+
+
+@pytest.mark.parametrize("tamper", ["authority-40", "record-40"])
+def test_s64_sha256_cross_format_oid_collision_is_fail_closed_and_distinguishable(
+        world, tmp_path, tamper):
+    # Verifier-side collision: a 40/64-hex oid mix must be attributable to
+    # the bundle layer (authority shortened) or the R identity replay
+    # (record shortened), never silently accepted.
+    cut = _s64_sha256_cut(world, "bkp-s64-collide-" + tamper)
+    try:
+        assert assemble_backup(cut["plan"], cut["bid"]).status == "published"
+        damaged = tmp_path / ("collision-" + tamper)
+        shutil.copytree(cut["package"], damaged)
+
+        if tamper == "authority-40":
+            def mutate(core):
+                core["authority"]["commit_oid"] = cut["commit"][:40]
+        else:
+            def mutate(core):
+                core["closure"]["canonical_record"]["commit_oid"] = \
+                    cut["commit"][:40]
+
+        _s64_reseal_package(damaged, mutate)
+        from app.facts_tree.recovery_verifier import verify_recovery_package
+        verdict = verify_recovery_package(damaged)
+        assert not verdict.recoverable
+        checks = _s64_verdict_checks(verdict)
+        assert not checks["R.closure_digest"].passed
+        assert "identity_mismatch" in checks["R.closure_digest"].reasons
+        assert "identity_mismatch" in verdict.blockers
+        if tamper == "authority-40":
+            # The bundle gate stops on length before git ever runs; the R
+            # replay independently reports the authority/record mismatch.
+            assert not checks["bundle"].passed
+            assert "bundle_head_mismatch" in checks["bundle"].reasons
+            assert "bundle_head_mismatch" in verdict.blockers
+        else:
+            # Authority is untouched, so the real bundle replay passes and
+            # only the R identity replay fires: the two layers stay apart.
+            assert checks["bundle"].passed
+            assert "bundle_head_mismatch" not in verdict.blockers
+    finally:
+        cut["broker_db"].close()
+        cut["connection"].close()
+
+
+def _s64_raw_init_format(path, *init_args, env_extra):
+    """git init through a controlled env, return its resolved hash format."""
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("GIT_")}
+    env.update(env_extra)
+    subprocess.run(
+        ["git", "init", *init_args, str(path)],
+        env=env, check=True, capture_output=True)
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-object-format"],
+        env=env, check=True, capture_output=True)
+    return result.stdout.decode("ascii").strip()
+
+
+_S64_LOCKED_GIT_ENV = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+}
+
+
+def test_s64_git_default_hash_flips_implicit_init_but_explicit_sha1_wins(
+        tmp_path):
+    # Empirically (git 2.53.0): GIT_DEFAULT_HASH flips the *implicit* init
+    # default; an explicit --object-format=sha1 still wins.
+    env = dict(_S64_LOCKED_GIT_ENV, GIT_DEFAULT_HASH="sha256")
+    assert _s64_raw_init_format(
+        tmp_path / "implicit", env_extra=env) == "sha256"
+    assert _s64_raw_init_format(
+        tmp_path / "explicit-sha1", "--object-format=sha1",
+        env_extra=env) == "sha1"
+
+
+def test_s64_git_test_default_hash_leaves_explicit_init_formats_unchanged(
+        tmp_path, monkeypatch):
+    # GIT_TEST_DEFAULT_HASH is Git's own test-suite knob: it does not flip
+    # a normal `git init` default, and assembly's explicit init points keep
+    # their declared format under it either way.
+    monkeypatch.setenv("GIT_TEST_DEFAULT_HASH", "sha256")
+    env = dict(_S64_LOCKED_GIT_ENV, GIT_TEST_DEFAULT_HASH="sha256")
+    assert _s64_raw_init_format(
+        tmp_path / "implicit", env_extra=env) == "sha1"
+    sha1_repo = FactsGitRepository.initialize(
+        tmp_path / "a.git", object_format="sha1", **_IDS)
+    sha256_repo = FactsGitRepository.initialize(
+        tmp_path / "b.git", object_format="sha256", **_IDS)
+    assert sha1_repo.object_format == "sha1"
+    assert sha256_repo.object_format == "sha256"
 
 
 # ---------------------------------------------------------------------------

@@ -99,6 +99,9 @@ from app.facts_tree.backup_manifest import (
 # the app.storage layer directly, and the offline AST allow-list is
 # unchanged. It is used only to reopen a copied ledger snapshot against
 # the copied in-package cabinet, never to write production objects.
+# _require_commit_oid joins that import on the same precedent: neither
+# assembly nor its replay gate may hand-roll a 40/64-hex oid rule, so
+# the sha1/sha256 identity contract stays defined in one family module.
 from app.facts_tree.backup_object_closure import (
     CLOSURE_COMPLETE,
     CLOSURE_INCOMPLETE,
@@ -123,6 +126,7 @@ from app.facts_tree.backup_object_closure import (
     ReferenceRoot,
     VersionedMappingObjectStore,
     _clean_relative_coordinate,
+    _require_commit_oid,
     collect_object_closure,
 )
 from app.facts_tree.git_repository import (
@@ -223,6 +227,9 @@ R_UNDECLARED_COMPONENT = "undeclared_cut_component"
 R_NON_REGULAR_COMPONENT = "non_regular_cut_component"
 R_CLOSURE_STATUS = "closure_not_publishable"
 R_MALFORMED_REFERENCE = "malformed_reference_declaration"
+# Retained stable failure code: the sha256 closure gate that produced it
+# is removed (both formats run the same R leg), so production no longer
+# emits it; the string stays to keep old reports' reason codes decodable.
 R_OBJECT_FORMAT_UNSUPPORTED = "closure_unsupported_object_format"
 R_LEDGER_SCOPE = "ledger_foreign_scope"
 R_LEDGER_MISSING = "ledger_not_initialized"
@@ -1003,6 +1010,7 @@ def _build_object_references(plan, frozen_commit):
             roots.append(ReferenceRoot(
                 kind=citation.kind, root_id=root_id,
                 coordinate=citation.coordinate,
+                object_format=plan.repository.object_format,
             ))
         company_id = (
             plan.identity.company_id
@@ -1205,20 +1213,14 @@ def _verify_w(*, freeze_core, cut_fd, failures):
 def _verify_r(plan, *, frozen_commit, failures):
     """R leg: recompute the object closure for the declared references."""
     check = "closure"
-    if plan.repository.object_format != "sha1":
-        # The closure primitive's H root contract is the 40-hex sha1 oid;
-        # a sha256 cut cannot be closure-verified until that slice gains
-        # 64-hex support. Refusing is fail-closed; silently skipping R is
-        # not an option.
-        failures.append(AssemblyFailure(
-            FAMILY_R, check,
-            "object_format=" + plan.repository.object_format,
-            R_OBJECT_FORMAT_UNSUPPORTED))
-        return None
+    # The closure primitive selects the 40/64-hex H root contract from
+    # the repository's own object format, so sha1 and sha256 cuts run the
+    # same leg; an unknown format is refused inside the primitive.
     try:
         references = _build_object_references(plan, frozen_commit)
         result = collect_object_closure(
             commit_oid=frozen_commit,
+            object_format=plan.repository.object_format,
             authorized_scope=ClosureScope(
                 installation_id=plan.identity.installation_id,
                 company_id=plan.identity.company_id,
@@ -2035,9 +2037,17 @@ def _closure_record(core, fail):
             or not isinstance(record["scope_violations"], list)):
         return malformed()
     identity, authority = core["identity"], core["authority"]
+    # The fixed-length oid contract belongs to the closure family: 40 hex
+    # for sha1, 64 hex for sha256. Any other shape (including a truncated
+    # cross-format oid) fails closed as an identity mismatch.
+    try:
+        _require_commit_oid(
+            record["commit_oid"], "closure record commit",
+            authority["object_format"],
+        )
+    except ObjectClosureError:
+        fail("identity_mismatch")
     if (record["authorized_scope"] != {k: identity[k] for k in ("installation_id", "company_id")}
-            or authority["object_format"] != "sha1"
-            or not re.fullmatch(r"[0-9a-f]{40}", record["commit_oid"])
             or record["commit_oid"] != authority["commit_oid"]):
         fail("identity_mismatch")
     if record["scope_violations"]:
