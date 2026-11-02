@@ -885,3 +885,176 @@ def test_rejects_malformed_calls(world):
             ObjectReference(**{**good_kwargs,
                                "sha256_digest": "sha256:" + "b" * 64}),
         ])
+
+
+@pytest.fixture
+def sha256_world(world):
+    """Real bare SHA-256 authority plus the real archive/mapping stores."""
+    from app.facts_tree.git_repository import FactsGitRepository
+
+    repo = FactsGitRepository.initialize(
+        world["tmp"] / "facts.git", repo_id="repo-h1",
+        installation_id=INSTALLATION, company_id=COMPANY,
+        object_format="sha256",
+    )
+    assert repo.object_format == "sha256"
+    assert len(repo.genesis_oid) == 64
+    assert (repo.path / "HEAD").is_file()
+    assert not (repo.path / ".git").exists()  # bare, no working checkout
+    return {**world, "repo": repo, "commit": repo.genesis_oid}
+
+
+def _sha256_collect(world, refs):
+    return boc.collect_object_closure(
+        commit_oid=world["commit"], object_format="sha256",
+        authorized_scope=world["scope"], references=refs, stores=world["stores"],
+    )
+
+
+def _sha256_refs(world):
+    blob, _ = world["put_blob"](b"h1-original", name="h1.pdf")
+    mapping = world["mapping_objects"].put(b"h1-historical-mapping")
+    return [
+        ObjectReference(
+            logical_id=logical_id, object_type=object_type, version=digest,
+            referenced_by=[ReferenceRoot(
+                "H", world["commit"], coordinate, object_format="sha256",
+            ), ReferenceRoot("W", CHECKPOINT, "rows/1", object_format="sha256")],
+            scope=company_scope(), sha256_digest=f"sha256:{digest}",
+        )
+        for logical_id, object_type, digest, coordinate in [
+            (f"source:{blob}", OBJECT_ORIGINAL, blob, "sources/1.json"),
+            ("mapping:h1:v1", OBJECT_MAPPING_VERSION, mapping, "mapping/1.json"),
+        ]
+    ]
+
+
+def test_h1_sha256_present_sorted_deterministic_read_only(sha256_world):
+    world = sha256_world
+    refs = _sha256_refs(world)
+    before = _tree_snapshot(world["tmp"])
+    first = _sha256_collect(world, refs)
+    second = _sha256_collect(world, list(reversed(refs)))
+    assert first.status == "complete"
+    assert first.publishable is True
+    assert all(entry.status == STATUS_PRESENT for entry in first.entries)
+    assert [entry.logical_id for entry in first.entries] == sorted(
+        ref.logical_id for ref in refs
+    )
+    assert first.canonical_payload == second.canonical_payload
+    assert first.r_list_digest == second.r_list_digest
+    assert first.r_list_digest == compute_core_digest(first.canonical_payload)
+    assert first.canonical_payload["commit_oid"] == world["commit"]
+    assert refs[0].referenced_by[0].normalized() == {
+        "kind": "H", "root_id": world["commit"], "coordinate": "sources/1.json",
+    }
+    # Includes Git files, both object stores, and the SQLite metadata bytes.
+    assert _tree_snapshot(world["tmp"]) == before
+
+
+@pytest.mark.parametrize("state", ["missing", "corrupt"])
+def test_h1_sha256_missing_corrupt(sha256_world, state):
+    world = sha256_world
+    refs = _sha256_refs(world)
+    digest = refs[0].sha256_digest.removeprefix("sha256:")
+    path = world["root"] / "bin" / digest[:2] / digest
+    if state == "missing":
+        path.unlink()
+    else:
+        path.write_bytes(b"x" * len(b"h1-original"))
+    before = _tree_snapshot(world["tmp"])
+    result = _sha256_collect(world, refs)
+    assert result.publishable is False
+    assert result.status == ("incomplete" if state == "missing" else "corrupt")
+    entry = _entry(result, refs[0].logical_id)
+    assert entry.status == state
+    assert entry.issue == ("object_missing" if state == "missing" else "sha256_mismatch")
+    assert _tree_snapshot(world["tmp"]) == before
+
+
+@pytest.mark.parametrize("foreign", ["company", "installation"])
+def test_h1_sha256_cross_scope_rejected_before_read(sha256_world, monkeypatch, foreign):
+    world = sha256_world
+    refs = _sha256_refs(world)
+    ref = refs[0]
+    refs[0] = ObjectReference(
+        logical_id=ref.logical_id, object_type=ref.object_type, version=ref.version,
+        referenced_by=ref.referenced_by, sha256_digest=ref.sha256_digest,
+        scope=company_scope(**{foreign: "foreign"}),
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("cross-scope closure read object bytes")
+
+    monkeypatch.setattr(boc, "verify_backup_component", forbidden)
+    before = _tree_snapshot(world["tmp"])
+    result = _sha256_collect(world, refs)
+    assert result.status == "scope_violation"
+    assert result.publishable is False
+    assert result.entries == ()
+    assert result.scope_violations[0].reason == f"foreign_{foreign}"
+    assert _tree_snapshot(world["tmp"]) == before
+
+
+@pytest.mark.parametrize("fmt,length", [("sha1", 40), ("sha256", 64)])
+@pytest.mark.parametrize("oid", ["", *["a" * n for n in (39, 40, 41, 63, 64, 65)],
+                                  "g" * 40, "g" * 64, "A" * 40, "A" * 64])
+def test_h1_oid_boundaries_both_entrypoints(world, fmt, length, oid):
+    def root():
+        return ReferenceRoot("H", oid, "records/1", object_format=fmt)
+
+    def collect():
+        return boc.collect_object_closure(
+            commit_oid=oid, object_format=fmt, authorized_scope=world["scope"],
+            references=[], stores=world["stores"],
+        )
+
+    if oid == "a" * length:
+        assert root().root_id == oid
+        assert collect().status == "complete"
+    else:
+        for call in (root, collect):
+            with pytest.raises(ObjectClosureError) as error:
+                call()
+            if oid:
+                assert f"{length}-hex fixed commit oid" in str(error.value)
+
+
+@pytest.mark.parametrize("fmt", ["md5", None, "SHA256", "", 64, [], {}])
+def test_h1_invalid_object_format(world, fmt):
+    for kind in ("H", "W"):
+        with pytest.raises(ObjectClosureError, match="object_format"):
+            ReferenceRoot(kind, COMMIT, "records/1", object_format=fmt)
+    with pytest.raises(ObjectClosureError, match="object_format"):
+        boc.collect_object_closure(
+            commit_oid=COMMIT, object_format=fmt, authorized_scope=world["scope"],
+            references=[], stores=world["stores"],
+        )
+
+
+@pytest.mark.parametrize("fmt", ["sha1", "sha256"])
+@pytest.mark.parametrize("checkpoint", ["checkpoint:rows/1", "z", "a" * 39,
+                                        "a" * 40, "a" * 41, "a" * 63,
+                                        "a" * 64, "a" * 65])
+def test_h1_w_roots_do_not_validate_oid_length(fmt, checkpoint):
+    assert ReferenceRoot("W", checkpoint, "rows/1", object_format=fmt).normalized() == {
+        "kind": "W", "root_id": checkpoint, "coordinate": "rows/1",
+    }
+
+
+def test_h1_keyword_only_and_sha1_error_compatibility(world):
+    with pytest.raises(TypeError):
+        ReferenceRoot("H", COMMIT, "records/1", "sha1")
+    with pytest.raises(TypeError):
+        boc.collect_object_closure(
+            COMMIT, world["scope"], [], "sha1", stores=world["stores"],
+        )
+    with pytest.raises(ObjectClosureError) as error:
+        ReferenceRoot("H", "a" * 64, "records/1")
+    assert str(error.value) == "H reference root id must be the 40-hex fixed commit oid"
+    with pytest.raises(ObjectClosureError) as error:
+        boc.collect_object_closure(
+            commit_oid="a" * 64, authorized_scope=world["scope"],
+            references=[], stores=world["stores"],
+        )
+    assert str(error.value) == "commit_oid must be the 40-hex fixed commit oid"

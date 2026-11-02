@@ -70,7 +70,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -134,7 +134,10 @@ CLOSURE_SCOPE_VIOLATION = "scope_violation"
 
 _DIGEST_HEX_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 _DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
-_COMMIT_OID_RE = re.compile(r"\A[0-9a-f]{40}\Z")
+_COMMIT_OID_PATTERNS = {
+    "sha1": re.compile(r"\A[0-9a-f]{40}\Z"),
+    "sha256": re.compile(r"\A[0-9a-f]{64}\Z"),
+}
 
 _ROOT_OPEN_FLAGS = (
     os.O_RDONLY
@@ -161,6 +164,22 @@ def _require_str(value, label, *, nonempty: bool = True) -> str:
     if nonempty and not value:
         raise ObjectClosureError(f"{label} must not be empty")
     return value
+
+
+def _require_object_format(object_format: str) -> str:
+    if (not isinstance(object_format, str)
+            or object_format not in _COMMIT_OID_PATTERNS):
+        raise ObjectClosureError("object_format must be 'sha1' or 'sha256'")
+    return object_format
+
+
+def _require_commit_oid(value: str, label: str, object_format: str) -> None:
+    _require_object_format(object_format)
+    if not _COMMIT_OID_PATTERNS[object_format].fullmatch(value):
+        length = 40 if object_format == "sha1" else 64
+        raise ObjectClosureError(
+            f"{label} must be the {length}-hex fixed commit oid"
+        )
 
 
 def _require_digest(value, label) -> str:
@@ -202,6 +221,7 @@ class ReferenceRoot:
     kind: str
     root_id: str
     coordinate: str
+    object_format: str = field(default="sha1", kw_only=True)
 
     def __post_init__(self) -> None:
         if self.kind not in _ROOT_KINDS:
@@ -211,9 +231,10 @@ class ReferenceRoot:
             )
         _require_str(self.root_id, "reference root id")
         _require_str(self.coordinate, "reference root coordinate")
-        if self.kind == ROOT_H and not _COMMIT_OID_RE.fullmatch(self.root_id):
-            raise ObjectClosureError(
-                "H reference root id must be the 40-hex fixed commit oid"
+        _require_object_format(self.object_format)
+        if self.kind == ROOT_H:
+            _require_commit_oid(
+                self.root_id, "H reference root id", self.object_format
             )
 
     def normalized(self) -> dict[str, str]:
@@ -832,6 +853,7 @@ def collect_object_closure(
     authorized_scope: ClosureScope,
     references: list[ObjectReference] | tuple[ObjectReference, ...],
     stores: ClosureStores,
+    object_format: str = "sha1",
 ) -> ObjectClosureResult:
     """Collect and verify the R closure for one fixed H + W reference set.
 
@@ -845,10 +867,7 @@ def collect_object_closure(
     digest); only malformed calls raise :class:`ObjectClosureError`.
     """
     _require_str(commit_oid, "commit_oid")
-    if not _COMMIT_OID_RE.fullmatch(commit_oid):
-        raise ObjectClosureError(
-            "commit_oid must be the 40-hex fixed commit oid"
-        )
+    _require_commit_oid(commit_oid, "commit_oid", object_format)
     if not isinstance(authorized_scope, ClosureScope):
         raise ObjectClosureError(
             "authorized_scope must be a ClosureScope"
