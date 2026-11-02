@@ -1888,7 +1888,7 @@ def test_no_wiring_and_offline_import_graph():
 
     offenders = []
     for path in app_root.rglob("*.py"):
-        if path.name == "backup_assembly.py":
+        if path.name in {"backup_assembly.py", "recovery_verifier.py"}:
             continue
         text = path.read_text()
         if "backup_assembly" in text:

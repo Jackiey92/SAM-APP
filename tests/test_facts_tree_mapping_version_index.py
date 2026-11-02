@@ -828,6 +828,7 @@ def test_v7_no_live_path_module_imports_the_ledger():
     repo_root = Path(__file__).resolve().parents[1]
     app_root = repo_root / "app"
     allowed_consumers = {
+        "recovery_verifier.py",  # R4: only module-level _row_digest/constants; no instantiation.
         "mapping_version_backfill.py",
         "mapping_version_online.py",
         "backup_assembly.py",

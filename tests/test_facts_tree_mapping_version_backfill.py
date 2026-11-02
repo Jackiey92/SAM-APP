@@ -582,6 +582,7 @@ def test_v7_no_live_path_imports_ledger_or_backfiller():
     # Everything else (webapp, harness, employees, broker, storage, …)
     # may not.
     offline_siblings = {
+        "recovery_verifier.py",  # R4: only module-level _row_digest/constants; no instantiation.
         "mapping_version_index.py",
         "mapping_version_backfill.py",
         "mapping_version_online.py",
