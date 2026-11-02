@@ -88,6 +88,7 @@ from app.facts_tree.backup_manifest import (
     build_final_manifest,
     build_verification_report,
     compute_report_digest,
+    compute_core_digest,
     verify_final_manifest,
 )
 # Reusing the closure family's private lexical sanitizer, read-only: the
@@ -1957,6 +1958,7 @@ def _build_core_payload(*, identity, freeze_core, bundle, w_evidence,
             "publishable": evidence.publishable,
             "r_list_digest": evidence.r_list_digest,
             "counts": dict(sorted(evidence.counts.items())),
+            "canonical_record": _result.canonical_payload,
         }
     bundle_block = None
     if bundle is not None:
@@ -1992,6 +1994,202 @@ def _build_core_payload(*, identity, freeze_core, bundle, w_evidence,
         "mapping_ledger": ledger_block,
         "payload": payload_block,
     }
+
+
+def _closure_record(core, fail):
+    """Validate JSON data only; never collect roots or open a store.
+
+    Return the record only when its complete shape is safe to replay. Source
+    coordinates are lexical evidence, never package filesystem coordinates.
+    """
+    record = core["closure"]["canonical_record"]
+
+    def text(value):
+        return isinstance(value, str) and bool(value.strip())
+
+    def malformed():
+        fail("closure_record_malformed")
+        return None
+
+    def scope_shape(scope):
+        return (isinstance(scope, dict) and set(scope) == {"kind", "installation_id", "company_id"}
+                and scope["kind"] in {SCOPE_COMPANY, SCOPE_INSTALLATION}
+                and text(scope["installation_id"])
+                and (text(scope["company_id"]) if scope["kind"] == SCOPE_COMPANY else scope["company_id"] is None))
+
+    def roots_shape(roots):
+        return (isinstance(roots, list) and bool(roots) and all(
+            isinstance(root, dict) and set(root) == {"kind", "root_id", "coordinate"}
+            and root["kind"] in {ROOT_H, ROOT_W} and text(root["root_id"])
+            and text(root["coordinate"]) for root in roots))
+
+    if (not isinstance(record, dict) or set(record) != {
+            "schema", "version", "commit_oid", "authorized_scope", "entries", "scope_violations"}
+            or record["schema"] != "sam.f001.r_object_closure"
+            or type(record["version"]) is not int or record["version"] != 1
+            or not isinstance(record["authorized_scope"], dict)
+            or set(record["authorized_scope"]) != {"installation_id", "company_id"}
+            or not all(text(v) for v in record["authorized_scope"].values())
+            or not isinstance(record["commit_oid"], str)
+            or not isinstance(record["entries"], list)
+            or not isinstance(record["scope_violations"], list)):
+        return malformed()
+    identity, authority = core["identity"], core["authority"]
+    if (record["authorized_scope"] != {k: identity[k] for k in ("installation_id", "company_id")}
+            or authority["object_format"] != "sha1"
+            or not re.fullmatch(r"[0-9a-f]{40}", record["commit_oid"])
+            or record["commit_oid"] != authority["commit_oid"]):
+        fail("identity_mismatch")
+    if record["scope_violations"]:
+        for violation in record["scope_violations"]:
+            if (not isinstance(violation, dict) or set(violation) != {
+                    "logical_id", "object_type", "sha256_digest", "version", "key_reference",
+                    "scope", "reason", "referenced_by"}
+                    or not all(text(violation[k]) for k in ("logical_id", "version", "reason"))
+                    or violation["object_type"] not in OBJECT_TYPES
+                    or not scope_shape(violation["scope"])
+                    or not roots_shape(violation["referenced_by"])):
+                return malformed()
+        fail("closure_not_publishable")
+    ids = set()
+    fields = {"logical_id", "object_type", "digest_algorithm", "sha256_digest", "size_bytes",
+              "scope", "version", "key_reference", "storage_class", "relative_path",
+              "status", "issue", "referenced_by"}
+    for entry in record["entries"]:
+        if (not isinstance(entry, dict) or set(entry) != fields
+                or not text(entry["logical_id"]) or not text(entry["version"])
+                or entry["object_type"] not in OBJECT_TYPES
+                or entry["status"] not in _ENTRY_STATUSES
+                or not scope_shape(entry["scope"])
+                or not roots_shape(entry["referenced_by"])
+                or any(entry[k] is not None and not text(entry[k]) for k in ("key_reference", "issue"))):
+            return malformed()
+        for root in entry["referenced_by"]:
+            if root["kind"] == ROOT_H and root["root_id"] != record["commit_oid"]:
+                fail("identity_mismatch")
+        scope = entry["scope"]
+        if (scope["installation_id"] != identity["installation_id"]
+                or (scope["kind"] == SCOPE_COMPANY and scope["company_id"] != identity["company_id"])):
+            fail("identity_mismatch")
+        if entry["logical_id"] in ids:
+            fail("r_inventory_mismatch")
+        ids.add(entry["logical_id"])
+        if entry["status"] != STATUS_PRESENT:
+            fail("closure_not_publishable")
+            continue
+        if (entry["digest_algorithm"] != "sha256"
+                or not isinstance(entry["sha256_digest"], str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", entry["sha256_digest"])
+                or type(entry["size_bytes"]) is not int or entry["size_bytes"] < 0
+                or entry["storage_class"] not in _PAYLOAD_STORAGE_CLASSES
+                or entry["issue"] is not None):
+            return malformed()
+        try:
+            clean = _clean_relative_coordinate(entry["relative_path"], "closure relative_path")
+        except (TypeError, ValueError):
+            clean = ""
+        if not clean:
+            fail("r_unsafe_coordinate")
+    return record
+
+
+def _replay_closure_digest(core, fail):
+    """Replay one: canonical record and both published digest anchors."""
+    record = _closure_record(core, fail)
+    if record is None:
+        return
+    try:
+        digest = compute_core_digest(record)
+    except (TypeError, ValueError, RecursionError):
+        fail("closure_record_malformed")
+        return
+    if digest != core["closure"]["r_list_digest"] or digest != core["payload"]["r"]["r_list_digest"]:
+        fail("r_list_digest_mismatch")
+
+
+def _replay_closure_bytes(core, files, hash_coordinate, fail):
+    """Replay two: logical groups, R-only inventory, then pinned bytes.
+
+    hash_coordinate reads an already pinned package file and returns its
+    prefixed SHA-256 and size. No source/store coordinate ever reaches it.
+    """
+    reasons = set()
+    record = _closure_record(core, reasons.add)
+    for reason in reasons:
+        fail(reason)
+    if record is None or reasons:
+        return
+    groups = {}
+    for entry in record["entries"]:
+        key = (entry["storage_class"], entry["sha256_digest"])
+        size, ids = groups.setdefault(key, (entry["size_bytes"], set()))
+        if size != entry["size_bytes"]:
+            fail("r_inventory_mismatch")
+        ids.add(entry["logical_id"])
+    inventory = {}
+    for item in files:
+        if item["family"] != PAYLOAD_FAMILY_R:
+            continue
+        key = (item["storage_class"], item["sha256_digest"])
+        if key in inventory:
+            fail("r_inventory_mismatch")
+        inventory[key] = item
+    block = core["payload"]["r"]
+    digests = {digest for _cls, digest in groups}
+    if (set(groups) != set(inventory) or len(digests) != len(groups)
+            or block["present_entries"] != len(record["entries"])
+            or block["physical_files"] != len(groups)
+            or not isinstance(block["digests"], list)
+            or len(block["digests"]) != len(digests) or set(block["digests"]) != digests):
+        fail("r_inventory_mismatch")
+    for (cls, digest), (size, ids) in groups.items():
+        coordinate = "payload/r/%s/%s/%s" % (cls, digest[7:9], digest[7:])
+        item = inventory.get((cls, digest))
+        if (item is None or item["path"] != coordinate or item["size_bytes"] != size
+                or len(item["logical_ids"]) != len(ids) or set(item["logical_ids"]) != ids):
+            fail("r_inventory_mismatch")
+        try:
+            if hash_coordinate(coordinate) != (digest, size):
+                fail("r_byte_mismatch")
+        except (OSError, ValueError, KeyError):
+            fail("r_byte_mismatch")
+
+
+def _assembly_closure_replay(package_fd, core):
+    """Read a staged package with fixed descriptors; no collector/store."""
+    reasons = set()
+
+    def hash_coordinate(coordinate):
+        parts = coordinate.split("/")
+        parent = os.open(".", _DIR_FLAGS, dir_fd=package_fd)
+        try:
+            for segment in parts[:-1]:
+                child = os.open(segment, _DIR_FLAGS, dir_fd=parent)
+                os.close(parent)
+                parent = child
+            pinned = os.open(parts[-1], _PATH_FLAGS, dir_fd=parent)
+            try:
+                if not stat_module.S_ISREG(os.fstat(pinned).st_mode):
+                    raise ValueError("not a regular file")
+                fd = os.open("/proc/self/fd/%d" % pinned, os.O_RDONLY | _O_CLOEXEC)
+                try:
+                    digest, size = hashlib.sha256(), 0
+                    while chunk := os.read(fd, _READ_CHUNK):
+                        digest.update(chunk)
+                        size += len(chunk)
+                    return "sha256:" + digest.hexdigest(), size
+                finally:
+                    os.close(fd)
+            finally:
+                os.close(pinned)
+        finally:
+            os.close(parent)
+
+    _replay_closure_digest(core, reasons.add)
+    _replay_closure_bytes(core, core["payload"]["files"], hash_coordinate, reasons.add)
+    if reasons:
+        raise BackupAssemblyError("closure replay failed", family=FAMILY_R,
+                                  reason=sorted(reasons)[0])
 
 
 def _root_coordinates(roots):
@@ -2816,6 +3014,7 @@ def _assemble_locked(*, plan, backup_id, barrier_id, pin_ref, frozen_commit,
 
         manifest = build_final_manifest(core_payload, report)
         verify_final_manifest(manifest, report)
+        _assembly_closure_replay(staging_fd, core_payload)
         return _publish_green(
             backup_id=backup_id,
             barrier_id=barrier_id,
@@ -2956,6 +3155,16 @@ def _publish_green(*, backup_id, barrier_id, identity, assembly_fd,
                 staging_fd, MANIFEST_NAME, git_format.dumps_record(manifest))
             _fsync_dir_fd(staging_fd)
             hook(PHASE_MANIFEST_STAGED)
+            # Re-read the actual envelope after the crash boundary: neither
+            # mutable inner dicts nor staged bytes may bypass publication checks.
+            staged_manifest = git_format.loads_record(_read_file_at(staging_fd, MANIFEST_NAME))
+            staged_report = git_format.loads_record(_read_file_at(staging_fd, REPORT_NAME))
+            verify_final_manifest(staged_manifest, staged_report)
+            if (staged_manifest != manifest or staged_report != report
+                    or staged_manifest["verification"]["core_digest"] != core_digest):
+                raise BackupAssemblyError("staged digest chain changed", family=FAMILY_R,
+                                          reason="r_list_digest_mismatch")
+            _assembly_closure_replay(staging_fd, staged_manifest["core"])
             try:
                 os.rename(
                     staging_name, barrier_id,

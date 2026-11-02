@@ -1,9 +1,8 @@
 """Offline, read-only verification of an isolated F-001 package.
 
-R proves unchanged package bytes and agreement with the published inventory.
-It does not prove reachability/completeness from reference roots: v2 omits the
-canonical closure payload. closure_replay_deferred requires A3 to package that
-payload before replay is possible. No recovery action or host operation runs.
+R replays a packaged canonical closure record against fixed package bytes.
+Old v2 packages without that record retain closure_replay_deferred. No
+collector, source store, recovery action or host operation runs.
 """
 from __future__ import annotations
 
@@ -21,6 +20,7 @@ from app.facts_tree.backup_manifest import compute_core_digest, verify_final_man
 from app.facts_tree.backup_assembly import (
     ASSEMBLY_CORE_SCHEMA, BUNDLE_NAME, MANIFEST_NAME, REPORT_NAME, PAYLOAD_SCHEMA, PAYLOAD_VERSION,
     _SAFE_ROLE_RE, _payload_probe,
+    _replay_closure_digest, _replay_closure_bytes,
 )
 from app.facts_tree.backup_object_closure import _clean_relative_coordinate
 from app.facts_tree.mapping_version_index import (
@@ -696,13 +696,34 @@ def verify_recovery_package(package_dir, *, expected_identity=None) -> RecoveryV
                     fail("missing_manifest_or_report" if name != BUNDLE_NAME else "bundle_missing")
             if MANIFEST_NAME not in held or REPORT_NAME not in held:
                 return
-            manifest, report = _json(held[MANIFEST_NAME]), _json(held[REPORT_NAME])
+            try:
+                manifest, report = _json(held[MANIFEST_NAME]), _json(held[REPORT_NAME])
+            except ValueError as exc:
+                if str(exc) == "duplicate JSON key":
+                    fail("closure_record_malformed")
+                raise
             version = manifest.get("version", 0)
             if type(version) is not int or version not in {1, 2}:
                 fail("unsupported_envelope_version")
                 version = 0
                 return
-            verify_final_manifest(manifest, report)
+            try:
+                verify_final_manifest(manifest, report)
+            except ValueError:
+                # Some illegal JSON values (notably floating sizes) cannot
+                # even be serialized into the digest chain. Preserve the
+                # malformed-record reason as well as the envelope failure.
+                candidate = manifest.get("core")
+                if (isinstance(candidate, dict) and isinstance(candidate.get("closure"), dict)
+                        and "canonical_record" in candidate["closure"]):
+                    malformed = set()
+                    try:
+                        _replay_closure_digest(candidate, malformed.add)
+                    except Exception:
+                        malformed.add("closure_record_malformed")
+                    if "closure_record_malformed" in malformed:
+                        fail("closure_record_malformed")
+                raise
             if not isinstance(manifest["core"], dict):
                 raise ValueError("core")
             core = manifest["core"]
@@ -737,8 +758,17 @@ def verify_recovery_package(package_dir, *, expected_identity=None) -> RecoveryV
                 # Continue after physical damage to collect useful W/R/R2 diagnostics.
                 stage("W", lambda fail: _work(core, files, held, fail, host_dbs), "payload_malformed")
                 stage("R", lambda fail: _objects(core, files, held, fail), "payload_malformed")
+                closure = core.get("closure")
+                if isinstance(closure, dict) and "canonical_record" in closure:
+                    digest_ok = stage("R.closure_digest", lambda fail: _replay_closure_digest(core, fail),
+                                      "closure_record_malformed")
+                    bytes_ok = stage("R.closure_bytes", lambda fail: _replay_closure_bytes(
+                        core, files, lambda path: _hash(held[path]), fail), "closure_record_malformed")
+                    if digest_ok and bytes_ok:
+                        advisories.discard("closure_replay_deferred")
                 stage("R2", lambda fail: _ledger(core, files, held, fail), "payload_r2_shape_mismatch")
-                self_contained = self_contained and all(c.passed for c in checks if c.name in {"W", "R", "R2"})
+                self_contained = self_contained and all(c.passed for c in checks if c.name in {
+                    "W", "R", "R2", "R.closure_digest", "R.closure_bytes"})
                 stage("host", lambda fail: _host(host_dbs, core["identity"], fail, advisories.add), "host_malformed")
     finally:
         for db, _tables in host_dbs:

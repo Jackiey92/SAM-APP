@@ -1248,7 +1248,14 @@ def test_non_frozen_and_absent_records_are_refused(world, bad_state):
 # ---------------------------------------------------------------------------
 
 
-def test_sha256_cut_fails_closed_on_40_hex_closure_contract(world):
+def test_sha256_cut_fails_closed_on_40_hex_closure_contract(world, monkeypatch):
+    captured = []
+    build = assembly._build_core_payload
+    def capture(**kwargs):
+        core = build(**kwargs)
+        captured.append(core)
+        return core
+    monkeypatch.setattr(assembly, '_build_core_payload', capture)
     repository = FactsGitRepository.initialize(
         world["tmp"] / "facts-256.git", object_format="sha256", **_IDS)
     broker_db = sqlite3.connect(":memory:")
@@ -1292,6 +1299,7 @@ def test_sha256_cut_fails_closed_on_40_hex_closure_contract(world):
     )
     result = assemble_backup(plan, "bkp-a1-sha256")
     assert result.status == "failed"
+    assert captured and captured[-1]['closure'] is None
     assert result.current is None
     assert any(
         f.family == "R"
@@ -1947,3 +1955,127 @@ def test_no_wiring_and_offline_import_graph():
     assert CRASH_PHASES == frozenset((
         "bundle_exported", "payload_staged", "manifest_staged",
         "package_published", "current_switched"))
+
+
+# A3 revB: enforce the exact collector data, then independently replay staged
+# bytes before publication. Fault injection changes boundaries, never success.
+def test_a3_embeds_exact_canonical_record(world, monkeypatch):
+    captured = []
+    collect = assembly.collect_object_closure
+    def capture(**kwargs):
+        result = collect(**kwargs)
+        captured.append(result)
+        return result
+    monkeypatch.setattr(assembly, 'collect_object_closure', capture)
+    result = assemble_backup(world['make_plan'](), world['green_bid'])
+    assert result.status == 'published'
+    core = _load_json(_package_dir(world, world['green_bid'], world['barrier']) / 'manifest.json')['core']
+    record = core['closure']['canonical_record']
+    assert record == captured[0].canonical_payload
+    assert set(record) == {'schema', 'version', 'commit_oid', 'authorized_scope', 'entries', 'scope_violations'}
+    assert compute_core_digest(record) == captured[0].r_list_digest == core['payload']['r']['r_list_digest']
+
+
+@pytest.mark.parametrize('phase,mode', [
+    (assembly.PHASE_PAYLOAD_STAGED, 'inner-dict'),
+    (assembly.PHASE_PAYLOAD_STAGED, 'byte'),
+    (assembly.PHASE_MANIFEST_STAGED, 'record'),
+    (assembly.PHASE_MANIFEST_STAGED, 'resealed-record'),
+    (assembly.PHASE_MANIFEST_STAGED, 'byte'),
+])
+def test_a3_13_15_staging_fault_never_publishes_or_switches_current(world, monkeypatch, phase, mode):
+    first = assemble_backup(world['make_plan'](), world['green_bid'])
+    current = _assembly_root(world) / 'current'
+    before = (current.stat().st_ino, current.stat().st_mtime_ns, current.read_bytes())
+    bid = 'bkp-a3-stage-fault'
+    frozen = world['freeze'](bid)
+    collect = assembly.collect_object_closure
+    captured = []
+    def capture(**kwargs):
+        result = collect(**kwargs)
+        captured.append(result)
+        return result
+    monkeypatch.setattr(assembly, 'collect_object_closure', capture)
+    def fault(at):
+        if at != phase:
+            return
+        staging = next(p for p in (_assembly_root(world) / 'staging').iterdir() if p.name.startswith(bid))
+        if mode == 'inner-dict':
+            captured[-1].canonical_payload['entries'][0]['version'] = 'after-digest'
+        elif mode == 'byte':
+            path = next((staging / 'payload/r/archive').glob('*/*'))
+            path.write_bytes(b'X' + path.read_bytes()[1:])
+        else:
+            manifest = _load_json(staging / 'manifest.json')
+            manifest['core']['closure']['canonical_record']['entries'][0]['version'] = 'after-staging'
+            if mode == 'resealed-record':
+                report = build_verification_report(manifest['core'])
+                from app.facts_tree.backup_manifest import build_final_manifest
+                manifest = build_final_manifest(manifest['core'], report)
+                (staging / 'report.json').write_bytes(dumps_record(report))
+            (staging / 'manifest.json').write_bytes(dumps_record(manifest))
+    with pytest.raises((assembly.BackupAssemblyError, ValueError)) as error:
+        assemble_backup(world['make_plan'](bid=bid), bid, crash_hook=fault)
+    if mode in {'inner-dict', 'resealed-record', 'byte'}:
+        assert error.value.reason == ('r_byte_mismatch' if mode == 'byte' else 'r_list_digest_mismatch')
+    else:
+        from app.facts_tree.backup_manifest import BackupManifestError
+        assert isinstance(error.value, BackupManifestError)
+    assert not _package_dir(world, bid, frozen.barrier_id).exists()
+    assert (current.stat().st_ino, current.stat().st_mtime_ns, current.read_bytes()) == before
+    assert read_current_backup(world['retention'], identity=_IDENTITY) == first.current
+    if phase == assembly.PHASE_MANIFEST_STAGED:
+        from app.facts_tree.recovery_verifier import verify_recovery_package
+        staging = next(p for p in (_assembly_root(world) / 'staging').iterdir() if p.name.startswith(bid))
+        verdict = verify_recovery_package(staging)
+        reason = {'record': 'digest_chain', 'resealed-record': 'r_list_digest_mismatch',
+                  'byte': 'r_byte_mismatch'}[mode]
+        assert not verdict.recoverable and reason in verdict.blockers, verdict
+
+
+@pytest.mark.parametrize('mode', ['large', 'deep'])
+def test_a3_14_record_embedding_limits_keep_current(world, monkeypatch, mode):
+    first = assemble_backup(world['make_plan'](), world['green_bid'])
+    current = _assembly_root(world) / 'current'
+    before = (current.stat().st_ino, current.stat().st_mtime_ns, current.read_bytes())
+    bid = 'bkp-a3-limit'
+    frozen = world['freeze'](bid)
+    build = assembly._build_core_payload
+    def oversized(**kwargs):
+        core = build(**kwargs)
+        record = core['closure']['canonical_record']
+        if mode == 'large':
+            # The record alone fits; the core/envelope embedding exceeds 1 MiB.
+            base = len(dumps_record(record))
+            record['entries'][0]['referenced_by'][0]['coordinate'] = 'x' * (git_format.MAX_RECORD_BYTES - base - 16)
+        else:
+            # The record alone fits the depth bound, its core embedding does not.
+            nested = 'leaf'
+            for _ in range(git_format.MAX_DEPTH - 1):
+                nested = [nested]
+            record['scope_violations'] = nested
+        digest = compute_core_digest(record)
+        core['closure']['r_list_digest'] = core['payload']['r']['r_list_digest'] = digest
+        return core
+    from app.facts_tree import git_format
+    monkeypatch.setattr(assembly, '_build_core_payload', oversized)
+    from app.facts_tree.backup_manifest import BackupManifestError
+    with pytest.raises(BackupManifestError):
+        assemble_backup(world['make_plan'](bid=bid), bid)
+    assert not _package_dir(world, bid, frozen.barrier_id).exists()
+    assert (current.stat().st_ino, current.stat().st_mtime_ns, current.read_bytes()) == before
+    assert read_current_backup(world['retention'], identity=_IDENTITY) == first.current
+
+
+def test_a3_real_assembly_shared_digest(world):
+    refs = list(world['green_references']())
+    refs.append(dataclasses.replace(refs[0], logical_id='another-logical-id'))
+    result = assemble_backup(world['make_plan'](refs=refs), world['green_bid'])
+    assert result.status == 'published'
+    package = _package_dir(world, world['green_bid'], world['barrier'])
+    from app.facts_tree.recovery_verifier import verify_recovery_package
+    verdict = verify_recovery_package(package)
+    assert verdict.recoverable, verdict.blockers
+    core = _load_json(package / 'manifest.json')['core']
+    assert core['payload']['r']['present_entries'] == core['payload']['r']['physical_files'] + 1
+    assert 'closure_replay_deferred' not in verdict.advisories

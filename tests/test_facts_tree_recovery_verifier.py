@@ -68,8 +68,15 @@ def _refuse(package, reason):
     return verdict
 
 
+def _a3_fingerprint(package):
+    paths = [package] if package.is_file() else [package, *package.rglob('*')]
+    return {str(p.relative_to(package)): (p.lstat().st_ino, p.lstat().st_mtime_ns,
+            p.lstat().st_size, hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None)
+            for p in paths if not p.is_symlink()}
+
+
 def test_real_clean_room_green_and_cross_check(package, world):
-    before = _fingerprint(package)
+    before = _a3_fingerprint(package)
     assert verify_package_payload(package).self_contained
     verdict = verifier.verify_recovery_package(package)
     assert verdict.recoverable, (verdict.blockers, verdict.checks)
@@ -79,9 +86,11 @@ def test_real_clean_room_green_and_cross_check(package, world):
     assert verdict.identity == core['identity']
     assert verdict.bundle_head_oid == world['commit']
     assert verdict.closure_r_list_digest == core['closure']['r_list_digest']
-    assert {'closure_replay_deferred', 'host_tables_absent'} <= set(verdict.advisories)
+    assert 'host_tables_absent' in verdict.advisories
+    assert 'closure_replay_deferred' not in verdict.advisories
+    assert {c.name for c in verdict.checks if c.passed} >= {'R.closure_digest', 'R.closure_bytes'}
     assert verdict.verified_at.endswith('Z')
-    assert _fingerprint(package) == before
+    assert _a3_fingerprint(package) == before
 
 
 def test_bundle_primitive(package):
@@ -329,17 +338,17 @@ def test_bundle_damage(package, mode):
 
 def test_zero_writes_including_sources_current_and_git(package, world):
     roots = [package, world['retention'], world['two_a'], world['ledger_root'], world['app_db']]
-    before = [_fingerprint(root) for root in roots]
+    before = [_a3_fingerprint(root) for root in roots]
     project = Path(__file__).resolve().parents[1]
     status = subprocess.run(['git', 'status', '--porcelain'], cwd=project, capture_output=True, check=True).stdout
     for _ in range(2):
         assert verifier.verify_recovery_package(package).recoverable
-    assert before == [_fingerprint(root) for root in roots]
+    assert before == [_a3_fingerprint(root) for root in roots]
     assert subprocess.run(['git', 'status', '--porcelain'], cwd=project, capture_output=True, check=True).stdout == status
 
 
 def test_package_on_real_read_only_mount(package):
-    before = _fingerprint(package)
+    before = _a3_fingerprint(package)
     # Deliberately provide hostile inherited Git configuration/proxy inputs.
     env = dict(os.environ, GIT_DIR='/nonexistent', GIT_OBJECT_DIRECTORY='/nonexistent',
                GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='core.hooksPath',
@@ -367,6 +376,8 @@ def audit(event,args):
 sys.addaudithook(audit)
 v=verify_recovery_package(p)
 assert v.recoverable, asdict(v)
+assert 'closure_replay_deferred' not in v.advisories
+assert all(c.passed for c in v.checks if c.name.startswith('R.closure_'))
 print(json.dumps(asdict(v)))
 '''
     args = ['bwrap', '--die-with-parent', '--unshare-net', '--unshare-user',
@@ -376,7 +387,7 @@ print(json.dumps(asdict(v)))
     result = subprocess.run(args, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)['recoverable']
-    assert _fingerprint(package) == before
+    assert _a3_fingerprint(package) == before
 
 
 @pytest.fixture
@@ -485,6 +496,8 @@ def test_host_damage(host_package, mode):
 
 def test_r_authoritative_closure_digest_is_forwarded_not_replayed(package):
     core = _manifest(package)['core']
+    # Explicit old v2 package: it has no canonical closure record to replay.
+    del core['closure']['canonical_record']
     digest = 'sha256:' + '7' * 64
     core['closure']['r_list_digest'] = core['payload']['r']['r_list_digest'] = digest
     _seal(package, core)
@@ -504,6 +517,8 @@ def test_r2_backing_only_and_no_ledger_installation(world, tmp_path):
         shutil.copytree(_package_dir(world, bid, frozen.barrier_id), target)
         verdict = verifier.verify_recovery_package(target)
         assert verdict.recoverable, verdict.blockers
+        assert 'closure_replay_deferred' not in verdict.advisories
+        assert {c.name for c in verdict.checks if c.passed} >= {'R.closure_digest', 'R.closure_bytes'}
         core = _manifest(target)['core']
         assert core['payload']['r']['physical_files'] == 0
         assert core['payload']['r2']['status'] == ('ok' if with_ledger else 'skipped')
@@ -511,11 +526,14 @@ def test_r2_backing_only_and_no_ledger_installation(world, tmp_path):
             assert core['payload']['r2']['backing_files'] == 3
 
 
-def test_sha256_manual_h1_authority_with_real_v2_payload(package, tmp_path):
+@pytest.mark.parametrize('with_record', [False, True])
+def test_sha256_manual_h1_authority_with_real_v2_payload(package, tmp_path, with_record):
     # Assembly's production closure call still defaults to sha1 (outside R4).
     # Replace H only with a real H1 SHA-256 authority; W/R/R2 stay real A2 bytes.
     from app.facts_tree.git_repository import FactsGitRepository
     core = _manifest(package)['core']
+    if not with_record:
+        del core['closure']['canonical_record']  # historical hand-composed v2 package
     repo = FactsGitRepository.initialize(tmp_path / 'sha256.git', object_format='sha256', **core['identity'])
     oid = repo.head_oid()
     repo.create_maintenance_pin(core['backup_id'], core['barrier_id'], oid)
@@ -526,6 +544,9 @@ def test_sha256_manual_h1_authority_with_real_v2_payload(package, tmp_path):
     core['bundle'].update(size_bytes=result.size_bytes, sha256_digest='sha256:' + result.sha256_digest)
     _seal(package, core)
     verdict = verifier.verify_recovery_package(package)
+    if with_record:
+        assert not verdict.recoverable and 'identity_mismatch' in verdict.blockers
+        return
     assert verdict.recoverable, verdict.blockers
     assert verdict.object_format == 'sha256' and len(verdict.bundle_head_oid) == 64
 
@@ -546,7 +567,8 @@ def test_import_surface_and_read_only_ast():
     allowed_app = {
         'app.facts_tree.backup_manifest': {'compute_core_digest', 'verify_final_manifest'},
         'app.facts_tree.backup_assembly': {'ASSEMBLY_CORE_SCHEMA', 'BUNDLE_NAME', 'MANIFEST_NAME', 'REPORT_NAME',
-            'PAYLOAD_SCHEMA', 'PAYLOAD_VERSION', '_SAFE_ROLE_RE', '_payload_probe'},
+            'PAYLOAD_SCHEMA', 'PAYLOAD_VERSION', '_SAFE_ROLE_RE', '_payload_probe',
+            '_replay_closure_digest', '_replay_closure_bytes'},
         'app.facts_tree.backup_object_closure': {'_clean_relative_coordinate'},
     }
     for n in ast.walk(tree):
@@ -650,3 +672,262 @@ def test_host_missing_credential_table_requires_rebind(host_package):
     core['databases'][0]['schema']['tables'].remove('host_task_credentials')
     _refresh(package, core, path)
     _refuse(package, 'credential_state_unknown:' + active)
+
+
+# A3 revB section 5: mutations operate on real clean-room packages. Re-sealing
+# is intentional: these tests distinguish the digest chain from independent replay.
+def _a3_reseal(package, core):
+    digest = verifier.compute_core_digest(core['closure']['canonical_record'])
+    core['closure']['r_list_digest'] = core['payload']['r']['r_list_digest'] = digest
+    _seal(package, core)
+
+
+def _a3_check(package, name, reason):
+    verdict = _refuse(package, reason)
+    check = next(c for c in verdict.checks if c.name == name)
+    assert not check.passed and reason in check.reasons, asdict(verdict)
+    assert not verdict.self_contained
+    return verdict
+
+
+def test_a3_01_record_edit_without_chain(package):
+    manifest = _manifest(package)
+    manifest['core']['closure']['canonical_record']['entries'][0]['version'] = 'changed'
+    (package / 'manifest.json').write_text(json.dumps(manifest))
+    _refuse(package, 'digest_chain')
+
+
+def test_a3_02_landed_byte_replay_independent_of_inventory(package):
+    core = _manifest(package)['core']
+    entry = next(e for e in core['payload']['files'] if e['family'] == 'r')
+    path = package / entry['path']
+    path.write_bytes(b'X' + path.read_bytes()[1:])
+    _a3_check(package, 'R.closure_bytes', 'r_byte_mismatch')
+
+
+def test_a3_03_record_digest_does_not_name_actual_bytes(package):
+    core = _manifest(package)['core']
+    core['closure']['canonical_record']['entries'][0]['sha256_digest'] = 'sha256:' + '0' * 64
+    _a3_reseal(package, core)
+    _a3_check(package, 'R.closure_bytes', 'r_byte_mismatch')
+
+
+@pytest.mark.parametrize('mode', ['extra-file', 'missing-file', 'logical-ids', 'physical-count', 'logical-count', 'digests'])
+def test_a3_04_05_layered_inventory(package, mode):
+    core = _manifest(package)['core']
+    record = core['closure']['canonical_record']
+    if mode == 'extra-file':
+        # Keep a valid family=r inventory file, omit its logical declaration.
+        record['entries'].pop(0)
+    elif mode == 'missing-file':
+        entry = dict(record['entries'][0], logical_id='extra-present', sha256_digest='sha256:' + '0' * 64)
+        record['entries'].append(entry)
+    elif mode == 'logical-ids':
+        next(e for e in core['payload']['files'] if e['family'] == 'r')['logical_ids'] = ['undeclared']
+    elif mode == 'digests':
+        core['payload']['r']['digests'] = ['sha256:' + '0' * 64]
+    else:
+        core['payload']['r']['physical_files' if mode == 'physical-count' else 'present_entries'] += 1
+    _a3_reseal(package, core)
+    _a3_check(package, 'R.closure_bytes', 'r_inventory_mismatch')
+
+
+@pytest.mark.parametrize('mode', ['bare', 'double', 'upper', 'newline', 'space'])
+def test_a3_06_strict_digest(package, mode):
+    core = _manifest(package)['core']
+    entry = core['closure']['canonical_record']['entries'][0]
+    digest = entry['sha256_digest']
+    entry['sha256_digest'] = {'bare': digest[7:], 'double': 'sha256:' + digest,
+        'upper': digest.upper(), 'newline': digest + '\n', 'space': ' ' + digest}[mode]
+    _a3_reseal(package, core)
+    _a3_check(package, 'R.closure_digest', 'closure_record_malformed')
+
+
+@pytest.mark.parametrize('mode', ['shared', 'duplicate-id', 'size-conflict'])
+def test_a3_07_shared_physical_digest(package, mode):
+    core = _manifest(package)['core']
+    record = core['closure']['canonical_record']
+    entry = dict(record['entries'][0])
+    entry['logical_id'] = 'shared-second-id' if mode != 'duplicate-id' else entry['logical_id']
+    if mode == 'size-conflict':
+        entry['size_bytes'] += 1
+    record['entries'].append(entry)
+    physical = next(e for e in core['payload']['files'] if e['family'] == 'r'
+                    and e['sha256_digest'] == entry['sha256_digest'])
+    physical['logical_ids'].append(entry['logical_id'])
+    core['closure']['counts']['present'] += 1
+    core['payload']['r']['present_entries'] += 1
+    core['payload']['r']['by_class'][entry['storage_class']]['entries'] += 1
+    _a3_reseal(package, core)
+    if mode == 'shared':
+        verdict = verifier.verify_recovery_package(package)
+        assert verdict.recoverable, asdict(verdict)
+        assert core['payload']['r']['present_entries'] > core['payload']['r']['physical_files']
+        assert 'closure_replay_deferred' not in verdict.advisories
+    else:
+        _a3_check(package, 'R.closure_bytes', 'r_inventory_mismatch')
+
+
+@pytest.mark.parametrize('record', [None, {}, [], False, 'bad', 1])
+def test_a3_09_present_malformed_never_legacy(package, record):
+    core = _manifest(package)['core']
+    core['closure']['canonical_record'] = record
+    _seal(package, core)
+    _a3_check(package, 'R.closure_digest', 'closure_record_malformed')
+
+
+@pytest.mark.parametrize('field,value', [('schema', 'wrong'), ('version', 2), ('version', True),
+    ('entries', {}), ('scope_violations', None)])
+def test_a3_09_record_shape(package, field, value):
+    core = _manifest(package)['core']
+    core['closure']['canonical_record'][field] = value
+    _a3_reseal(package, core)
+    _a3_check(package, 'R.closure_digest', 'closure_record_malformed')
+
+
+@pytest.mark.parametrize('value', [-1, 1.5, '12', True, None])
+def test_a3_09_size_types(package, value):
+    core = _manifest(package)['core']
+    core['closure']['canonical_record']['entries'][0]['size_bytes'] = value
+    if isinstance(value, float):
+        # Canonical serialization itself refuses floats; raw hostile JSON
+        # must still report malformed, without leaking a parser exception.
+        manifest = _manifest(package)
+        manifest['core'] = core
+        (package / 'manifest.json').write_text(json.dumps(manifest))
+        _refuse(package, 'closure_record_malformed')
+        return
+    _a3_reseal(package, core)
+    _a3_check(package, 'R.closure_digest', 'closure_record_malformed')
+
+
+def test_a3_09_duplicate_json_key(package):
+    path = package / 'manifest.json'
+    data = path.read_text()
+    assert '"canonical_record"' in data
+    path.write_text(data.replace('"canonical_record": {', '"canonical_record": null, "canonical_record": {', 1))
+    _refuse(package, 'closure_record_malformed')
+
+
+@pytest.mark.parametrize('mode', ['authorized-installation', 'authorized-company', 'entry-installation',
+    'entry-company', 'commit', 'commit-length'])
+def test_a3_10_identity_and_commit(package, mode):
+    core = _manifest(package)['core']
+    record = core['closure']['canonical_record']
+    if mode.startswith('authorized'):
+        record['authorized_scope']['installation_id' if mode.endswith('installation') else 'company_id'] = 'foreign'
+    elif mode.startswith('entry'):
+        entry = next(e for e in record['entries'] if e['scope']['kind'] == 'company')
+        entry['scope']['installation_id' if mode.endswith('installation') else 'company_id'] = 'foreign'
+    else:
+        record['commit_oid'] = '0' * (40 if mode == 'commit' else 64)
+    _a3_reseal(package, core)
+    _a3_check(package, 'R.closure_digest', 'identity_mismatch')
+
+
+@pytest.mark.parametrize('status', ['missing', 'corrupt', 'unsafe_path', 'out_of_scope',
+    'referenced_but_not_externalized', 'unknown'])
+def test_a3_11_no_filtering_bad_status(package, status):
+    core = _manifest(package)['core']
+    core['closure']['canonical_record']['entries'][0]['status'] = status
+    _a3_reseal(package, core)
+    _a3_check(package, 'R.closure_digest',
+              'closure_record_malformed' if status == 'unknown' else 'closure_not_publishable')
+
+
+@pytest.mark.parametrize('path', ['/absolute', '../escape', 'a/../b', 'a//b', 'a\\b', 'a\x00b', ''])
+def test_a3_12_source_coordinate_lexical_only(package, path):
+    core = _manifest(package)['core']
+    core['closure']['canonical_record']['entries'][0]['relative_path'] = path
+    _a3_reseal(package, core)
+    _a3_check(package, 'R.closure_bytes', 'r_unsafe_coordinate')
+
+
+def test_a3_12_old_source_layout_is_never_opened(package):
+    core = _manifest(package)['core']
+    core['closure']['canonical_record']['entries'][0]['relative_path'] = 'legacy/explicit/source-object'
+    _a3_reseal(package, core)
+    verdict = verifier.verify_recovery_package(package)
+    assert verdict.recoverable, asdict(verdict)
+
+
+@pytest.mark.parametrize('mode', ['middle-link', 'final-link', 'fifo'])
+def test_a3_12_physical_coordinate_pin(package, mode, tmp_path):
+    core = _manifest(package)['core']
+    item = next(e for e in core['payload']['files'] if e['family'] == 'r')
+    path = package / item['path']
+    if mode == 'middle-link':
+        outside = tmp_path / 'outside-shard'
+        path.parent.rename(outside)
+        path.parent.symlink_to(outside, target_is_directory=True)
+    else:
+        path.unlink()
+        if mode == 'final-link':
+            outside = tmp_path / 'outside-file'
+            outside.write_bytes(b'outside')
+            path.symlink_to(outside)
+        else:
+            os.mkfifo(path)
+    _a3_check(package, 'R.closure_bytes', 'r_byte_mismatch')
+
+
+def test_a3_13_json_roundtrip_and_key_order(package):
+    core = _manifest(package)['core']
+    record = core['closure']['canonical_record']
+    original = verifier.compute_core_digest(record)
+    def reverse(value):
+        if isinstance(value, dict):
+            return {k: reverse(v) for k, v in reversed(list(value.items()))}
+        if isinstance(value, list):
+            return [reverse(v) for v in value]
+        return value
+    record = json.loads(json.dumps(reverse(record)))
+    assert verifier.compute_core_digest(record) == original
+    core['closure']['canonical_record'] = record
+    _seal(package, core)
+    assert verifier.verify_recovery_package(package).recoverable
+
+
+def test_a3_16_new_package_cannot_forward_forged_closure_digest(package):
+    core = _manifest(package)['core']
+    core['closure']['r_list_digest'] = core['payload']['r']['r_list_digest'] = 'sha256:' + '7' * 64
+    _seal(package, core)
+    _a3_check(package, 'R.closure_digest', 'r_list_digest_mismatch')
+
+
+def test_a3_pure_rules_have_no_store_or_write_surface():
+    from app.facts_tree import backup_assembly as assembly
+    tree = ast.parse(Path(assembly.__file__).read_text())
+    functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+                 and n.name in {'_closure_record', '_replay_closure_digest', '_replay_closure_bytes'}]
+    assert len(functions) == 3
+    calls = {n.func.id for f in functions for n in ast.walk(f)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert not calls & {'collect_object_closure', 'ClosureStores', 'MappingVersionLedger',
+                        'ArchiveFileStore', 'VersionedMappingObjectStore', 'open'}
+    attrs = {n.attr for f in functions for n in ast.walk(f) if isinstance(n, ast.Attribute)}
+    assert not attrs & {'open', 'connect', 'mkdir', 'write', 'rename', 'unlink', 'run'}
+
+
+@pytest.mark.parametrize('field,value', [
+    ('logical_id', ''), ('object_type', 'unknown'), ('version', None),
+    ('scope', None), ('scope', {}), ('referenced_by', []), ('referenced_by', [None]),
+    ('referenced_by', [{'kind': 'X', 'root_id': 'id', 'coordinate': 'c'}]),
+    ('storage_class', 'unknown'), ('digest_algorithm', 'sha1'), ('issue', 'bad'),
+])
+def test_a3_09_entry_structure(package, field, value):
+    core = _manifest(package)['core']
+    core['closure']['canonical_record']['entries'][0][field] = value
+    _a3_reseal(package, core)
+    _a3_check(package, 'R.closure_digest', 'closure_record_malformed')
+
+
+def test_a3_scope_violation_never_publishable(package):
+    core = _manifest(package)['core']
+    record = core['closure']['canonical_record']
+    entry = record['entries'][0]
+    record['scope_violations'] = [{k: entry[k] for k in (
+        'logical_id', 'object_type', 'sha256_digest', 'version', 'key_reference', 'scope', 'referenced_by')}]
+    record['scope_violations'][0]['reason'] = 'foreign_company'
+    _a3_reseal(package, core)
+    _a3_check(package, 'R.closure_digest', 'closure_not_publishable')
