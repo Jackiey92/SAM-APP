@@ -23,7 +23,13 @@ import re
 from app.facts_tree.git_format import MAX_DEPTH, dumps_record
 
 DIGEST_ALGORITHM = "sha256"
-SCHEMA_VERSION = 1
+# v1: A1 three-file package (authority.bundle, manifest.json, report.json).
+# v2: A2 self-contained package; the core payload additionally carries the
+# payload inventory block, and a v2 package is incomplete without payload/.
+# New envelopes are stamped v2; v1 envelopes stay readable forever.
+SCHEMA_VERSION = 2
+SCHEMA_VERSIONS = frozenset((1, 2))
+LEGACY_THREE_FILE_VERSION = 1
 REPORT_SCHEMA = "sam.f001.backup_verification_report"
 MANIFEST_SCHEMA = "sam.f001.backup_manifest"
 
@@ -222,7 +228,7 @@ def _require_report_shape(report):
     _require_exact_keys(report, _REPORT_ENVELOPE_KEYS, "verification report")
     if report.get("schema") != REPORT_SCHEMA:
         raise BackupManifestError("verification report has an unknown schema")
-    if report.get("version") != SCHEMA_VERSION:
+    if report.get("version") not in SCHEMA_VERSIONS:
         raise BackupManifestError("verification report has an unsupported version")
     _require_digest(report.get("core_digest"), "verification report core_digest")
 
@@ -279,7 +285,7 @@ def verify_final_manifest(manifest, report):
     _require_exact_keys(manifest, _MANIFEST_ENVELOPE_KEYS, "final manifest")
     if manifest.get("schema") != MANIFEST_SCHEMA:
         raise BackupManifestError("final manifest has an unknown schema")
-    if manifest.get("version") != SCHEMA_VERSION:
+    if manifest.get("version") not in SCHEMA_VERSIONS:
         raise BackupManifestError("final manifest has an unsupported version")
     verification = manifest.get("verification")
     _require_mapping(verification, "final manifest verification block")

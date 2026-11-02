@@ -22,17 +22,32 @@ cut. Holding no barrier and never modifying frozen artifacts, it
      ledger is reopened under the cut scope, its bytes re-verified
      (``ledger_shape(verify=True)``) and its stable ledger digest/shape
      folded into the assembly core;
-3. builds the single digest chain exclusively through
+3. once H/W/R/R2 are green, stages the A2 self-contained payload inside
+   the same staging directory: every W checkpoint byte, every R closure
+   ``present`` object byte (one physical file per digest, from the real
+   content-addressed cabinets, re-hashed on landing) and a consistent
+   read-only snapshot of the R2 ledger (``VACUUM INTO`` with the sqlite
+   backup API as fallback, reopened and re-verified), each landed 0600
+   with O_EXCL|O_NOFOLLOW and individually re-verified; the per-file
+   inventory and the present-set/R2 reconciliation block are folded into
+   the assembly core and therefore covered by the core digest;
+4. builds the single digest chain exclusively through
    ``build_verification_report -> build_final_manifest ->
    verify_final_manifest`` (no second serialization or hash scheme);
-4. publishes the package directory atomically (exclusive 0600 files +
+5. publishes the package directory atomically (exclusive 0600 files +
    fsync, whole-directory rename, target-exists refusal, every walk step
    dir_fd/O_NOFOLLOW, 0700 directories, no symlink, no group/world
    write), and only then moves the ``current`` pointer with one atomic
    rename (temp file + fsync + rename + directory fsync), so a crash can
-   never leave a half or dangling pointer;
-5. records failed/incomplete families as outcome evidence; ``current``
-   is never moved unless every family is green.
+   never leave a half or dangling pointer; the payload tree rides the
+   same rename and is never back-filled after publication;
+6. records failed/incomplete families as outcome evidence; ``current``
+   is never moved unless every family is green — any payload copy,
+   re-hash, reconciliation or inventory failure fails closed exactly
+   like a red evidence family (failure outcome, no rename, no current).
+   Legacy v1 three-file packages stay readable forever; the read-only
+   :func:`verify_package_payload` entry verifies a package directory in
+   isolation, including after it has been copied to a clean machine.
 
 The module is pure library: it imports no SAM webapp/harness/employees
 code, nothing imports it from the application graph, it never connects
@@ -50,6 +65,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import sqlite3
 import stat as stat_module
 import subprocess
 from dataclasses import dataclass
@@ -67,12 +83,21 @@ from app.facts_tree.backup_coordinator import (
 )
 from app.facts_tree.backup_manifest import (
     DIGEST_ALGORITHM,
+    LEGACY_THREE_FILE_VERSION,
     BackupManifestError,
     build_final_manifest,
     build_verification_report,
     compute_report_digest,
     verify_final_manifest,
 )
+# Reusing the closure family's private lexical sanitizer, read-only: the
+# payload leg must never invent a parallel path check or bypass it. The
+# mapping-object cabinet class is imported through that same family module
+# (it is already ClosureStores' public parameter type and therefore
+# already in this module's runtime import graph): assembly never imports
+# the app.storage layer directly, and the offline AST allow-list is
+# unchanged. It is used only to reopen a copied ledger snapshot against
+# the copied in-package cabinet, never to write production objects.
 from app.facts_tree.backup_object_closure import (
     CLOSURE_COMPLETE,
     CLOSURE_INCOMPLETE,
@@ -87,12 +112,16 @@ from app.facts_tree.backup_object_closure import (
     STATUS_OUT_OF_SCOPE,
     STATUS_PRESENT,
     STATUS_UNSAFE_PATH,
+    STORAGE_ARCHIVE,
+    STORAGE_MAPPING_OBJECTS,
     ClosureScope,
     ClosureStores,
     ObjectClosureError,
     ObjectReference,
     ObjectScope,
     ReferenceRoot,
+    VersionedMappingObjectStore,
+    _clean_relative_coordinate,
     collect_object_closure,
 )
 from app.facts_tree.git_repository import (
@@ -137,6 +166,18 @@ OUTCOME_NAME = "outcome.json"
 # silently (a missing ledger is an R2 failure, not an empty success).
 LEDGER_DB_FILENAME = "mapping-version-index.sqlite"
 
+# A2 self-contained package layout (purely additive beside the three
+# A1 package files; the whole tree rides the same whole-directory rename).
+PAYLOAD_DIRNAME = "payload"
+PAYLOAD_W_DIRNAME = "w"
+PAYLOAD_R_DIRNAME = "r"
+PAYLOAD_SCHEMA = "sam.f001.backup_payload"
+PAYLOAD_VERSION = 1
+PAYLOAD_TMP_PREFIX = ".payload.tmp-"
+PAYLOAD_FAMILY_W = "w"
+PAYLOAD_FAMILY_R = "r"
+PAYLOAD_FAMILY_R2 = "r2"
+
 # -- result vocabulary --------------------------------------------------------
 
 STATUS_PUBLISHED = "published"
@@ -147,6 +188,7 @@ FAMILY_H = "H"
 FAMILY_W = "W"
 FAMILY_R = "R"
 FAMILY_R2 = "R2"
+FAMILY_PAYLOAD = "payload"
 FAMILY_PUBLISH = "publish"
 
 SEVERITY_FAILED = "failed"
@@ -154,11 +196,13 @@ SEVERITY_INCOMPLETE = "incomplete"
 
 # Crash injection phases (storage/process boundary seam for tests).
 PHASE_BUNDLE_EXPORTED = "bundle_exported"
+PHASE_PAYLOAD_STAGED = "payload_staged"
 PHASE_MANIFEST_STAGED = "manifest_staged"
 PHASE_PACKAGE_PUBLISHED = "package_published"
 PHASE_CURRENT_SWITCHED = "current_switched"
 CRASH_PHASES = frozenset((
     PHASE_BUNDLE_EXPORTED,
+    PHASE_PAYLOAD_STAGED,
     PHASE_MANIFEST_STAGED,
     PHASE_PACKAGE_PUBLISHED,
     PHASE_CURRENT_SWITCHED,
@@ -185,6 +229,24 @@ R_LEDGER_GAPS = "ledger_byte_gaps"
 R_LEDGER_UNREADABLE = "ledger_unreadable"
 R_PACKAGE_CONFLICT = "published_package_conflict"
 R_FREEZE_RECORD_MALFORMED = "freeze_record_malformed"
+
+# A2 payload (self-contained package) failure codes. Every one of these
+# fails closed: no package publication, no current switch, no rename while
+# a payload leg is red.
+PAYLOAD_W_BYTE_MISMATCH = "payload_w_byte_mismatch"
+PAYLOAD_R_BYTE_MISMATCH = "payload_r_byte_mismatch"
+PAYLOAD_R_PRESENT_SET_MISMATCH = "payload_r_present_set_mismatch"
+PAYLOAD_R_UNSAFE_COORDINATE = "payload_unsafe_path"
+PAYLOAD_R2_COPY_FAILED = "payload_r2_copy_failed"
+PAYLOAD_R2_SHAPE_MISMATCH = "payload_r2_shape_mismatch"
+PAYLOAD_R2_MISSING = "payload_r2_missing"
+PAYLOAD_WRITE_FAILED = "payload_write_failed"
+# Inventory mismatch covers missing files, extra undeclared entries
+# (including smuggled files/empty directories/symlinks) and any byte or
+# digest disagreement between the manifest inventory and the payload tree.
+PAYLOAD_INVENTORY_MISMATCH = "payload_inventory_mismatch"
+PAYLOAD_MALFORMED = "payload_manifest_malformed"
+PAYLOAD_MISSING = "payload_missing"
 
 _PACKAGE_FILES = (BUNDLE_NAME, MANIFEST_NAME, REPORT_NAME)
 _ENTRY_STATUSES = (
@@ -422,6 +484,24 @@ class AssemblyResult:
     package: str | None
     outcome: str | None
     recovered: bool
+
+
+@dataclass(frozen=True)
+class PayloadVerification:
+    """Read-only verdict for one package directory's payload tree.
+
+    ``self_contained`` is True only for a v2 envelope whose every payload
+    file is present and byte-verified against the manifest inventory, with
+    no extra or missing entry. Legacy v1 three-file packages verify as
+    non-self-contained without error; ``status == "damaged"`` names a v2
+    package whose payload tree fails any closed check, with stable reasons.
+    """
+
+    self_contained: bool
+    status: str  # "self_contained" | "legacy_three_file" | "damaged"
+    file_count: int
+    total_bytes: int
+    reasons: tuple[str, ...]
 
 
 # -- low-level hardened filesystem helpers ------------------------------------
@@ -1269,11 +1349,595 @@ def _verify_r2(plan, *, failures):
     return block, check_block
 
 
+# -- A2 self-contained payload -------------------------------------------------
+#
+# After H/W/R/R2 have independently verified, this leg copies the verified
+# bytes INTO the staging package directory, so a published package is
+# physically self-contained. Every copy is read-only at the source, lands
+# as a fresh 0600 O_EXCL|O_NOFOLLOW file, and is independently re-hashed
+# on landing against the already-verified declaration. Anything that
+# cannot be copied or reproduced fails closed: no rename, no current
+# switch, a failure outcome only.
+
+
+_PAYLOAD_SCAFFOLD = (
+    (PAYLOAD_DIRNAME,),
+    (PAYLOAD_DIRNAME, PAYLOAD_W_DIRNAME),
+    (PAYLOAD_DIRNAME, PAYLOAD_R_DIRNAME),
+    (PAYLOAD_DIRNAME, PAYLOAD_R_DIRNAME, STORAGE_ARCHIVE),
+    (PAYLOAD_DIRNAME, PAYLOAD_R_DIRNAME, STORAGE_MAPPING_OBJECTS),
+)
+_PAYLOAD_LEDGER_COORDINATE = PAYLOAD_DIRNAME + "/" + LEDGER_DB_FILENAME
+_PAYLOAD_STORAGE_CLASSES = frozenset((STORAGE_ARCHIVE, STORAGE_MAPPING_OBJECTS))
+_HEX64_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+_PAYLOAD_CHECK = "copy"
+# v2 envelope version stamped by backup_manifest; imported aliased because
+# this module's own SCHEMA_VERSION (current pointer/core) is a different
+# orthogonal version that must stay at 1.
+_ENVELOPE_SELF_CONTAINED_VERSION = 2
+
+
+@dataclass(frozen=True)
+class _PayloadStaged:
+    """The staged payload tree plus its digest-bound inventory block."""
+
+    block: dict
+    file_count: int
+    total_bytes: int
+
+
+def _payload_failure(reason, coordinate, failures):
+    failures.append(
+        AssemblyFailure(FAMILY_PAYLOAD, _PAYLOAD_CHECK, coordinate, reason))
+
+
+def _payload_clean_coordinate(value, label):
+    """Reuse the closure family's lexical sanitizer; ''/raise both unsafe."""
+    try:
+        return _clean_relative_coordinate(value, label)
+    except ObjectClosureError:
+        return ""
+
+
+def _copy_regular_pinned(src_fd, src_name, dst_fd, dst_name):
+    """Stream one pinned regular file into a fresh O_EXCL 0600 file.
+
+    Both descriptors are held by the caller and every open is relative
+    with O_NOFOLLOW, so neither side can be a symlink; the source is
+    opened O_RDONLY only.
+    """
+    in_fd = os.open(
+        src_name, os.O_RDONLY | os.O_NOFOLLOW | _O_CLOEXEC, dir_fd=src_fd)
+    # Pinned absolute landing: write opens must not rely on dir_fd-relative
+    # names only at the descriptor layer.
+    out_fd = os.open(
+        _pinned(dst_fd, dst_name), _FILE_WRITE_FLAGS, _FILE_MODE)
+    try:
+        while True:
+            chunk = os.read(in_fd, _READ_CHUNK)
+            if not chunk:
+                break
+            view = memoryview(chunk)
+            while view:
+                written = os.write(out_fd, view[:_READ_CHUNK])
+                view = view[written:]
+        os.fsync(out_fd)
+    finally:
+        os.close(out_fd)
+        os.close(in_fd)
+    result = _probe_path(dst_fd, dst_name)
+    if result is None or not stat_module.S_ISREG(result.st_mode):
+        raise AssemblyStorageError("payload landing is not a regular file")
+    if result.st_mode & 0o077 or result.st_uid != os.geteuid():
+        raise AssemblyStorageError("payload landing is not a private 0600 file")
+
+
+def _stage_payload_w(*, w_evidence, cut_fd, w_fd, failures):
+    """Copy every verified W checkpoint; re-hash each landing. Returns files."""
+    files = []
+    total = 0
+    for entry in sorted(w_evidence.components, key=lambda item: item["role"]):
+        name = entry["role"] + ".sqlite"
+        coordinate = PAYLOAD_DIRNAME + "/" + PAYLOAD_W_DIRNAME + "/" + name
+        try:
+            _copy_regular_pinned(cut_fd, name, w_fd, name)
+        except OSError:
+            _payload_failure(PAYLOAD_WRITE_FAILED, coordinate, failures)
+            return None
+        try:
+            verify_backup_component(
+                w_fd,
+                relative_path=name,
+                size_bytes=entry["size_bytes"],
+                sha256_digest=entry["sha256_digest"],
+            )
+        except BackupComponentValidationError:
+            _payload_failure(PAYLOAD_W_BYTE_MISMATCH, coordinate, failures)
+            return None
+        files.append({
+            "path": coordinate,
+            "family": PAYLOAD_FAMILY_W,
+            "role": entry["role"],
+            "size_bytes": entry["size_bytes"],
+            "sha256_digest": entry["sha256_digest"],
+        })
+        total += entry["size_bytes"]
+    return files, total
+
+
+def _payload_r_source_bytes(stores, storage_class, digest_hex):
+    """Narrowest read-only cabinet access: verified bytes for one digest."""
+    if storage_class == STORAGE_MAPPING_OBJECTS:
+        return stores.mapping_objects.get(digest_hex)
+    stored = stores.archive.get(digest_hex)
+    data = stores.archive.get_bytes(digest_hex)
+    if len(data) != stored.size_bytes:
+        raise ValueError("archive object size disagrees with its metadata")
+    return data
+
+
+def _stage_payload_r(*, closure_pair, stores, r_archive_fd, r_mapping_fd,
+                     failures):
+    """Copy only closure ``present`` objects, one physical file per digest.
+
+    Multiple logical ids sharing one digest aggregate onto one physical
+    file (``logical_ids``); the landed set must reproduce the closure's
+    present digests, logical count and per-class counts exactly.
+    """
+    _evidence, result = closure_pair
+    present = result.entries_with(STATUS_PRESENT)
+    physical = {}  # (class, hex) -> inventory file dict
+    digest_class = {}
+    shard_fds = {}
+
+    def shard_fd_for(class_fd, storage_class, shard):
+        key = (storage_class, shard)
+        cached = shard_fds.get(key)
+        if cached is None:
+            cached = _ensure_private_dir(class_fd, shard)
+            shard_fds[key] = cached
+        return cached
+
+    try:
+        for entry in present:
+            declared = entry.sha256_digest
+            digest_hex = declared[len(_DIGEST_PREFIX):] \
+                if isinstance(declared, str) else ""
+            storage_class = entry.storage_class
+            if (not _HEX64_RE.fullmatch(digest_hex)
+                    or storage_class not in _PAYLOAD_STORAGE_CLASSES
+                    or not isinstance(entry.size_bytes, int)
+                    or isinstance(entry.size_bytes, bool)
+                    or entry.size_bytes < 0
+                    or not _payload_clean_coordinate(
+                        entry.relative_path, "closure relative_path")):
+                _payload_failure(
+                    PAYLOAD_R_UNSAFE_COORDINATE,
+                    "r/" + str(entry.relative_path), failures)
+                return None
+            if digest_class.setdefault(digest_hex, storage_class) != storage_class:
+                _payload_failure(
+                    PAYLOAD_R_PRESENT_SET_MISMATCH,
+                    "r/" + digest_hex, failures)
+                return None
+            shard = digest_hex[:2]
+            coordinate = "%s/%s/%s/%s/%s" % (
+                PAYLOAD_DIRNAME, PAYLOAD_R_DIRNAME, storage_class,
+                shard, digest_hex)
+            if (storage_class, digest_hex) in physical:
+                physical[(storage_class, digest_hex)]["logical_ids"].add(
+                    entry.logical_id)
+                continue
+            class_fd = (r_mapping_fd if storage_class == STORAGE_MAPPING_OBJECTS
+                        else r_archive_fd)
+            try:
+                data = _payload_r_source_bytes(stores, storage_class,
+                                               digest_hex)
+            except (KeyError, ValueError, RuntimeError, OSError):
+                # The closure verified these bytes moments ago: a cabinet
+                # that lost or mutated the object in between is reproduced
+                # on no other bytes; fail closed.
+                _payload_failure(
+                    PAYLOAD_R_BYTE_MISMATCH, coordinate, failures)
+                return None
+            try:
+                shard_fd = shard_fd_for(class_fd, storage_class, shard)
+                _write_exclusive_file(shard_fd, digest_hex, data)
+                verify_backup_component(
+                    class_fd,
+                    relative_path="%s/%s" % (shard, digest_hex),
+                    size_bytes=entry.size_bytes,
+                    sha256_digest=declared,
+                )
+            except (OSError, BackupComponentValidationError):
+                _payload_failure(
+                    PAYLOAD_R_BYTE_MISMATCH, coordinate, failures)
+                return None
+            physical[(storage_class, digest_hex)] = {
+                "path": coordinate,
+                "family": PAYLOAD_FAMILY_R,
+                "storage_class": storage_class,
+                "logical_ids": {entry.logical_id},
+                "size_bytes": entry.size_bytes,
+                "sha256_digest": declared,
+            }
+    finally:
+        for fd in shard_fds.values():
+            os.close(fd)
+
+    declared_digests = {entry.sha256_digest for entry in present}
+    landed_digests = {
+        _DIGEST_PREFIX + digest for _cls, digest in physical}
+    if declared_digests != landed_digests or len(physical) != len(landed_digests):
+        _payload_failure(
+            PAYLOAD_R_PRESENT_SET_MISMATCH, "r/present-set", failures)
+        return None
+
+    files = []
+    by_class = {}
+    for storage_class in (STORAGE_ARCHIVE, STORAGE_MAPPING_OBJECTS):
+        by_class[storage_class] = {
+            "entries": 0, "files": 0, "bytes": 0}
+    for entry in present:
+        by_class[entry.storage_class]["entries"] += 1
+    for (storage_class, digest_hex), item in physical.items():
+        logical_ids = sorted(item.pop("logical_ids"))
+        if not logical_ids:
+            _payload_failure(
+                PAYLOAD_R_PRESENT_SET_MISMATCH,
+                "r/" + digest_hex, failures)
+            return None
+        item["logical_ids"] = logical_ids
+        files.append(item)
+        stats = by_class[storage_class]
+        stats["files"] += 1
+        stats["bytes"] += item["size_bytes"]
+
+    block = {
+        "present_entries": len(present),
+        "physical_files": len(physical),
+        "total_bytes": sum(item["size_bytes"] for item in files),
+        "by_class": {
+            storage_class: {
+                "entries": by_class[storage_class]["entries"],
+                "files": by_class[storage_class]["files"],
+                "bytes": by_class[storage_class]["bytes"],
+            }
+            for storage_class in (STORAGE_ARCHIVE, STORAGE_MAPPING_OBJECTS)
+        },
+        "digests": sorted(landed_digests),
+        "r_list_digest": result.r_list_digest,
+    }
+    return files, block
+
+
+def _open_ro_sqlite(path):
+    con = sqlite3.connect(
+        Path(os.path.abspath(path)).as_uri() + "?mode=ro", uri=True)
+    con.execute("PRAGMA busy_timeout=5000")
+    return con
+
+
+def _snapshot_ledger_into(*, source_db, payload_fd, tmp_name):
+    """Consistent read-only snapshot, VACUUM INTO first, backup API fallback.
+
+    Returns True on success; the product sits at tmp_name inside the
+    payload directory and is chmod-ed 0600. A simple file copy of a live
+    rollback-journal database is forbidden (torn transaction risk); both
+    paths are real sqlite snapshot primitives verified on this platform.
+    """
+    ro = _open_ro_sqlite(source_db)
+    try:
+        ro.execute("VACUUM INTO ?", (_pinned(payload_fd, tmp_name),))
+    except sqlite3.Error:
+        try:
+            os.unlink(tmp_name, dir_fd=payload_fd)
+        except OSError:
+            pass
+        out_path = _pinned(payload_fd, tmp_name)
+        # Create the target ourselves O_EXCL 0600 so the fallback product
+        # is born private; sqlite then attaches to the existing name.
+        born = os.open(
+            _pinned(payload_fd, tmp_name), _FILE_WRITE_FLAGS, _FILE_MODE)
+        os.close(born)
+        try:
+            out = sqlite3.connect(out_path)
+            try:
+                ro.backup(out)
+            finally:
+                out.close()
+        except sqlite3.Error:
+            try:
+                os.unlink(tmp_name, dir_fd=payload_fd)
+            except OSError:
+                pass
+            return False
+    finally:
+        ro.close()
+    fix_fd = os.open(
+        tmp_name, os.O_RDONLY | os.O_NOFOLLOW | _O_CLOEXEC,
+        dir_fd=payload_fd)
+    try:
+        os.fchmod(fix_fd, _FILE_MODE)
+        result = os.fstat(fix_fd)
+    finally:
+        os.close(fix_fd)
+    if (not stat_module.S_ISREG(result.st_mode)
+            or result.st_uid != os.geteuid()
+            or result.st_mode & 0o077):
+        try:
+            os.unlink(tmp_name, dir_fd=payload_fd)
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def _stage_payload_r2(*, plan, identity, ledger_block, r2_check, payload_fd,
+                      r_mapping_fd, copied_mapping_digests, failures):
+    """Snapshot the R2 ledger plus any backing bytes the R leg did not copy.
+
+    The snapshot is reopened inside the package against the package's own
+    mapping cabinet and must reproduce the source ledger shape/digest, so
+    the package verifies standalone with no external ledger or cabinet.
+    """
+    if not isinstance(r2_check, dict) or r2_check.get("status") == "skipped":
+        return [], {"status": "skipped"}
+    if r2_check.get("status") == "failed" or ledger_block is None:
+        _payload_failure(
+            PAYLOAD_R2_MISSING, _PAYLOAD_LEDGER_COORDINATE, failures)
+        return None
+
+    try:
+        source = MappingVersionLedger(
+            plan.version_index_root,
+            installation_id=identity.installation_id,
+            company_id=identity.company_id,
+            object_store=plan.stores.mapping_objects,
+        )
+    except (MappingVersionIndexError, MappingVersionScopeError,
+            RuntimeError, OSError, ValueError):
+        _payload_failure(
+            PAYLOAD_R2_COPY_FAILED, _PAYLOAD_LEDGER_COORDINATE, failures)
+        return None
+    try:
+        try:
+            shape = source.ledger_shape(verify=True)
+            digest = source.ledger_digest()
+            registrations = source.canonical_payload()["registrations"]
+        except (MappingVersionIndexError, RuntimeError, OSError,
+                ValueError, sqlite3.Error):
+            _payload_failure(
+                PAYLOAD_R2_COPY_FAILED, _PAYLOAD_LEDGER_COORDINATE, failures)
+            return None
+    finally:
+        source.close()
+    if digest != ledger_block.get("ledger_digest"):
+        _payload_failure(
+            PAYLOAD_R2_SHAPE_MISMATCH, _PAYLOAD_LEDGER_COORDINATE, failures)
+        return None
+
+    # Backing objects for ledger rows that were not R-closure present:
+    # without them the copied ledger could not be shape-verified from the
+    # package cabinet on a clean machine.
+    files = []
+    shard_fds = {}
+    try:
+        for row in sorted(registrations, key=lambda item: (
+                item["logical_source_id"], item["version_no"])):
+            declared = row["sha256_digest"]
+            digest_hex = declared[len(_DIGEST_PREFIX):]
+            if declared in copied_mapping_digests:
+                continue
+            shard = digest_hex[:2]
+            coordinate = "%s/%s/%s/%s/%s" % (
+                PAYLOAD_DIRNAME, PAYLOAD_R_DIRNAME,
+                STORAGE_MAPPING_OBJECTS, shard, digest_hex)
+            try:
+                data = plan.stores.mapping_objects.get(digest_hex)
+                shard_fd = shard_fds.get(shard)
+                if shard_fd is None:
+                    shard_fd = _ensure_private_dir(r_mapping_fd, shard)
+                    shard_fds[shard] = shard_fd
+                _write_exclusive_file(shard_fd, digest_hex, data)
+                verify_backup_component(
+                    r_mapping_fd,
+                    relative_path="%s/%s" % (shard, digest_hex),
+                    size_bytes=row["size_bytes"],
+                    sha256_digest=declared,
+                )
+            except (KeyError, ValueError, RuntimeError, OSError,
+                    BackupComponentValidationError):
+                _payload_failure(
+                    PAYLOAD_R2_COPY_FAILED, coordinate, failures)
+                return None
+            files.append({
+                "path": coordinate,
+                "family": PAYLOAD_FAMILY_R2,
+                "storage_class": STORAGE_MAPPING_OBJECTS,
+                "ledger_backing": True,
+                "size_bytes": row["size_bytes"],
+                "sha256_digest": declared,
+            })
+    finally:
+        for fd in shard_fds.values():
+            os.close(fd)
+
+    source_db = Path(plan.version_index_root) / LEDGER_DB_FILENAME
+    tmp_name = PAYLOAD_TMP_PREFIX + _nonce()
+    try:
+        snap_ok = _snapshot_ledger_into(
+            source_db=source_db, payload_fd=payload_fd, tmp_name=tmp_name)
+    except (OSError, sqlite3.Error):
+        snap_ok = False
+    if not snap_ok:
+        _payload_failure(
+            PAYLOAD_R2_COPY_FAILED, _PAYLOAD_LEDGER_COORDINATE, failures)
+        return None
+    if _probe_path(payload_fd, LEDGER_DB_FILENAME) is not None:
+        _payload_failure(
+            PAYLOAD_R2_COPY_FAILED, _PAYLOAD_LEDGER_COORDINATE, failures)
+        return None
+    try:
+        os.rename(
+            tmp_name, LEDGER_DB_FILENAME,
+            src_dir_fd=payload_fd, dst_dir_fd=payload_fd)
+        _fsync_dir_fd(payload_fd)
+        payload_abs = Path(_fd_real_path(payload_fd))
+        cabinet = VersionedMappingObjectStore(
+            payload_abs / PAYLOAD_R_DIRNAME / STORAGE_MAPPING_OBJECTS)
+        snapshot = MappingVersionLedger(
+            payload_abs,
+            installation_id=identity.installation_id,
+            company_id=identity.company_id,
+            object_store=cabinet,
+        )
+    except (MappingVersionIndexError, RuntimeError, OSError,
+            ValueError, sqlite3.Error):
+        _payload_failure(
+            PAYLOAD_R2_MISSING, _PAYLOAD_LEDGER_COORDINATE, failures)
+        return None
+    try:
+        try:
+            snap_shape = snapshot.ledger_shape(verify=True)
+            snap_digest = snapshot.ledger_digest()
+        except (MappingVersionIndexError, RuntimeError, OSError,
+                ValueError, sqlite3.Error):
+            _payload_failure(
+                PAYLOAD_R2_SHAPE_MISMATCH, _PAYLOAD_LEDGER_COORDINATE,
+                failures)
+            return None
+    finally:
+        snapshot.close()
+    if snap_digest != digest:
+        _payload_failure(
+            PAYLOAD_R2_SHAPE_MISMATCH, _PAYLOAD_LEDGER_COORDINATE, failures)
+        return None
+    for key in ("total_sources", "total_versions", "total_gaps", "sources"):
+        if snap_shape.get(key) != shape.get(key):
+            _payload_failure(
+                PAYLOAD_R2_SHAPE_MISMATCH, _PAYLOAD_LEDGER_COORDINATE,
+                failures)
+            return None
+    try:
+        digest_hex, size_bytes = _sha256_file_at(
+            payload_fd, LEDGER_DB_FILENAME)
+    except OSError:
+        _payload_failure(
+            PAYLOAD_R2_COPY_FAILED, _PAYLOAD_LEDGER_COORDINATE, failures)
+        return None
+    files.append({
+        "path": _PAYLOAD_LEDGER_COORDINATE,
+        "family": PAYLOAD_FAMILY_R2,
+        "size_bytes": size_bytes,
+        "sha256_digest": _DIGEST_PREFIX + digest_hex,
+    })
+    block = {
+        "status": "ok",
+        "ledger_digest": digest,
+        "total_sources": shape["total_sources"],
+        "total_versions": shape["total_versions"],
+        "total_gaps": shape["total_gaps"],
+        "sources": [
+            {
+                "logical_source_id": source["logical_source_id"],
+                "versions": source["versions"],
+                "gaps": source["gaps"],
+                "gap_versions": list(source["gap_versions"]),
+            }
+            for source in shape["sources"]
+        ],
+        "ledger_file_sha256": _DIGEST_PREFIX + digest_hex,
+        "ledger_file_size": size_bytes,
+        "backing_files": len(files) - 1,
+    }
+    return files, block
+
+
+def _stage_payload(*, plan, identity, w_evidence, closure_pair, ledger_block,
+                   r2_check, cut_fd, staging_fd, failures, hook):
+    """Stage the full payload tree; append payload failures on any red leg."""
+    opened = []
+    try:
+        payload_fd = _ensure_private_dir(staging_fd, PAYLOAD_DIRNAME)
+        opened.append(payload_fd)
+        w_fd = _ensure_private_dir(payload_fd, PAYLOAD_W_DIRNAME)
+        opened.append(w_fd)
+        r_fd = _ensure_private_dir(payload_fd, PAYLOAD_R_DIRNAME)
+        opened.append(r_fd)
+        r_archive_fd = _ensure_private_dir(r_fd, STORAGE_ARCHIVE)
+        opened.append(r_archive_fd)
+        r_mapping_fd = _ensure_private_dir(r_fd, STORAGE_MAPPING_OBJECTS)
+        opened.append(r_mapping_fd)
+
+        w_result = _stage_payload_w(
+            w_evidence=w_evidence, cut_fd=cut_fd, w_fd=w_fd,
+            failures=failures)
+        if w_result is None:
+            return None
+        w_files, w_bytes = w_result
+
+        r_result = _stage_payload_r(
+            closure_pair=closure_pair, stores=plan.stores,
+            r_archive_fd=r_archive_fd, r_mapping_fd=r_mapping_fd,
+            failures=failures)
+        if r_result is None:
+            return None
+        r_files, r_block = r_result
+
+        copied_mapping_digests = {
+            item["sha256_digest"]
+            for item in r_files
+            if item["storage_class"] == STORAGE_MAPPING_OBJECTS
+        }
+        r2_result = _stage_payload_r2(
+            plan=plan, identity=identity, ledger_block=ledger_block,
+            r2_check=r2_check, payload_fd=payload_fd,
+            r_mapping_fd=r_mapping_fd,
+            copied_mapping_digests=copied_mapping_digests,
+            failures=failures)
+        if r2_result is None:
+            return None
+        r2_files, r2_block = r2_result
+    except (OSError, BackupAssemblyError):
+        # A read-only staging target (0500), ENOSPC and friends surface
+        # either as OSError or as AssemblyStorageError from
+        # _ensure_private_dir; both are payload write failures, never an
+        # exception past the assembly boundary.
+        _payload_failure(PAYLOAD_WRITE_FAILED, PAYLOAD_DIRNAME, failures)
+        return None
+    finally:
+        for fd in reversed(opened):
+            os.close(fd)
+
+    files = sorted(w_files + r_files + r2_files, key=lambda item: item["path"])
+    if len({item["path"] for item in files}) != len(files):
+        _payload_failure(PAYLOAD_MALFORMED, PAYLOAD_DIRNAME, failures)
+        return None
+    total = sum(item["size_bytes"] for item in files)
+    block = {
+        "schema": PAYLOAD_SCHEMA,
+        "version": PAYLOAD_VERSION,
+        "files": files,
+        "w": {
+            "roles": sorted(item["role"] for item in w_files),
+            "files": len(w_files),
+            "total_bytes": w_bytes,
+        },
+        "r": r_block,
+        "r2": r2_block,
+        "totals": {"files": len(files), "total_bytes": total},
+    }
+    hook(PHASE_PAYLOAD_STAGED)
+    return _PayloadStaged(
+        block=block, file_count=len(files), total_bytes=total)
+
+
 # -- core / report construction ------------------------------------------------
 
 
 def _build_core_payload(*, identity, freeze_core, bundle, w_evidence,
-                        closure_pair, ledger_block):
+                        closure_pair, ledger_block, payload_block):
     authority = freeze_core["authority"]
     databases = [
         {
@@ -1326,6 +1990,7 @@ def _build_core_payload(*, identity, freeze_core, bundle, w_evidence,
         "databases": databases,
         "closure": closure_block,
         "mapping_ledger": ledger_block,
+        "payload": payload_block,
     }
 
 
@@ -1337,7 +2002,7 @@ def _root_coordinates(roots):
 
 
 def _build_checks(*, pin_ref, frozen_commit, bundle, w_evidence,
-                  closure_pair, r2_check):
+                  closure_pair, r2_check, payload_staged):
     checks = {}
     if bundle is not None:
         checks["H.pin_readback"] = {
@@ -1397,6 +2062,12 @@ def _build_checks(*, pin_ref, frozen_commit, bundle, w_evidence,
             "findings": findings,
         }
     checks["R2.mapping_ledger"] = dict(r2_check)
+    if payload_staged is not None:
+        checks["payload.copy"] = {
+            "status": "ok",
+            "files": payload_staged.file_count,
+            "total_bytes": payload_staged.total_bytes,
+        }
     return checks
 
 
@@ -1405,6 +2076,7 @@ _FAILURE_CHECK_KEYS = {
     FAMILY_W: "W.%s",
     FAMILY_R: "R.%s",
     FAMILY_R2: "R2.%s",
+    FAMILY_PAYLOAD: "payload.%s",
 }
 
 
@@ -1500,9 +2172,439 @@ def _assess_package_files(package_fd):
                 reasons.append("bundle_bytes")
         except OSError:
             reasons.append("bundle_bytes")
+    # A2: a v2 envelope is incomplete without a sound payload tree; a
+    # legacy v1 envelope never carries one and stays exactly as before.
+    if manifest is not None and manifest.get("version") == \
+            _ENVELOPE_SELF_CONTAINED_VERSION:
+        _count, _bytes, payload_reasons = _verify_payload_tree(
+            package_fd, core=manifest["core"])
+        reasons.extend("payload:" + reason for reason in payload_reasons)
     status = "complete" if not reasons else "damaged"
     return (status, core_digest, report_digest, backup_id, barrier_id,
             tuple(reasons))
+
+
+# -- standalone payload verification -------------------------------------------
+
+
+def _payload_probe(parent_fd, name):
+    """O_PATH|O_NOFOLLOW fstat; a symlink or missing entry yields None."""
+    try:
+        fd = os.open(name, _PATH_FLAGS, dir_fd=parent_fd)
+    except OSError:
+        return None
+    try:
+        return os.fstat(fd)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+_PAYLOAD_FAMILIES = frozenset(
+    (PAYLOAD_FAMILY_W, PAYLOAD_FAMILY_R, PAYLOAD_FAMILY_R2))
+# Deepest legitimate payload tree level (payload/r/<class>/<shard>/<file>);
+# anything nested past it cannot be an inventory entry.
+_PAYLOAD_MAX_DEPTH = 4
+
+
+def _parse_payload_inventory(block):
+    """Validate inventory entry shapes. Returns (entries, error_or_None)."""
+    entries = []
+    seen = set()
+    files = block.get("files")
+    if not isinstance(files, list):
+        return None, PAYLOAD_MALFORMED
+    for raw in files:
+        if not isinstance(raw, dict):
+            return None, PAYLOAD_MALFORMED
+        path = raw.get("path")
+        family = raw.get("family")
+        size = raw.get("size_bytes")
+        digest = raw.get("sha256_digest")
+        if (not isinstance(path, str)
+                or family not in _PAYLOAD_FAMILIES
+                or not isinstance(size, int) or isinstance(size, bool)
+                or size < 0
+                or not isinstance(digest, str)
+                or not re.fullmatch(r"\Asha256:[0-9a-f]{64}\Z", digest)
+                or path in seen):
+            return None, PAYLOAD_MALFORMED
+        segments = tuple(path.split("/"))
+        hex_digest = digest[len(_DIGEST_PREFIX):]
+        if family == PAYLOAD_FAMILY_W:
+            file_name = segments[-1] if segments else ""
+            role = file_name[:-len(".sqlite")] \
+                if file_name.endswith(".sqlite") else ""
+            if (segments != (PAYLOAD_DIRNAME, PAYLOAD_W_DIRNAME, file_name)
+                    or not _SAFE_ROLE_RE.fullmatch(role)
+                    or raw.get("role") != role):
+                return None, PAYLOAD_MALFORMED
+        elif family == PAYLOAD_FAMILY_R:
+            # R files live in either cabinet, always at a digest-derived
+            # shard coordinate, and carry the logical ids they back.
+            logical_ids = raw.get("logical_ids")
+            if (segments != (
+                    PAYLOAD_DIRNAME, PAYLOAD_R_DIRNAME,
+                    raw.get("storage_class"), hex_digest[:2], hex_digest)
+                    or raw.get("storage_class") not in
+                    _PAYLOAD_STORAGE_CLASSES
+                    or not isinstance(logical_ids, list) or not logical_ids
+                    or not all(isinstance(item, str) and item
+                               for item in logical_ids)):
+                return None, PAYLOAD_MALFORMED
+        else:  # PAYLOAD_FAMILY_R2: the ledger snapshot or backing bytes
+            is_ledger = segments == (PAYLOAD_DIRNAME, LEDGER_DB_FILENAME)
+            is_backing = (
+                segments == (
+                    PAYLOAD_DIRNAME, PAYLOAD_R_DIRNAME,
+                    STORAGE_MAPPING_OBJECTS, hex_digest[:2], hex_digest)
+                and raw.get("storage_class") == STORAGE_MAPPING_OBJECTS
+                and raw.get("ledger_backing") is True)
+            if not (is_ledger or is_backing):
+                return None, PAYLOAD_MALFORMED
+        seen.add(path)
+        entries.append((path, family, size, digest))
+    return entries, None
+
+
+def _verify_payload_tree(package_fd, *, core):
+    """Re-verify the payload tree of one opened package directory.
+
+    Standalone and read-only: the manifest/report digest chain was
+    verified by the caller. Confirms the inventory block shape, the exact
+    physical tree (no missing/extra file, directory or symlink), every
+    file's mode/ownership and re-hashed bytes, the R present-set/by-class
+    reconciliation against the closure block, and the R2 snapshot by
+    reopening it against the in-package mapping cabinet. Returns
+    ``(file_count, total_bytes, reasons)``; sound iff reasons is empty.
+    """
+    reasons = set()
+    block = core.get("payload") if isinstance(core, dict) else None
+    if block is None:
+        return 0, 0, (PAYLOAD_MISSING,)
+    if (not isinstance(block, dict)
+            or block.get("schema") != PAYLOAD_SCHEMA
+            or block.get("version") != PAYLOAD_VERSION):
+        return 0, 0, (PAYLOAD_MALFORMED,)
+
+    entries, error = _parse_payload_inventory(block)
+    if error is not None:
+        return 0, 0, (error,)
+    file_count = len(entries)
+    total_bytes = sum(size for _path, _family, size, _digest in entries)
+
+    declared_paths = {path for path, _f, _s, _d in entries}
+    declared_dirs = {
+        "/".join(segments)
+        for path in declared_paths
+        for segments in [tuple(path.split("/"))[:-1]]
+        if segments
+    }
+    for scaffold in _PAYLOAD_SCAFFOLD:
+        declared_dirs.add("/".join(scaffold))
+
+    physical_files = {}
+    physical_dirs = set()
+
+    def walk(parent_fd, segments):
+        try:
+            names = sorted(os.listdir(parent_fd))
+        except OSError:
+            reasons.add(PAYLOAD_R_UNSAFE_COORDINATE)
+            return
+        for name in names:
+            st = _payload_probe(parent_fd, name)
+            rel = "/".join(segments + (name,))
+            if st is None:
+                # O_NOFOLLOW refusal (symlink) or a vanished entry. The
+                # name is physically present in the tree but matches
+                # neither a declared file nor a declared directory, so the
+                # inventory disagrees as well as the coordinate being
+                # unsafe: a smuggled symlink is a smuggling attempt.
+                reasons.add(PAYLOAD_R_UNSAFE_COORDINATE)
+                reasons.add(PAYLOAD_INVENTORY_MISMATCH)
+                continue
+            if stat_module.S_ISDIR(st.st_mode):
+                physical_dirs.add(rel)
+                if st.st_uid != os.geteuid() or st.st_mode & 0o077:
+                    reasons.add(PAYLOAD_R_UNSAFE_COORDINATE)
+                # Inventory files never nest past _PAYLOAD_MAX_DEPTH; a
+                # directory at the file level is undeclared either way, and
+                # descending further only wastes the recursion budget.
+                if len(segments) >= _PAYLOAD_MAX_DEPTH:
+                    reasons.add(PAYLOAD_INVENTORY_MISMATCH)
+                    continue
+                try:
+                    child_fd = os.open(
+                        name, _DIR_FLAGS, dir_fd=parent_fd)
+                except OSError:
+                    reasons.add(PAYLOAD_R_UNSAFE_COORDINATE)
+                    continue
+                try:
+                    walk(child_fd, segments + (name,))
+                finally:
+                    os.close(child_fd)
+            elif stat_module.S_ISREG(st.st_mode):
+                physical_files[rel] = st
+                if st.st_uid != os.geteuid() or st.st_mode & 0o077:
+                    reasons.add(PAYLOAD_R_UNSAFE_COORDINATE)
+            else:
+                reasons.add(PAYLOAD_INVENTORY_MISMATCH)
+
+    try:
+        payload_fd = _open_checked_child_dir(package_fd, PAYLOAD_DIRNAME)
+    except (OSError, BackupAssemblyError):
+        return file_count, total_bytes, tuple(sorted(reasons | {
+            PAYLOAD_MISSING}))
+    physical_dirs.add(PAYLOAD_DIRNAME)
+    try:
+        walk(payload_fd, (PAYLOAD_DIRNAME,))
+    finally:
+        os.close(payload_fd)
+
+    # Exact tree equality with the digest-bound inventory: this is the
+    # anti-smuggling boundary (extra files, empty dirs, symlinks, ...).
+    actual_paths = set(physical_files)
+    if actual_paths != declared_paths:
+        reasons.add(PAYLOAD_INVENTORY_MISMATCH)
+    extra_dirs = physical_dirs - declared_dirs
+    missing_dirs = declared_dirs - physical_dirs
+    if extra_dirs or missing_dirs:
+        reasons.add(PAYLOAD_INVENTORY_MISMATCH)
+
+    # Per-file byte verification against the inventory declarations.
+    for path, family, size, digest in entries:
+        if path not in physical_files:
+            continue
+        reason = {
+            PAYLOAD_FAMILY_W: PAYLOAD_W_BYTE_MISMATCH,
+            PAYLOAD_FAMILY_R: PAYLOAD_R_BYTE_MISMATCH,
+            PAYLOAD_FAMILY_R2: PAYLOAD_R2_SHAPE_MISMATCH
+            if path == _PAYLOAD_LEDGER_COORDINATE
+            else PAYLOAD_R_BYTE_MISMATCH,
+        }[family]
+        try:
+            verify_backup_component(
+                package_fd, relative_path=path,
+                size_bytes=size, sha256_digest=digest)
+        except (BackupComponentValidationError, OSError):
+            reasons.add(reason)
+
+    _verify_payload_blocks(
+        block=block, core=core, entries=entries,
+        package_fd=package_fd,
+        present_paths=set(physical_files), present_dirs=physical_dirs,
+        reasons=reasons)
+
+    return file_count, total_bytes, tuple(sorted(reasons))
+
+
+def _verify_payload_blocks(*, block, core, entries, package_fd,
+                           present_paths, present_dirs, reasons):
+    """Cross-check the w/r/r2 summary blocks against inventory + anchors."""
+    by_family = {PAYLOAD_FAMILY_W: [], PAYLOAD_FAMILY_R: [],
+                 PAYLOAD_FAMILY_R2: []}
+    raw_files = {item["path"]: item for item in block["files"]}
+    for path, family, size, digest in entries:
+        by_family[family].append(raw_files[path])
+
+    totals = block.get("totals")
+    if totals != {
+            "files": len(entries),
+            "total_bytes": sum(size for _p, _f, size, _d in entries)}:
+        reasons.add(PAYLOAD_INVENTORY_MISMATCH)
+
+    w_entries = by_family[PAYLOAD_FAMILY_W]
+    w_block = block.get("w")
+    databases = core.get("databases") if isinstance(core, dict) else None
+    expected_roles = sorted(
+        item.get("role") for item in databases) if isinstance(databases, list) \
+        else None
+    if (not isinstance(w_block, dict)
+            or w_block.get("roles") != sorted(
+                item["role"] for item in w_entries)
+            or w_block.get("files") != len(w_entries)
+            or w_block.get("total_bytes") != sum(
+                item["size_bytes"] for item in w_entries)
+            or w_block.get("roles") != expected_roles):
+        reasons.add(PAYLOAD_INVENTORY_MISMATCH)
+    if isinstance(databases, list):
+        db_anchors = {item.get("role"): item for item in databases}
+        for item in w_entries:
+            anchor = db_anchors.get(item["role"])
+            if (not isinstance(anchor, dict)
+                    or anchor.get("sha256_digest") != item["sha256_digest"]
+                    or anchor.get("size_bytes") != item["size_bytes"]):
+                reasons.add(PAYLOAD_W_BYTE_MISMATCH)
+
+    r_entries = by_family[PAYLOAD_FAMILY_R]
+    r_block = block.get("r")
+    if not isinstance(r_block, dict):
+        reasons.add(PAYLOAD_MALFORMED)
+    else:
+        by_class = {}
+        for storage_class in (STORAGE_ARCHIVE, STORAGE_MAPPING_OBJECTS):
+            class_items = [
+                item for item in r_entries
+                if item.get("storage_class") == storage_class]
+            by_class[storage_class] = {
+                "entries": sum(
+                    len(item.get("logical_ids") or ())
+                    for item in class_items),
+                "files": len(class_items),
+                "bytes": sum(item["size_bytes"] for item in class_items),
+            }
+        derived = {
+            "present_entries": sum(
+                len(item.get("logical_ids") or ()) for item in r_entries),
+            "physical_files": len(r_entries),
+            "total_bytes": sum(item["size_bytes"] for item in r_entries),
+            "by_class": by_class,
+            "digests": sorted(item["sha256_digest"] for item in r_entries),
+        }
+        for key, value in derived.items():
+            if r_block.get(key) != value:
+                reasons.add(PAYLOAD_R_PRESENT_SET_MISMATCH)
+        closure_block = core.get("closure") if isinstance(core, dict) else None
+        if (not isinstance(closure_block, dict)
+                or closure_block.get("r_list_digest") != r_block.get(
+                    "r_list_digest")):
+            reasons.add(PAYLOAD_R_PRESENT_SET_MISMATCH)
+
+    r2_entries = by_family[PAYLOAD_FAMILY_R2]
+    r2_block = block.get("r2")
+    ledger_entry = raw_files.get(_PAYLOAD_LEDGER_COORDINATE)
+    ledger_anchor = core.get("mapping_ledger") \
+        if isinstance(core, dict) else None
+    if not isinstance(r2_block, dict):
+        reasons.add(PAYLOAD_MALFORMED)
+    elif r2_block.get("status") == "skipped":
+        if r2_entries or ledger_anchor is not None:
+            reasons.add(PAYLOAD_INVENTORY_MISMATCH)
+    elif r2_block.get("status") == "ok":
+        cabinet_dir = "/".join(
+            (PAYLOAD_DIRNAME, PAYLOAD_R_DIRNAME, STORAGE_MAPPING_OBJECTS))
+        if ledger_entry is None:
+            reasons.add(PAYLOAD_R2_MISSING)
+        else:
+            # One inventory entry is the ledger file itself; the rest are
+            # the R2 backing-object copies.
+            if r2_block.get("backing_files") != len(r2_entries) - 1:
+                reasons.add(PAYLOAD_INVENTORY_MISMATCH)
+            if (r2_block.get("ledger_file_sha256")
+                    != ledger_entry["sha256_digest"]
+                    or r2_block.get("ledger_file_size")
+                    != ledger_entry["size_bytes"]):
+                reasons.add(PAYLOAD_R2_SHAPE_MISMATCH)
+            if (not isinstance(ledger_anchor, dict)
+                    or ledger_anchor.get("ledger_digest")
+                    != r2_block.get("ledger_digest")):
+                reasons.add(PAYLOAD_R2_SHAPE_MISMATCH)
+            # Only reopen when both physical targets are really there:
+            # the ledger/cabinet constructors create-if-absent, and a
+            # read-only verification must never repair a damaged package.
+            if (_PAYLOAD_LEDGER_COORDINATE in present_paths
+                    and cabinet_dir in present_dirs):
+                _verify_payload_r2_snapshot(
+                    r2_block=r2_block, core=core,
+                    package_fd=package_fd, reasons=reasons)
+            else:
+                reasons.add(PAYLOAD_R2_MISSING)
+    else:
+        reasons.add(PAYLOAD_MALFORMED)
+
+
+def _verify_payload_r2_snapshot(*, r2_block, core, package_fd, reasons):
+    """Reopen the copied ledger against the in-package cabinet and compare."""
+    identity = core.get("identity") if isinstance(core, dict) else None
+    if not isinstance(identity, dict):
+        reasons.add(PAYLOAD_MALFORMED)
+        return
+    try:
+        payload_abs = Path(_fd_real_path(package_fd)) / PAYLOAD_DIRNAME
+        cabinet = VersionedMappingObjectStore(
+            payload_abs / PAYLOAD_R_DIRNAME / STORAGE_MAPPING_OBJECTS)
+        snapshot = MappingVersionLedger(
+            payload_abs,
+            installation_id=identity["installation_id"],
+            company_id=identity["company_id"],
+            object_store=cabinet,
+        )
+    except (MappingVersionIndexError, MappingVersionScopeError,
+            RuntimeError, OSError, ValueError, KeyError, sqlite3.Error):
+        reasons.add(PAYLOAD_R2_MISSING)
+        return
+    try:
+        try:
+            shape = snapshot.ledger_shape(verify=True)
+            digest = snapshot.ledger_digest()
+        except (MappingVersionIndexError, MappingVersionScopeError,
+                RuntimeError, OSError, ValueError, sqlite3.Error):
+            reasons.add(PAYLOAD_R2_SHAPE_MISMATCH)
+            return
+    finally:
+        snapshot.close()
+    if digest != r2_block.get("ledger_digest"):
+        reasons.add(PAYLOAD_R2_SHAPE_MISMATCH)
+    for key in ("total_sources", "total_versions", "total_gaps", "sources"):
+        if shape.get(key) != r2_block.get(key):
+            reasons.add(PAYLOAD_R2_SHAPE_MISMATCH)
+
+
+def verify_package_payload(package_dir):
+    """Verify one package directory's self-contained payload in isolation.
+
+    The check is read-only and needs nothing outside the package
+    directory itself, so a package copied alone to a clean machine can be
+    verified there. A legacy v1 three-file package returns a non-error
+    ``legacy_three_file`` verdict (``self_contained`` False); a v2 package
+    with any missing/extra/modified payload entry, a broken digest chain
+    or a non-reproducing R2 snapshot returns ``damaged`` with stable
+    reason codes.
+    """
+    _require_capabilities()
+    root = _validated_root(package_dir)
+    root_fd = os.open(str(root), _DIR_FLAGS)
+    try:
+        manifest_probe = _payload_probe(root_fd, MANIFEST_NAME)
+        report_probe = _payload_probe(root_fd, REPORT_NAME)
+        if manifest_probe is None or report_probe is None \
+                or not stat_module.S_ISREG(manifest_probe.st_mode) \
+                or not stat_module.S_ISREG(report_probe.st_mode):
+            return PayloadVerification(
+                False, "damaged", 0, 0, ("missing_manifest_or_report",))
+        try:
+            manifest = git_format.loads_record(
+                _read_file_at(root_fd, MANIFEST_NAME))
+            report = git_format.loads_record(
+                _read_file_at(root_fd, REPORT_NAME))
+            verify_final_manifest(manifest, report)
+        except (OSError, TypeError, ValueError, KeyError,
+                BackupManifestError):
+            return PayloadVerification(
+                False, "damaged", 0, 0, ("digest_chain",))
+        version = manifest.get("version")
+        if version == LEGACY_THREE_FILE_VERSION:
+            return PayloadVerification(
+                False, "legacy_three_file", 0, 0, ())
+        if version != _ENVELOPE_SELF_CONTAINED_VERSION:
+            return PayloadVerification(
+                False, "damaged", 0, 0, ("unsupported_envelope_version",))
+        core = manifest.get("core")
+        if not isinstance(core, dict):
+            return PayloadVerification(
+                False, "damaged", 0, 0, (PAYLOAD_MALFORMED,))
+        file_count, total_bytes, payload_reasons = _verify_payload_tree(
+            root_fd, core=core)
+    finally:
+        os.close(root_fd)
+    if payload_reasons:
+        return PayloadVerification(
+            False, "damaged", file_count, total_bytes,
+            tuple(payload_reasons))
+    return PayloadVerification(
+        True, "self_contained", file_count, total_bytes, ())
 
 
 # -- main entry point ----------------------------------------------------------
@@ -1657,6 +2759,24 @@ def _assemble_locked(*, plan, backup_id, barrier_id, pin_ref, frozen_commit,
             plan, frozen_commit=frozen_commit, failures=failures)
         ledger_block, r2_check = _verify_r2(plan, failures=failures)
 
+        # A2 payload: a new, strictly post-verification failure surface.
+        # It runs only when every evidence family is green, and any of its
+        # failures routes the run down the same no-rename outcome path.
+        payload_staged = None
+        if not failures:
+            payload_staged = _stage_payload(
+                plan=plan,
+                identity=identity,
+                w_evidence=w_evidence,
+                closure_pair=closure_pair,
+                ledger_block=ledger_block,
+                r2_check=r2_check,
+                cut_fd=cut_fd,
+                staging_fd=staging_fd,
+                failures=failures,
+                hook=hook,
+            )
+
         core_payload = _build_core_payload(
             identity=identity,
             freeze_core=freeze_core,
@@ -1664,6 +2784,8 @@ def _assemble_locked(*, plan, backup_id, barrier_id, pin_ref, frozen_commit,
             w_evidence=w_evidence,
             closure_pair=closure_pair,
             ledger_block=ledger_block,
+            payload_block=(
+                payload_staged.block if payload_staged is not None else None),
         )
         checks = _build_checks(
             pin_ref=pin_ref,
@@ -1672,6 +2794,7 @@ def _assemble_locked(*, plan, backup_id, barrier_id, pin_ref, frozen_commit,
             w_evidence=w_evidence,
             closure_pair=closure_pair,
             r2_check=r2_check,
+            payload_staged=payload_staged,
         )
         _record_failures_in_checks(checks, failures)
         report = build_verification_report(core_payload, checks)

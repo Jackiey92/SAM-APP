@@ -30,10 +30,29 @@ Section 4 scenario map:
   sha256 closure gap ....... test_sha256_cut_fails_closed_on_40_hex_closure_contract
   4.9 network sealed ....... test_assembly_succeeds_with_all_sockets_disabled
   4.7/A7 wiring ............ test_no_wiring_and_offline_import_graph
+  A2 self-contained ........ test_green_path (payload section), test_package_directory_alone_*
+  A2 fail-closed matrix .... test_a2_w_landing_byte_mismatch_fails_closed
+                             test_a2_r_landing_byte_mismatch_fails_closed
+                             test_a2_same_digest_declared_in_two_cabinet_classes_fails_closed
+                             test_a2_poisoned_closure_coordinate_refused_lexically_without_escape
+                             test_a2_r2_snapshot_unwritable_target_fails_closed
+                             test_a2_r2_snapshot_newer_than_digest_fails_closed
+                             test_a2_unwritable_staging_leaf_fails_closed
+                             test_a2_crash_after_payload_staged_leaves_partial_and_rerun_publishes
+                             test_a2_missing_payload_file_and_missing_payload_dir_are_refused
+                             test_a2_smuggled_payload_entry_is_refused (file/dir/symlink)
+                             test_a2_sidecar_manifest_outside_envelope_is_smuggle
+                             test_a2_entity_tamper_without_manifest_change_is_refused
+                             test_a2_inventory_edit_without_resign_breaks_digest_chain
+                             test_a2_missing_ledger_snapshot_is_refused
+                             test_a2_installation_without_ledger_publishes_without_r2_payload
+                             test_a2_payload_copy_leaves_all_sources_byte_identical
+                             test_a2_legacy_v1_three_file_package_still_reads
 """
 from __future__ import annotations
 
 import ast
+import dataclasses
 import glob
 import hashlib
 import os
@@ -60,6 +79,7 @@ from app.facts_tree.backup_assembly import (
     assemble_backup,
     read_current_backup,
     scan_assembly_state,
+    verify_package_payload,
 )
 from app.facts_tree.backup_coordinator import (
     AssemblyIdentity,
@@ -68,17 +88,26 @@ from app.facts_tree.backup_coordinator import (
     WorkDatabaseSpec,
     freeze_consistent_cut,
 )
-from app.facts_tree.backup_manifest import verify_final_manifest
+from app.facts_tree.backup_manifest import (
+    MANIFEST_SCHEMA,
+    REPORT_SCHEMA,
+    build_verification_report,
+    compute_core_digest,
+    compute_report_digest,
+    verify_final_manifest,
+)
 from app.facts_tree.backup_object_closure import (
     OBJECT_ATTACHMENT,
     OBJECT_MAPPING_VERSION,
     OBJECT_ORIGINAL,
     SCOPE_COMPANY,
     SCOPE_INSTALLATION,
+    STORAGE_ARCHIVE,
+    STORAGE_MAPPING_OBJECTS,
     ClosureStores,
 )
 from app.facts_tree.broker_coordination import BrokerCoordination
-from app.facts_tree.git_format import loads_record
+from app.facts_tree.git_format import dumps_record, loads_record
 from app.facts_tree.git_repository import (
     FactsGitRepository,
     maintenance_pin_ref,
@@ -408,6 +437,26 @@ def _is_private_dir(path):
             and result.st_uid == os.geteuid())
 
 
+def _payload_tree(package):
+    """Independent os.scandir inventory of payload/ (never follows links)."""
+    files, dirs = set(), {"payload"}
+
+    def scan(directory, rel):
+        for entry in os.scandir(directory):
+            name = (rel + "/" + entry.name) if rel else entry.name
+            assert not entry.is_symlink(), name
+            if entry.is_dir(follow_symlinks=False):
+                dirs.add(name)
+                scan(entry.path, name)
+            elif entry.is_file(follow_symlinks=False):
+                files.add(name)
+            else:
+                raise AssertionError("non-file/dir payload entry: %s" % name)
+
+    scan(package / "payload", "payload")
+    return files, dirs
+
+
 def _published_bundle_heads(bundle_path):
     """Test-side independent read: git bundle list-heads on the file."""
     result = subprocess.run(
@@ -426,6 +475,15 @@ def _published_bundle_heads(bundle_path):
 def _staging_bundles(world_obj):
     pattern = str(_assembly_root(world_obj) / "staging" / "*" / "authority.bundle")
     return [Path(name) for name in glob.glob(pattern)]
+
+
+def _publish_green_package(world_obj):
+    """Run one real green assembly; return (result, package directory)."""
+    result = assemble_backup(world_obj["make_plan"](), world_obj["green_bid"])
+    assert result.status == "published"
+    package = _package_dir(
+        world_obj, world_obj["green_bid"], world_obj["barrier"])
+    return result, package
 
 
 # ---------------------------------------------------------------------------
@@ -504,10 +562,109 @@ def test_green_path_publishes_package_and_switches_current_atomically(world):
         maintenance_pin_ref(world["green_bid"], world["barrier"]),
     ),)
 
+    # -- A2: the package is physically self-contained --------------------
+    assert manifest["version"] == 2
+    assert report["version"] == 2
+    payload = core["payload"]
+    assert payload["schema"] == "sam.f001.backup_payload"
+    assert payload["version"] == 1
+    inventory = payload["files"]
+
+    # The physical payload tree matches the digest-bound inventory
+    # exactly: no missing file, no smuggled file or empty directory.
+    physical_files, physical_dirs = _payload_tree(package)
+    assert physical_files == {item["path"] for item in inventory}
+    declared_dirs = {
+        "/".join(item["path"].split("/")[:-1]) for item in inventory}
+    declared_dirs |= {
+        "payload", "payload/w", "payload/r",
+        "payload/r/archive", "payload/r/mapping_objects"}
+    assert physical_dirs == declared_dirs
+
+    # Every landed file is a private 0600 regular file and independently
+    # re-hashes to its inventory declaration.
+    total_bytes = 0
+    for item in inventory:
+        leaf = package / item["path"]
+        assert _is_private_regular(leaf)
+        assert item["size_bytes"] == leaf.stat().st_size
+        assert item["sha256_digest"] == (
+            "sha256:" + hashlib.sha256(leaf.read_bytes()).hexdigest())
+        total_bytes += item["size_bytes"]
+    assert payload["totals"] == {
+        "files": len(inventory), "total_bytes": total_bytes}
+
+    # W leg: every core database is copied, bytes anchored on core.
+    w_items = [item for item in inventory if item["family"] == "w"]
+    w_roles = sorted(item["role"] for item in w_items)
+    assert w_roles == ["w_items", "w_ledger"]
+    assert payload["w"] == {
+        "roles": w_roles, "files": 2,
+        "total_bytes": sum(item["size_bytes"] for item in w_items)}
+    databases = {item["role"]: item for item in core["databases"]}
+    for item in w_items:
+        anchor = databases[item["role"]]
+        assert item["sha256_digest"] == anchor["sha256_digest"]
+        assert item["size_bytes"] == anchor["size_bytes"]
+
+    # R leg: exactly the five present closure objects, one physical file
+    # per digest, split across the two real cabinets.
+    r_items = [item for item in inventory if item["family"] == "r"]
+    expected_r_digests = sorted(
+        ref.sha256_digest for ref in world["green_references"]())
+    assert sorted(item["sha256_digest"] for item in r_items) == \
+        expected_r_digests
+    assert payload["r"]["digests"] == expected_r_digests
+    assert payload["r"]["present_entries"] == 5
+    assert payload["r"]["physical_files"] == 5
+    assert payload["r"]["total_bytes"] == sum(
+        item["size_bytes"] for item in r_items)
+    assert payload["r"]["r_list_digest"] == \
+        core["closure"]["r_list_digest"]
+    for storage_class, expected_entries in (("archive", 2),
+                                            ("mapping_objects", 3)):
+        class_items = [
+            item for item in r_items
+            if item["storage_class"] == storage_class]
+        assert payload["r"]["by_class"][storage_class] == {
+            "entries": expected_entries,
+            "files": len(class_items),
+            "bytes": sum(item["size_bytes"] for item in class_items),
+        }
+
+    # R2 leg: the ledger snapshot file plus its file-level digest; every
+    # registered mapping digest was already copied by the R leg, so no
+    # extra backing files are needed.
+    r2_items = [item for item in inventory if item["family"] == "r2"]
+    assert len(r2_items) == 1
+    ledger_item = r2_items[0]
+    assert ledger_item["path"] == "payload/mapping-version-index.sqlite"
+    assert payload["r2"]["status"] == "ok"
+    assert payload["r2"]["total_sources"] == 2
+    assert payload["r2"]["total_versions"] == 3
+    assert payload["r2"]["total_gaps"] == 0
+    assert payload["r2"]["backing_files"] == 0
+    assert payload["r2"]["ledger_digest"] == \
+        core["mapping_ledger"]["ledger_digest"]
+    assert ledger_item["sha256_digest"] == \
+        payload["r2"]["ledger_file_sha256"]
+    assert ledger_item["size_bytes"] == payload["r2"]["ledger_file_size"]
+    assert len(inventory) == 8
+
+    # The standalone read-only entry verifies the package as published.
+    verdict = verify_package_payload(package)
+    assert verdict.self_contained is True
+    assert verdict.status == "self_contained"
+    assert verdict.reasons == ()
+    assert verdict.file_count == 8
+    assert verdict.total_bytes == total_bytes
+
     # Every family check is present and green.
     for key in ("H.pin_readback", "H.bundle", "W.checkpoints",
-                "R.closure", "R2.mapping_ledger"):
+                "R.closure", "R2.mapping_ledger", "payload.copy"):
         assert report["checks"][key]["status"] == "ok"
+    assert report["checks"]["payload.copy"]["files"] == 8
+    assert report["checks"]["payload.copy"]["total_bytes"] == total_bytes
 
     # No current temp debris, no staging leftover, no outcome recorded.
     state = scan_assembly_state(world["retention"], identity=_IDENTITY)
@@ -517,6 +674,34 @@ def test_green_path_publishes_package_and_switches_current_atomically(world):
     assert state.staging == ()
     assert state.outcomes == ()
     assert state.current_temp_debris == ()
+
+
+def test_package_directory_alone_verifies_in_a_clean_directory(world, tmp_path):
+    # Freeze acceptance 4.3 (the reason this slice exists): the package
+    # directory alone, with no cuts, no object cabinets and no external
+    # ledger nearby, verifies on a clean location from its own bytes.
+    result = assemble_backup(world["make_plan"](), world["green_bid"])
+    assert result.status == "published"
+    package = _package_dir(world, world["green_bid"], world["barrier"])
+    manifest = _load_json(package / "manifest.json")
+    expected_files = len(manifest["core"]["payload"]["files"])
+    expected_bytes = manifest["core"]["payload"]["totals"]["total_bytes"]
+
+    origin = verify_package_payload(package)
+    assert origin == assembly.PayloadVerification(
+        True, "self_contained", expected_files, expected_bytes, ())
+
+    clean_root = tmp_path / "clean-room"
+    clean_root.mkdir()
+    moved = clean_root / "rescue-package"
+    shutil.copytree(package, moved)
+
+    # The clean room contains nothing but the copied package directory;
+    # verification opens no retention/cabinet/ledger path outside it.
+    assert {entry.name for entry in os.scandir(clean_root)} == {
+        "rescue-package"}
+    isolated = verify_package_payload(moved)
+    assert isolated == origin
 
     log_text = (_assembly_root(world) / "publish.log").read_text()
     assert '"event": "published"' in log_text
@@ -1112,6 +1297,21 @@ def test_sha256_cut_fails_closed_on_40_hex_closure_contract(world):
         f.family == "R"
         and f.reason == "closure_unsupported_object_format"
         for f in result.failures)
+
+    # A2 consequence, upstream gap (closure primitive's H-root contract is
+    # 40-hex only; 64-hex support is not implemented upstream): the payload
+    # leg never runs on a red R family, so no sha256 repository can ship an
+    # R-bearing self-contained package yet -- rather than silently dropping
+    # R objects. No payload.check is reported and no package position is
+    # claimed; the failure outcome's report is the only artifact.
+    assert result.package is None
+    state = scan_assembly_state(world["retention"], identity=_IDENTITY)
+    assert state.packages == ()
+    assert len(state.outcomes) == 1
+    leaf = _assembly_root(world) / state.outcomes[0].coordinate
+    outcome_report = _load_json(leaf / "report.json")
+    assert "payload.copy" not in outcome_report["checks"]
+
     broker_db.close()
     connection.close()
 
@@ -1131,6 +1331,549 @@ def test_assembly_succeeds_with_all_sockets_disabled(world, monkeypatch):
 
     result = assemble_backup(world["make_plan"](), world["green_bid"])
     assert result.status == "published"
+
+
+# ---------------------------------------------------------------------------
+# A2 self-contained payload: assembly-time fail-closed matrix.
+#
+# Every drill injects a fault on a real storage/process boundary (never a
+# mock of a success hash): the family legs all pass on real bytes, then the
+# payload leg must fail closed -- no package position claimed, no current
+# switch, exactly one failure outcome carrying the stable reason code.
+# ---------------------------------------------------------------------------
+
+
+def _staging_leaf(world_obj):
+    leaves = list((_assembly_root(world_obj) / "staging").iterdir())
+    assert len(leaves) == 1
+    return leaves[0]
+
+
+def _assert_payload_failure(world_obj, result, reason, *, coordinate=None):
+    assert result.status == "failed", [
+        (f.family, f.reason) for f in result.failures]
+    assert result.current is None
+    assert result.package is None
+    assert result.outcome is not None
+    matched = [
+        f for f in result.failures
+        if f.family == "payload" and f.reason == reason]
+    assert matched, [(f.family, f.reason) for f in result.failures]
+    if coordinate is not None:
+        assert any(f.coordinate == coordinate for f in matched)
+    # The package position is never claimed while a payload leg is red.
+    assert not (_assembly_root(world_obj) / "packages"
+                / world_obj["green_bid"]).exists()
+    state = scan_assembly_state(
+        world_obj["retention"], identity=_IDENTITY)
+    assert state.packages == ()
+    assert state.current is None
+    assert len(state.outcomes) == 1
+    assert state.outcomes[0].status == "failed"
+    outcome_root = (_assembly_root(world_obj) / "outcomes"
+                    / world_obj["green_bid"])
+    leaves = list(outcome_root.iterdir())
+    assert len(leaves) == 1
+    report = _load_json(leaves[0] / "report.json")
+    payload_check = report["checks"]["payload.copy"]
+    assert payload_check["status"] == "failed"
+    assert any(item.get("reason") == reason
+               for item in payload_check["failures"])
+    return matched
+
+
+def _flip_first_byte_fd(dir_fd, name):
+    """Flip byte 0 of one pinned regular file through its directory fd."""
+    fd = os.open(assembly._pinned(dir_fd, name),
+                 os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        original = os.read(fd, 1)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, bytes([original[0] ^ 0xFF]))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _flip_file(path):
+    """Flip byte 0 of one published-package file (owner-private 0600)."""
+    fd = os.open(os.fspath(path), os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        original = os.read(fd, 1)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, bytes([original[0] ^ 0xFF]))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def test_a2_w_landing_byte_mismatch_fails_closed(world, monkeypatch):
+    real_copy = assembly._copy_regular_pinned
+
+    def poisoned_copy(src_fd, src_name, dst_fd, dst_name):
+        real_copy(src_fd, src_name, dst_fd, dst_name)
+        if dst_name == "w_items.sqlite":
+            _flip_first_byte_fd(dst_fd, dst_name)
+
+    monkeypatch.setattr(assembly, "_copy_regular_pinned", poisoned_copy)
+    result = assemble_backup(world["make_plan"](), world["green_bid"])
+    _assert_payload_failure(
+        world, result, "payload_w_byte_mismatch",
+        coordinate="payload/w/w_items.sqlite")
+
+
+def test_a2_r_landing_byte_mismatch_fails_closed(world, monkeypatch):
+    real_source = assembly._payload_r_source_bytes
+    flipped = {"done": False}
+
+    def poisoned_source(stores, storage_class, digest_hex):
+        data = real_source(stores, storage_class, digest_hex)
+        if storage_class == STORAGE_ARCHIVE and not flipped["done"] and data:
+            # Same length, one bit off: the landing cannot re-hash to the
+            # closure-declared digest, and no declared bytes are reproduced.
+            flipped["done"] = True
+            data = bytes([data[0] ^ 0xFF]) + data[1:]
+        return data
+
+    monkeypatch.setattr(assembly, "_payload_r_source_bytes", poisoned_source)
+    result = assemble_backup(world["make_plan"](), world["green_bid"])
+    assert flipped["done"]
+    _assert_payload_failure(world, result, "payload_r_byte_mismatch")
+
+
+def test_a2_same_digest_declared_in_two_cabinet_classes_fails_closed(world):
+    # The archive-present original's exact bytes are really externalized
+    # into the mapping-object cabinet too, and a mapping-version reference
+    # declares the same digest. The closure completes (the bytes are
+    # genuinely present in both real cabinets), but one digest cannot
+    # occupy two payload storage classes: the payload leg must refuse the
+    # present set rather than silently collapsing the pair onto one file.
+    orig_ref = next(ref for ref in world["green_references"]()
+                    if ref.logical_id == "obj-orig-1")
+    orig_hex = orig_ref.sha256_digest[len("sha256:"):]
+    body = world["archive"].get_bytes(orig_hex)
+    assert world["mapping_store"].put(body) == orig_hex
+    refs = list(world["green_references"]()) + [AssemblyReference(
+        logical_id="map-orig-collision-1",
+        object_type=OBJECT_MAPPING_VERSION,
+        version="v1",
+        scope_kind=SCOPE_COMPANY,
+        citations=(
+            AssemblyCitation(
+                kind="H",
+                coordinate="facts:fact_current/map-orig-collision-1",
+            ),
+            AssemblyCitation(
+                kind="W",
+                coordinate="cuts/%s/%s/w_items.sqlite#dup"
+                           % (world["green_bid"], world["barrier"]),
+                root_id=world["barrier"],
+            ),
+        ),
+        sha256_digest=orig_ref.sha256_digest,
+    )]
+    result = assemble_backup(
+        world["make_plan"](refs=tuple(refs)), world["green_bid"])
+    _assert_payload_failure(
+        world, result, "payload_r_present_set_mismatch")
+
+
+def test_a2_poisoned_closure_coordinate_refused_lexically_without_escape(
+        world, monkeypatch, tmp_path):
+    # Defence in depth: the real closure primitive cannot produce such a
+    # coordinate for present bytes (digest-derived shards), so emulate a
+    # corrupted in-memory verdict. The lexical guard must refuse before
+    # any descriptor is opened, and nothing may land outside staging.
+    real_collect = assembly.collect_object_closure
+
+    def poisoned_collect(**kwargs):
+        verdict = real_collect(**kwargs)
+        target = verdict.entries_with("present")[0]
+        entries = tuple(
+            dataclasses.replace(
+                entry, relative_path="../../payload-escape")
+            if entry is target else entry
+            for entry in verdict.entries)
+        return dataclasses.replace(verdict, entries=entries)
+
+    monkeypatch.setattr(assembly, "collect_object_closure", poisoned_collect)
+    result = assemble_backup(world["make_plan"](), world["green_bid"])
+    _assert_payload_failure(world, result, "payload_unsafe_path")
+
+    leaf = _staging_leaf(world).resolve()
+    for path in leaf.rglob("*"):
+        assert path.resolve().is_relative_to(leaf)
+    assert list(tmp_path.rglob("payload-escape")) == []
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="0500 DAC denial cannot bite root (CAP_DAC_OVERRIDE)")
+def test_a2_r2_snapshot_unwritable_target_fails_closed(world, monkeypatch):
+    # Both real snapshot primitives must fail against a read-only payload
+    # directory (VACUUM INTO cannot create its temp file; the backup-API
+    # fallback cannot be O_CREAT-born either), and the failure must close
+    # publication instead of shipping a ledger-less package.
+    real_snapshot = assembly._snapshot_ledger_into
+
+    def poisoned_snapshot(**kwargs):
+        root = Path(assembly._fd_real_path(kwargs["payload_fd"]))
+        os.chmod(root, 0o500)
+        try:
+            return real_snapshot(**kwargs)
+        finally:
+            os.chmod(root, 0o700)
+
+    monkeypatch.setattr(
+        assembly, "_snapshot_ledger_into", poisoned_snapshot)
+    result = assemble_backup(world["make_plan"](), world["green_bid"])
+    _assert_payload_failure(world, result, "payload_r2_copy_failed")
+
+
+def test_a2_r2_snapshot_newer_than_digest_fails_closed(world, monkeypatch):
+    # A real new ledger version lands in the source during the snapshot
+    # window (writer concurrently registering). The snapshot itself is a
+    # consistent sqlite image containing the new row, but its re-derived
+    # row-level digest cannot match the pre-snapshot digest, and the new
+    # backing object is absent from the package cabinet: a half-newer
+    # ledger must never verify, no matter which check notices first.
+    real_snapshot = assembly._snapshot_ledger_into
+
+    def poisoned_snapshot(**kwargs):
+        body = b"mapping-render-concurrent-register"
+        digest_hex = world["mapping_store"].put(body)
+        with MappingVersionLedger(
+                world["ledger_root"],
+                installation_id=_IDS["installation_id"],
+                company_id=_IDS["company_id"],
+                object_store=world["mapping_store"]) as ledger:
+            ledger.register_version(
+                logical_source_id="src-contract-2",
+                digest=digest_hex,
+                size_bytes=len(body),
+                installation_id=_IDS["installation_id"],
+                company_id=_IDS["company_id"],
+                source_coordinate="harness/concurrent#src-contract-2",
+                h_commit_oid=world["commit"])
+        return real_snapshot(**kwargs)
+
+    monkeypatch.setattr(
+        assembly, "_snapshot_ledger_into", poisoned_snapshot)
+    result = assemble_backup(world["make_plan"](), world["green_bid"])
+    _assert_payload_failure(world, result, "payload_r2_shape_mismatch")
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="0500 DAC denial cannot bite root (CAP_DAC_OVERRIDE)")
+def test_a2_unwritable_staging_leaf_fails_closed(world):
+    # Real DAC injection as an unprivileged user: after H has exported,
+    # flip the staging leaf read-only so payload scaffolding cannot be
+    # created; restore it in finally so the temp tree can be torn down.
+    staging_root = _assembly_root(world) / "staging"
+    locked = {"path": None}
+
+    def hook(phase):
+        if phase == "bundle_exported":
+            leaves = list(staging_root.iterdir())
+            assert len(leaves) == 1
+            os.chmod(leaves[0], 0o500)
+            locked["path"] = leaves[0]
+
+    try:
+        result = assemble_backup(
+            world["make_plan"](), world["green_bid"], crash_hook=hook)
+    finally:
+        if locked["path"] is not None:
+            os.chmod(locked["path"], 0o700)
+    _assert_payload_failure(
+        world, result, "payload_write_failed", coordinate="payload")
+
+
+def test_a2_crash_after_payload_staged_leaves_partial_and_rerun_publishes(
+        world):
+    def hook(phase):
+        if phase == "payload_staged":
+            raise _InjectedCrash(phase)
+
+    with pytest.raises(_InjectedCrash):
+        assemble_backup(world["make_plan"](), world["green_bid"],
+                        crash_hook=hook)
+
+    state = scan_assembly_state(world["retention"], identity=_IDENTITY)
+    assert state.current is None
+    assert state.packages == ()
+    assert len(state.staging) == 1
+    assert state.staging[0].status == "partial"
+    leaf = _assembly_root(world) / "staging" / state.staging[0].name
+    # The payload tree is fully on disk; only the envelope is absent.
+    assert (leaf / "payload" / "w" / "w_items.sqlite").is_file()
+    assert not (leaf / "manifest.json").exists()
+
+    result = assemble_backup(world["make_plan"](), world["green_bid"])
+    assert result.status == "published"
+
+
+# ---------------------------------------------------------------------------
+# A2 self-contained payload: published-package standalone verification.
+# These drills publish a real green package, perform surgery on the
+# package directory only, and hand the directory to the read-only
+# verify_package_payload entry point with no cabinets or ledger nearby.
+# ---------------------------------------------------------------------------
+
+
+def test_a2_missing_payload_file_and_missing_payload_dir_are_refused(world):
+    _result, package = _publish_green_package(world)
+
+    (package / "payload" / "w" / "w_ledger.sqlite").unlink()
+    verdict = verify_package_payload(package)
+    assert verdict.self_contained is False
+    assert verdict.status == "damaged"
+    assert verdict.file_count == 8
+    assert "payload_inventory_mismatch" in verdict.reasons
+
+    shutil.rmtree(package / "payload")
+    verdict = verify_package_payload(package)
+    assert verdict.status == "damaged"
+    assert verdict.reasons == ("payload_missing",)
+
+
+@pytest.mark.parametrize("kind", ["extra_file", "empty_dir", "symlink"])
+def test_a2_smuggled_payload_entry_is_refused(world, kind):
+    _result, package = _publish_green_package(world)
+    if kind == "extra_file":
+        rogue = package / "payload" / "rogue.txt"
+        rogue.write_bytes(b"smuggled")
+        os.chmod(rogue, 0o600)
+    elif kind == "empty_dir":
+        os.mkdir(package / "payload" / "rogue-dir", 0o700)
+    else:
+        # A link inside the tree is observed only non-followingly; it
+        # must never be read as the target it points at.
+        os.symlink("w/w_items.sqlite",
+                   package / "payload" / "rogue-link")
+
+    verdict = verify_package_payload(package)
+    assert verdict.self_contained is False
+    assert verdict.status == "damaged"
+    # Every undeclared tree entry -- file, empty directory or symlink --
+    # is an inventory disagreement. The link is probed O_PATH|O_NOFOLLOW:
+    # the kernel hands back the link itself (never its w_items target), so
+    # it is classified as an undeclared non-file entry, not hash-verified
+    # as the checkpoint it points at.
+    assert "payload_inventory_mismatch" in verdict.reasons
+    assert "payload_w_byte_mismatch" not in verdict.reasons
+
+
+def test_a2_entity_tamper_without_manifest_change_is_refused(world):
+    _result, package = _publish_green_package(world)
+    manifest = _load_json(package / "manifest.json")
+
+    _flip_file(package / "payload" / "w" / "w_items.sqlite")
+    r_archive = next(
+        item for item in manifest["core"]["payload"]["files"]
+        if item["family"] == "r"
+        and item["storage_class"] == STORAGE_ARCHIVE)
+    _flip_file(package / r_archive["path"])
+
+    verdict = verify_package_payload(package)
+    assert "payload_w_byte_mismatch" in verdict.reasons
+    assert "payload_r_byte_mismatch" in verdict.reasons
+    # The inventory itself still matches the tree: rejection is purely
+    # the per-file re-hash, not a smuggling call.
+    assert "payload_inventory_mismatch" not in verdict.reasons
+
+
+def test_a2_inventory_edit_without_resign_breaks_digest_chain(world):
+    # The smuggler makes tree and inventory mutually consistent, but does
+    # not (cannot) recompute the core/report digests. The digest chain is
+    # verified before any payload parse, so there is no bypass.
+    _result, package = _publish_green_package(world)
+    body = b"x"
+    digest = "sha256:" + hashlib.sha256(body).hexdigest()
+    hex_digest = digest[len("sha256:"):]
+    relative = "payload/r/%s/%s/%s" % (
+        STORAGE_MAPPING_OBJECTS, hex_digest[:2], hex_digest)
+    leaf = package / relative
+    leaf.parent.mkdir(0o700, parents=True, exist_ok=True)
+    leaf.write_bytes(body)
+    os.chmod(leaf, 0o600)
+
+    manifest_path = package / "manifest.json"
+    manifest = _load_json(manifest_path)
+    manifest["core"]["payload"]["files"].append({
+        "path": relative,
+        "family": "r2",
+        "storage_class": STORAGE_MAPPING_OBJECTS,
+        "ledger_backing": True,
+        "size_bytes": len(body),
+        "sha256_digest": digest,
+    })
+    manifest_path.write_bytes(dumps_record(manifest))
+    os.chmod(manifest_path, 0o600)
+
+    assert verify_package_payload(package) == assembly.PayloadVerification(
+        False, "damaged", 0, 0, ("digest_chain",))
+
+
+def test_a2_sidecar_manifest_outside_envelope_is_smuggle(world):
+    # A sidecar manifest dropped next to the payload is not a bypass
+    # channel: the signed envelope does not name it, so it is simply an
+    # undeclared file in the payload tree.
+    _result, package = _publish_green_package(world)
+    sidecar = package / "payload" / "PAYLOAD_MANIFEST.json"
+    sidecar.write_bytes(b"{}")
+    os.chmod(sidecar, 0o600)
+    verdict = verify_package_payload(package)
+    assert verdict.self_contained is False
+    assert "payload_inventory_mismatch" in verdict.reasons
+
+
+def test_a2_missing_ledger_snapshot_is_refused(world):
+    _result, package = _publish_green_package(world)
+    (package / "payload" / "mapping-version-index.sqlite").unlink()
+    verdict = verify_package_payload(package)
+    assert "payload_r2_missing" in verdict.reasons
+    assert "payload_inventory_mismatch" in verdict.reasons
+
+
+def test_a2_installation_without_ledger_publishes_without_r2_payload(world):
+    # An installation that never attached a version index still ships a
+    # self-contained package: the R closure copied every mapping object,
+    # and a skipped R2 leg must not demand a ledger file.
+    result = assemble_backup(
+        world["make_plan"](version_root=None), world["green_bid"])
+    assert result.status == "published"
+    package = _package_dir(world, world["green_bid"], world["barrier"])
+    manifest = _load_json(package / "manifest.json")
+    report = _load_json(package / "report.json")
+    payload = manifest["core"]["payload"]
+    assert payload["r2"] == {"status": "skipped"}
+    assert manifest["core"]["mapping_ledger"] is None
+    paths = {item["path"] for item in payload["files"]}
+    assert "payload/mapping-version-index.sqlite" not in paths
+    assert len(paths) == 7  # 2 W checkpoints + 5 closure-present objects
+    assert report["checks"]["R2.mapping_ledger"]["status"] == "skipped"
+    verdict = verify_package_payload(package)
+    assert verdict.self_contained is True
+    assert verdict.status == "self_contained"
+    assert verdict.file_count == 7
+
+
+def _sha256_file(path):
+    hasher = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _fingerprint(target):
+    """Real {relative path: (sha256, size)} fingerprint, files only."""
+    target = Path(target)
+    if target.is_file():
+        return {target.name: (_sha256_file(target), target.stat().st_size)}
+    fingerprint = {}
+    for path in sorted(target.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        fingerprint[str(path.relative_to(target))] = (
+            _sha256_file(path), path.stat().st_size)
+    return fingerprint
+
+
+def test_a2_payload_copy_leaves_all_sources_byte_identical(world):
+    bid, barrier = world["green_bid"], world["barrier"]
+    roots = {
+        "cut": world["retention"] / "cuts" / bid / barrier,
+        "archive": world["two_a"] / "bin",
+        "mapping": world["two_a"] / "mapping-objects",
+        "app_db": world["app_db"],
+        "ledger": world["ledger_root"] / "mapping-version-index.sqlite",
+    }
+    before = {key: _fingerprint(root) for key, root in roots.items()}
+
+    result = assemble_backup(world["make_plan"](), bid)
+    assert result.status == "published"
+
+    after = {key: _fingerprint(root) for key, root in roots.items()}
+    assert after == before
+
+
+def test_a2_legacy_v1_three_file_package_still_reads(world, tmp_path):
+    # Take the real green bundle and re-wrap its core as a hand-built,
+    # correctly signed v1 envelope: no payload/ tree, envelope version 1.
+    _result, green = _publish_green_package(world)
+    green_manifest = _load_json(green / "manifest.json")
+    bid, barrier = world["green_bid"], world["barrier"]
+
+    v1_retention = tmp_path / "retention-v1"
+    v1_retention.mkdir(0o700)
+    package_leaf = (v1_retention / ".assembly" / "packages" / bid / barrier)
+    for directory in (v1_retention / ".assembly",
+                      v1_retention / ".assembly" / "packages",
+                      v1_retention / ".assembly" / "packages" / bid,
+                      package_leaf):
+        directory.mkdir(0o700)
+    shutil.copy(green / "authority.bundle",
+                package_leaf / "authority.bundle")
+
+    core_v1 = dict(green_manifest["core"])
+    del core_v1["payload"]
+    core_digest_v1 = compute_core_digest(core_v1)
+    report_v1 = {
+        "schema": REPORT_SCHEMA,
+        "version": 1,
+        "core_digest": core_digest_v1,
+        "checks": {},
+    }
+    report_digest_v1 = compute_report_digest(report_v1)
+    manifest_v1 = {
+        "schema": MANIFEST_SCHEMA,
+        "version": 1,
+        "core": core_v1,
+        "verification": {
+            "core_digest": core_digest_v1,
+            "report_digest": report_digest_v1,
+        },
+    }
+    for name, payload in (("report.json", report_v1),
+                          ("manifest.json", manifest_v1)):
+        leaf = package_leaf / name
+        leaf.write_bytes(dumps_record(payload))
+        os.chmod(leaf, 0o600)
+    assert not (package_leaf / "payload").exists()
+
+    root_fd = os.open(str(v1_retention), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        v1_assembly_fd = assembly._ensure_private_dir(
+            root_fd, ".assembly")
+        try:
+            pointer = assembly.CurrentPointer(
+                backup_id=bid,
+                barrier_id=barrier,
+                identity=_IDENTITY,
+                package="packages/%s/%s" % (bid, barrier),
+                core_digest=core_digest_v1,
+                report_digest=report_digest_v1,
+            )
+            assembly._switch_current(v1_assembly_fd, pointer)
+        finally:
+            os.close(v1_assembly_fd)
+    finally:
+        os.close(root_fd)
+
+    assert read_current_backup(
+        v1_retention, identity=_IDENTITY) == pointer
+    state = scan_assembly_state(v1_retention, identity=_IDENTITY)
+    assert len(state.packages) == 1
+    assert state.packages[0].status == "complete"
+    assert state.packages[0].reasons == ()
+    assert verify_package_payload(package_leaf) == \
+        assembly.PayloadVerification(
+            False, "legacy_three_file", 0, 0, ())
 
 
 # ---------------------------------------------------------------------------
@@ -1168,7 +1911,7 @@ def test_no_wiring_and_offline_import_graph():
     allowed = {
         "__future__",
         "hashlib", "os", "re", "stat", "subprocess", "dataclasses",
-        "pathlib",
+        "pathlib", "sqlite3",
         "app.facts_tree",
         "app.facts_tree.git_format",
         "app.facts_tree.backup_component_validation",
@@ -1202,5 +1945,5 @@ def test_no_wiring_and_offline_import_graph():
 
     # Crash hook phases are the documented seam and nothing else.
     assert CRASH_PHASES == frozenset((
-        "bundle_exported", "manifest_staged",
+        "bundle_exported", "payload_staged", "manifest_staged",
         "package_published", "current_switched"))

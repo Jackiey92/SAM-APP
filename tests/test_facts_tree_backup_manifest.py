@@ -320,7 +320,42 @@ def test_digest_format_and_schema_constants():
     assert digest.startswith("sha256:")
     assert len(digest) == len("sha256:") + 64
     assert backup_manifest.DIGEST_ALGORITHM == "sha256"
-    assert backup_manifest.SCHEMA_VERSION == 1
+    assert backup_manifest.SCHEMA_VERSION == 2
+    assert backup_manifest.SCHEMA_VERSIONS == frozenset((1, 2))
+    assert backup_manifest.LEGACY_THREE_FILE_VERSION == 1
     _, report, manifest = _chain()
     assert report["schema"] == backup_manifest.REPORT_SCHEMA
     assert manifest["schema"] == backup_manifest.MANIFEST_SCHEMA
+    # A2 stamps both envelopes v2; new envelopes carry the payload block
+    # inside core, old v1 three-file envelopes stay verifiable forever.
+    assert report["version"] == 2
+    assert manifest["version"] == 2
+
+
+def test_legacy_v1_envelope_chain_still_verifies_but_v3_does_not():
+    core = _core()
+    core_digest = compute_core_digest(core)
+    report_v1 = {
+        "schema": backup_manifest.REPORT_SCHEMA,
+        "version": 1,
+        "core_digest": core_digest,
+        "checks": {},
+    }
+    report_digest = compute_report_digest(report_v1)
+    manifest_v1 = {
+        "schema": backup_manifest.MANIFEST_SCHEMA,
+        "version": 1,
+        "core": core,
+        "verification": {
+            "core_digest": core_digest,
+            "report_digest": report_digest,
+        },
+    }
+    assert verify_final_manifest(manifest_v1, report_v1) is None
+    # A future/unknown envelope version is refused rather than guessed.
+    future = dict(manifest_v1, version=3)
+    with pytest.raises(BackupManifestError, match="unsupported version"):
+        verify_final_manifest(future, report_v1)
+    future_report = dict(report_v1, version=3)
+    with pytest.raises(BackupManifestError, match="unsupported version"):
+        compute_report_digest(future_report)
