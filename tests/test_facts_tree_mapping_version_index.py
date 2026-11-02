@@ -818,18 +818,20 @@ def test_v7_no_live_path_module_imports_the_ledger():
     # The sanctioned consumers are the R2 backfiller (a runnable tool,
     # never imported by a live path), the A1 backup assembler, a
     # read-only offline consumer mandated by the A1 freeze brief
-    # (ledger_shape/ledger_digest/close only), and the R3 online
+    # (ledger_shape/ledger_digest/close only), the R3 online
     # registration seam, which wraps the ledger for the parsing main
-    # link; the live storage/harness modules still never import the
-    # ledger themselves, they only hold the duck-typed seam.  The set is
-    # named explicitly below and compared with == so the allow-list
-    # cannot silently grow.
+    # link, and the G1 read-only retention planner
+    # (ledger_shape/list_versions/ledger_digest only); the live
+    # storage/harness modules still never import the ledger themselves,
+    # they only hold the duck-typed seam.  The set is named explicitly
+    # below and compared with == so the allow-list cannot silently grow.
     repo_root = Path(__file__).resolve().parents[1]
     app_root = repo_root / "app"
     allowed_consumers = {
         "mapping_version_backfill.py",
         "mapping_version_online.py",
         "backup_assembly.py",
+        "object_retention_plan.py",
     }
     target = "app.facts_tree.mapping_version_index"
 
