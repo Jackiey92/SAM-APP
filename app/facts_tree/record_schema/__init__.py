@@ -16,8 +16,9 @@ with an explicit schema-registration seam; their business schemas and
 closures 2/3/4/6 are NOT implemented. External object references are
 SHA-256 content addresses, not business typed refs; existence, persistence
 and host authorization are not asserted. Actor audit_ref uses the existing
-F-007 pure validator. Approval-use refs fail closed until F-007 publishes
-their schema. An empty approval list makes no authorization assertion.
+F-007 pure validator. Approval-use refs are non-secret host ledger links.
+结构接受不授权。Structural acceptance grants no rights. An empty approval list makes no
+authorization assertion. No live ledger is consulted for historical reads.
 
 The path vocabulary comes exclusively from git_format, including its
 private _match_template helper for reverse identity extraction. Typed refs

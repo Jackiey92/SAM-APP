@@ -4,7 +4,7 @@ Only single-record shapes are checked here. Reference resolution, version
 chains, hash availability and quote bindings belong to later closures.
 """
 from ._primitives import (
-    _COMMON, _actor, _audit_refs, _digest, _enum, _id, _object, _optional,
+    _COMMON, _actor, _audit_refs, _audit_scope, _digest, _enum, _id, _object, _optional,
     _positive, _ref_key, _require_together, _str, _ts, git_format,
 )
 from ._registry import register_sample, register_schema
@@ -118,6 +118,7 @@ def build_source_version(*, source_id="source-1", version_id="v-1"):
 def _validate_source_lifecycle(payload, family, path, oid_length):
     for field, validator in _SOURCE_LIFECYCLE.items():
         validator(payload[field], family, path, field)
+    _audit_scope(payload, family, path)
 
 
 @register_sample("source_lifecycle")

@@ -1,6 +1,6 @@
 """Strict event record schema."""
 from ._primitives import (
-    ActorAuditRefInvalid, _COMMON, _array, _digest, _fail, _id,
+    ActorAuditRefInvalid, _COMMON, _array, _audit_refs, _audit_scope, _digest, _fail, _id,
     _oid, _positive, _refs, bindings_current, validate_actor_audit_ref,
 )
 from ._registry import register_schema
@@ -35,9 +35,8 @@ def _validate_event(payload, family, path, oid_length):
             _fail(family, path, "audit_scope", "actor.company_id")
         if type(payload["reason"]) is not str or not payload["reason"].strip():
             _fail(family, path, "reason_text", "reason")
-        _array(payload["approval_use_refs"], family, path, "approval_use_refs")
-        if payload["approval_use_refs"]:
-            _fail(family, path, "unsupported_approval_audit_ref", "approval_use_refs")
+        _audit_refs(payload["approval_use_refs"], family, path, "approval_use_refs")
+        _audit_scope(payload, family, path)
         _array(payload["invalidation_domains"], family, path, "invalidation_domains")
         for domain in payload["invalidation_domains"]:
             _id(domain, family, path, "invalidation_domains")

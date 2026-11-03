@@ -7,7 +7,7 @@ from app.facts_tree.fact_identity import EVENT_RELATIONS
 from app.facts_tree.source_registry import EVIDENCE_RELATIONS
 
 from ._primitives import (
-    _COMMON, _actor, _array_of, _audit_refs, _digest, _enum, _exact,
+    _COMMON, _actor, _array_of, _audit_refs, _audit_scope, _digest, _enum, _exact,
     _id, _object, _optional, _positive, _ref_key, _refs, _str,
     _tagged_union, _ts, git_format,
 )
@@ -84,6 +84,7 @@ def _validate_link(payload, family, path, oid_length):
 def _validate_placement(payload, family, path, oid_length):
     for field, validator in _PLACEMENT_SPEC.items():
         validator(payload[field], family, path, field)
+    _audit_scope(payload, family, path)
 
 
 @register_schema("placement_current", fields=CURRENT_FIELDS)

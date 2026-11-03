@@ -236,11 +236,57 @@ def _actor(value, family, path, field):
         _fail(family, path, "actor_audit_ref", field)
 
 
+APPROVAL_USE_FIELDS = frozenset({
+    "schema_version", "audit_ref_type", "reservation_id", "approval_id",
+    "operation_id", "task_id", "run_id", "installation_id", "company_id",
+    "principal_id", "member_revision", "policy_id", "policy_revision",
+    "effect_digest", "preparation_digest", "action", "target",
+})
+
+
 def _audit_refs(value, family, path, field):
-    """F-007 has not published approval-use shapes: only [] is supported."""
+    """Non-secret host ledger links. 结构接受不授权。
+
+    Structural acceptance grants no rights.
+
+    No current approval state, credential, IO or authorization is consulted.
+    Preserve the previous fixed error for all previously rejected shapes.
+    """
     _array(value, family, path, field)
-    if value:
-        _fail(family, path, "unsupported_approval_audit_ref", field)
+    seen = set()
+    for ref in value:
+        invalid = False
+        try:
+            if (type(ref) is not dict or set(ref) != APPROVAL_USE_FIELDS
+                    or type(ref["schema_version"]) is not int
+                    or ref["schema_version"] != 1
+                    or type(ref["audit_ref_type"]) is not str
+                    or ref["audit_ref_type"] != "approval_use"):
+                raise ValueError("shape")
+            for key in ("reservation_id", "approval_id", "operation_id", "task_id",
+                        "run_id", "installation_id", "company_id", "principal_id", "policy_id"):
+                _id(ref[key], family, path, field)
+            for key in ("member_revision", "policy_revision"):
+                _positive(ref[key], family, path, field)
+            for key in ("effect_digest", "preparation_digest"):
+                _digest(ref[key], family, path, field)
+            for key in ("action", "target"):
+                _str(ref[key], family, path, field)
+        except (TypeError, ValueError):
+            invalid = True
+        if invalid:
+            _fail(family, path, "unsupported_approval_audit_ref", field)
+        key = (ref["installation_id"], ref["company_id"], ref["approval_id"])
+        if key in seen:
+            _fail(family, path, "duplicate_approval_use_ref", field)
+        seen.add(key)
+
+
+def _audit_scope(payload, family, path):
+    for ref in payload["approval_use_refs"]:
+        if (ref["company_id"] != payload["company_id"]
+                or ref["installation_id"] != payload["actor"]["installation_id"]):
+            _fail(family, path, "approval_use_scope", "approval_use_refs")
 
 
 def _legacy_block(allowed_keys):

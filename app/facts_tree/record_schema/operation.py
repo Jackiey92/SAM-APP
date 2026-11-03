@@ -1,7 +1,7 @@
 """Strict operation record schema."""
 from ._primitives import (
     ActorAuditRefInvalid, _CANDIDATE, _COMMON, _RESULT,
-    _array, _candidate, _digest, _exact, _fail, _id, _oid, _refs, _result,
+    _array, _audit_refs, _audit_scope, _candidate, _digest, _exact, _fail, _id, _oid, _refs, _result,
     validate_actor_audit_ref,
 )
 from ._registry import register_schema
@@ -43,9 +43,8 @@ def _validate_operation(payload, family, path, oid_length):
         _fail(family, path, "actor_audit_ref", "actor")
     if payload["actor"]["company_id"] != payload["company_id"]:
         _fail(family, path, "audit_scope", "actor.company_id")
-    _array(payload["approval_use_refs"], family, path, "approval_use_refs")
-    if payload["approval_use_refs"]:
-        _fail(family, path, "unsupported_approval_audit_ref", "approval_use_refs")
+    _audit_refs(payload["approval_use_refs"], family, path, "approval_use_refs")
+    _audit_scope(payload, family, path)
     _array(payload["event_ids"], family, path, "event_ids")
     for event_id in payload["event_ids"]:
         _id(event_id, family, path, "event_ids")
