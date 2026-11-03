@@ -1,7 +1,8 @@
 """Offline, read-only verification of an isolated F-001 package.
 
 R replays a packaged canonical closure record against fixed package bytes.
-Old v2 packages without that record retain closure_replay_deferred. No
+Old v2 packages without that record retain closure_replay_deferred. Declared E coverage additionally checks consumption rows and their full host
+chain; optional legacy evidence never proves non-consumption. No
 collector, source store, recovery action or host operation runs.
 """
 from __future__ import annotations
@@ -61,6 +62,15 @@ class RecoveryVerdict:
     advisories: tuple[str, ...]
     verified_at: str
     closure_r_list_digest: str | None
+
+    @property
+    def approval_audit(self):
+        """Deep-immutable E report, default () means NOT EVALUATED.
+
+        Intentionally not a dataclass field: the positional constructor and
+        dataclasses.asdict/JSON key set remain byte-contract compatible.
+        """
+        return getattr(self, "_approval_audit", ())
 
 
 def _hex(value, length):
@@ -348,7 +358,7 @@ def _inventory(root, core, held, fail):
     return files
 
 
-def _work(core, files, held, fail, host_dbs):
+def _work(core, files, held, fail, host_dbs, approval_dbs=None):
     entries = [e for e in files if e["family"] == "w"]
     databases = core["databases"]
     anchors = {e["role"]: e for e in databases}
@@ -373,6 +383,8 @@ def _work(core, files, held, fail, host_dbs):
             if not isinstance(declared, list) or tables != set(declared):
                 fail("w_schema_mismatch:" + role)
             host_dbs.append((db, tables))
+            if approval_dbs is not None:
+                approval_dbs.append((role, db, tables))
         except (sqlite3.Error, ValueError, TypeError):
             db.close()
             fail("w_corrupt:" + role)
@@ -656,6 +668,391 @@ def _credentials(db, tables, identity, fail, advise):
             advise("credential_rebind_required:" + task)
 
 
+# E capability is explicitly versioned inside the digest-bound manifest core.
+# This is a declaration of backup coverage, never current ledger authority.
+_APPROVAL_CAPABILITY = "approval_consumptions"
+_APPROVAL_TABLES = (
+    "host_prepared_effects", "host_approval_decisions",
+    "host_approval_reservations", "host_approval_consumptions",
+)
+_APPROVAL_COMMON = frozenset({
+    "schema_version", "operation_id", "installation_id", "company_id",
+    "principal_id", "member_revision", "task_id", "run_id", "policy_id",
+    "policy_revision", "effect_digest", "preparation_digest", "created_at", "expires_at",
+})
+_APPROVAL_SHAPES = {
+    "host_prepared_effects": _APPROVAL_COMMON | {
+        "preparation_state", "idempotency_key", "action", "target", "objects",
+        "effect_manifest", "object_format", "base_commit", "dependency_versions"},
+    "host_approval_decisions": _APPROVAL_COMMON | {"approval_id", "session_ref", "decision"},
+    "host_approval_reservations": _APPROVAL_COMMON | {
+        "reservation_state", "reservation_id", "approval_id", "action", "target"},
+    "host_approval_consumptions": _APPROVAL_COMMON | {
+        "consumption_state", "reservation_id", "approval_id", "action", "target", "reservation_created_at"},
+}
+_APPROVAL_COLUMNS = {
+    "host_prepared_effects": ("operation_id", "task_id", "run_id", "idempotency_key",
+        "effect_digest", "preparation_digest", "created_at", "expires_at", "record_blob", "row_sha256"),
+    "host_approval_decisions": ("approval_id", "operation_id", "task_id", "run_id",
+        "effect_digest", "preparation_digest", "decision", "created_at", "expires_at", "record_blob", "row_sha256"),
+    "host_approval_reservations": ("reservation_id", "approval_id", "operation_id", "task_id", "run_id",
+        "effect_digest", "preparation_digest", "created_at", "expires_at", "record_blob", "row_sha256"),
+    "host_approval_consumptions": ("reservation_id", "approval_id", "operation_id", "task_id", "run_id",
+        "effect_digest", "preparation_digest", "created_at", "expires_at", "record_blob", "row_sha256"),
+}
+_APPROVAL_UNIQUE = {
+    "host_prepared_effects": {("operation_id",), ("task_id", "run_id", "idempotency_key")},
+    "host_approval_decisions": {("approval_id",), ("operation_id",)},
+    "host_approval_reservations": {("reservation_id",), ("approval_id",), ("operation_id",)},
+    "host_approval_consumptions": {("reservation_id",), ("approval_id",), ("operation_id",)},
+}
+
+
+def _approval_freeze(value):
+    """New verdict data uses only immutable tuples and scalar JSON values."""
+    if isinstance(value, dict):
+        return tuple((key, _approval_freeze(item)) for key, item in sorted(value.items()))
+    if isinstance(value, (tuple, list)):
+        return tuple(_approval_freeze(item) for item in value)
+    if value is None or type(value) in (str, int, bool):
+        return value
+    raise ValueError("approval data type")
+
+
+def _approval_id(value):
+    # Same UTF-8/character/encoded-byte limits as git_format.encode_id.
+    if type(value) is not str or not value or len(value) > 128:
+        raise ValueError("approval id")
+    if sum(1 if chr(b).isascii() and (chr(b).isalnum() or chr(b) in "_-") else 3
+           for b in value.encode("utf-8")) > 384:
+        raise ValueError("approval id")
+
+
+def _approval_time(db, value):
+    if (type(value) is not str or len(value) != 32 or value[19] != "."
+            or value[26:] != "+00:00" or not value[20:26].isascii()
+            or not value[20:26].isdigit() or value[:4] == "0000"):
+        raise ValueError("approval time")
+    normal = db.execute("SELECT strftime('%Y-%m-%dT%H:%M:%S', ?, '+0 seconds')", (value,)).fetchone()[0]
+    if normal != value[:19]:
+        raise ValueError("approval time")
+    return value
+
+
+def _approval_sql(sql):
+    return "".join(sql.upper().split()).replace("IFNOTEXISTS", "").rstrip(";")
+
+
+def _approval_storage(db, table):
+    """Check physical tables, all unique indexes and exact v1 conflict guards.
+
+    Guard SQL below is compared as DATA, never executed; no service, scratch
+    database, DDL or repair is used to inspect a hostile backup.
+    """
+    objects = db.execute("SELECT type,sql FROM sqlite_master WHERE name=?", (table,)).fetchall()
+    if len(objects) != 1 or objects[0][0] != "table":
+        raise ValueError("approval table")
+    columns = db.execute("PRAGMA table_info(" + _quote(table) + ")").fetchall()
+    if tuple(r[1] for r in columns) != _APPROVAL_COLUMNS[table]:
+        raise ValueError("approval columns")
+    if any(r[2].upper() != ("BLOB" if r[1] == "record_blob" else "TEXT") for r in columns):
+        raise ValueError("approval types")
+    for position,column in enumerate(columns):
+        expected_null = 1 if table == "host_approval_consumptions" or position else 0
+        if column[3] != expected_null or column[4] is not None or column[5] != (1 if position == 0 else 0):
+            raise ValueError("approval column constraints")
+    observed = set()
+    for index in db.execute("PRAGMA index_list(" + _quote(table) + ")"):
+        if index[2] and not index[4]:
+            observed.add(tuple(r[2] for r in db.execute("PRAGMA index_info(" + _quote(index[1]) + ")")))
+    if observed != _APPROVAL_UNIQUE[table]:
+        raise ValueError("approval unique")
+    noun = {"host_prepared_effects": "host prepared effects",
+            "host_approval_decisions": "host approval decisions",
+            "host_approval_reservations": "host approval reservations"}.get(table)
+    message = noun + " are append-only" if noun else "approval_consumption_append_only"
+    expected = {}
+    for action in ("update", "delete"):
+        name = table + "_no_" + action
+        expected[name] = ("CREATE TRIGGER " + name + " BEFORE " + action + " ON " + table
+                          + " BEGIN SELECT RAISE(ABORT, '" + message + "'); END")
+    if table == "host_approval_consumptions":
+        name = table + "_no_replace"
+        condition = " OR ".join(key + " = NEW." + key for key in ("reservation_id", "approval_id", "operation_id"))
+        expected[name] = ("CREATE TRIGGER " + name + " BEFORE INSERT ON " + table
+            + " WHEN EXISTS (SELECT 1 FROM " + table + " WHERE " + condition
+            + ") BEGIN SELECT RAISE(ABORT, '" + message + "'); END")
+    else:
+        conflicts = {
+            "host_prepared_effects": (
+                ("operation", "operation_id = NEW.operation_id", "an existing operation"),
+                ("idempotency", "task_id = NEW.task_id AND run_id = NEW.run_id AND idempotency_key = NEW.idempotency_key", "an existing idempotency key")),
+            "host_approval_decisions": (
+                ("approval", "approval_id = NEW.approval_id", "an existing decision"),
+                ("operation", "operation_id = NEW.operation_id", "an existing operation decision")),
+            "host_approval_reservations": (
+                ("reservation", "reservation_id = NEW.reservation_id", "an existing reservation"),
+                ("approval", "approval_id = NEW.approval_id", "an existing approval reservation"),
+                ("operation", "operation_id = NEW.operation_id", "an existing operation reservation")),
+        }[table]
+        for suffix, condition, target in conflicts:
+            name = table + "_no_replace_" + suffix
+            expected[name] = ("CREATE TRIGGER " + name + " BEFORE INSERT ON " + table
+                + " WHEN EXISTS (SELECT 1 FROM " + table + " WHERE " + condition
+                + ") BEGIN SELECT RAISE(ABORT, '" + message
+                + ": INSERT OR REPLACE cannot overwrite " + target + "'); END")
+    actual = {r[0]: _approval_sql(r[1]) for r in db.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?", (table,)) if r[1]}
+    if actual != {name: _approval_sql(sql) for name, sql in expected.items()}:
+        raise ValueError("approval guards")
+
+
+def _approval_row(db, table, row, identity):
+    blob = row["record_blob"]
+    if not isinstance(blob, (bytes, bytearray, memoryview)) or not _hex(row["row_sha256"], 64):
+        raise ValueError("approval bytes")
+    blob = bytes(blob)
+    payload = _host_json(blob)
+    domain = {"host_prepared_effects": "prepared-effect", "host_approval_decisions": "approval-decision",
+              "host_approval_reservations": "approval-reservation", "host_approval_consumptions": "approval-consumption"}[table]
+    if (type(payload) is not dict or set(payload) != _APPROVAL_SHAPES[table]
+            or _host_bytes(payload) != blob
+            or hashlib.sha256(("sam-host-" + domain + " row-v1\0").encode() + blob).hexdigest() != row["row_sha256"]
+            or any(payload.get(k) != v for k,v in row.items() if k not in {"record_blob", "row_sha256"})):
+        raise ValueError("approval self proof")
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise ValueError("approval version")
+    for key in ("operation_id", "installation_id", "company_id", "principal_id", "task_id", "run_id", "policy_id",
+                *(k for k in ("reservation_id", "approval_id", "session_ref", "idempotency_key") if k in payload)):
+        _approval_id(payload[key])
+    for key in ("member_revision", "policy_revision"):
+        if type(payload[key]) is not int or payload[key] < 1:
+            raise ValueError("approval revision")
+    if any(payload[k] != identity[k] for k in ("installation_id", "company_id")):
+        raise ValueError("approval scope")
+    if any(not _hex(payload[k], 64) for k in ("effect_digest", "preparation_digest")):
+        raise ValueError("approval digest")
+    if _approval_time(db, payload["created_at"]) >= _approval_time(db, payload["expires_at"]):
+        raise ValueError("approval interval")
+    if table == "host_approval_decisions" and payload["decision"] not in {"approved", "denied"}:
+        raise ValueError("approval decision")
+    if table == "host_approval_reservations" and payload["reservation_state"] != "reserved":
+        raise ValueError("approval reservation")
+    if table == "host_approval_consumptions":
+        if (payload["consumption_state"] != "consumed" or
+                _approval_time(db, payload["reservation_created_at"]) > payload["created_at"]):
+            raise ValueError("approval consumption")
+    if table != "host_approval_decisions":
+        if any(type(payload[k]) is not str or not payload[k] or len(payload[k]) > 200 for k in ("action", "target")):
+            raise ValueError("approval target")
+    if table == "host_prepared_effects":
+        objects = payload["objects"]
+        deps = payload["dependency_versions"]
+        if (payload["preparation_state"] != "prepared" or type(objects) is not list or not objects
+                or any(type(v) is not str or not v or len(v) > 200 for v in objects)
+                or objects != sorted(set(objects)) or type(payload["effect_manifest"]) is not dict
+                or payload["object_format"] not in {"sha1", "sha256"}
+                or not _hex(payload["base_commit"], 40 if payload["object_format"] == "sha1" else 64)
+                or type(deps) is not dict or any(type(k) is not str or not k or len(k)>200
+                    or type(v) is not str or not v or len(v)>200 for k,v in deps.items())):
+            raise ValueError("approval preparation")
+        for keys, domain, target in (
+            (("action", "target", "objects", "effect_manifest", "object_format", "base_commit", "dependency_versions"),
+             b"sam-host-prepared-effect effect-v1\0", "effect_digest"),
+            (("schema_version", "installation_id", "company_id", "principal_id", "member_revision", "task_id", "run_id",
+              "policy_id", "policy_revision", "idempotency_key", "expires_at", "effect_digest"),
+             b"sam-host-prepared-effect preparation-v1\0", "preparation_digest")):
+            if hashlib.sha256(domain + _host_bytes({k:payload[k] for k in keys})).hexdigest() != payload[target]:
+                raise ValueError("approval preparation digest")
+    return payload
+
+
+def _approval_work(db, tables, identity):
+    """Checksum-bound old work evidence, without constructing a writable store."""
+    records, events = {}, {}
+    if "fact_operation_work_records" in tables:
+        for raw in db.execute("SELECT * FROM fact_operation_work_records"):
+            row = dict(raw)
+            blob = bytes(row["request_blob"])
+            keys = ("repo_id", "company_id", "task_id", "operation_id", "idempotency_key", "created_at", "request_sha256")
+            if (_host_bytes(_host_json(blob)) != blob or hashlib.sha256(blob).hexdigest() != row["request_sha256"]
+                    or hashlib.sha256(_host_bytes({k:row[k] for k in keys})).hexdigest() != row["row_sha256"]
+                    or any(row[k] != identity[k] for k in ("repo_id", "company_id"))):
+                raise ValueError("approval work record")
+            records[row["operation_id"]] = row["task_id"]
+    if "fact_operation_work_events" in tables:
+        for raw in db.execute("SELECT * FROM fact_operation_work_events ORDER BY seq"):
+            row = dict(raw)
+            blob = bytes(row["detail_blob"])
+            columns = {k:v for k,v in row.items() if k not in {"detail_blob", "row_sha256"}}
+            if (_host_bytes(_host_json(blob)) != blob or hashlib.sha256(blob).hexdigest() != row["detail_sha256"]
+                    or hashlib.sha256(_host_bytes(columns)).hexdigest() != row["row_sha256"]
+                    or any(row[k] != identity[k] for k in ("repo_id", "company_id"))
+                    or row["operation_id"] not in records or type(row["seq"]) is not int or row["seq"] < 1):
+                raise ValueError("approval work event")
+            events.setdefault(row["operation_id"], []).append(row)
+    unknown, origins = [], {}
+    for op, rows in events.items():
+        if [r["seq"] for r in rows] != list(range(1,len(rows)+1)):
+            raise ValueError("approval work sequence")
+        if any(r["state"] == "unknown" for r in rows) or rows[-1]["state"] == "in_flight":
+            unknown.append(op)
+            origins[op] = next((r["row_sha256"] for r in reversed(rows) if r["state"] == "unknown"), rows[-1]["row_sha256"])
+    return records, unknown, origins
+
+
+def _approval_snapshot(core, databases):
+    """Read all independent hard facts, including from undeclared old W.
+
+    A declaration makes errors mandatory R4 blockers. Its absence never proves
+    non-consumption; valid old reservation/denial/revocation facts remain useful.
+    Each row is isolated so damage in one path cannot erase another hard fact.
+    """
+    errors, rows, chains, consumed, revoked, unknown = set(), [], set(), set(), set(), set()
+    declaration = core.get("recovery_capabilities", {})
+    declared = type(declaration) is dict and _APPROVAL_CAPABILITY in declaration
+    roles = ()
+    if "recovery_capabilities" in core and type(declaration) is not dict:
+        declared = True
+        errors.add("approval_capability_invalid")
+    if declared:
+        cap = declaration.get(_APPROVAL_CAPABILITY) if type(declaration) is dict else None
+        if (type(cap) is not dict or set(cap) != {"version", "roles"}
+                or type(cap["version"]) is not int or cap["version"] != 1
+                or type(cap["roles"]) is not list or not cap["roles"]
+                or any(type(r) is not str or not _SAFE_ROLE_RE.fullmatch(r) for r in cap["roles"])
+                or len(set(cap["roles"])) != len(cap["roles"])):
+            errors.add("approval_capability_invalid")
+        else:
+            roles = tuple(sorted(cap["roles"]))
+    actual_roles = {role for role, _, _ in databases}
+    if not set(roles) <= actual_roles:
+        errors.add("approval_consumption_carrier_missing")
+    all_by_table = {t:{} for t in _APPROVAL_TABLES}
+    unique_seen = {table:{keys:set() for keys in _APPROVAL_UNIQUE[table]} for table in _APPROVAL_TABLES}
+    credentials = {}
+    work_tasks, restrictive_rows = {}, []
+    for role, db, tables in databases:
+        db.row_factory = sqlite3.Row
+        if role in roles and not set(_APPROVAL_TABLES) <= tables:
+            errors.add("approval_consumption_carrier_missing")
+        for table in _APPROVAL_TABLES:
+            exists = db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone()
+            if not exists:
+                continue
+            try:
+                _approval_storage(db, table)
+            except Exception:
+                errors.add("approval_consumption_schema_invalid")
+                continue
+            try:
+                raw_rows = db.execute("SELECT * FROM " + _quote(table)).fetchall()
+            except Exception:
+                errors.add("approval_consumption_schema_invalid")
+                continue
+            for raw in raw_rows:
+                try:
+                    raw = dict(raw)
+                    payload = _approval_row(db, table, raw, core["identity"])
+                    op = payload["operation_id"]
+                    if any(tuple(payload[key] for key in keys) in seen
+                           for keys,seen in unique_seen[table].items()):
+                        errors.add("approval_consumption_duplicate")
+                        continue
+                    for keys,seen in unique_seen[table].items():
+                        seen.add(tuple(payload[key] for key in keys))
+                    all_by_table[table][op] = payload
+                    # Secrets, policy bodies and effect manifests never enter
+                    # the portable verdict report or its repr/JSON consumers.
+                    public = {k:v for k,v in payload.items() if k not in {
+                        "objects", "effect_manifest", "dependency_versions"}}
+                    rows.append({"role":role, "table":table, "row_sha256":raw["row_sha256"],
+                                 "record_sha256":hashlib.sha256(raw["record_blob"]).hexdigest(), "record":public})
+                except Exception:
+                    errors.add("approval_consumption_row_invalid")
+        if "host_task_credentials" in tables:
+            local = set()
+            try:
+                _credentials(db, tables, core["identity"], local.add, lambda _: None)
+                if local:
+                    raise ValueError("credential proof")
+                for raw in db.execute("SELECT * FROM host_task_credentials"):
+                    credential = dict(raw)
+                    if credential["task_id"] in credentials:
+                        raise ValueError("credential duplicate")
+                    credentials[credential["task_id"]] = credential
+                for raw in db.execute("SELECT * FROM host_task_credential_events WHERE event='revoked'"):
+                    event = dict(raw)
+                    revoked.add(event["task_id"])
+                    restrictive_rows.append({"role":role, "table":"host_task_credential_events",
+                        "task_id":event["task_id"], "operation_id":None, "state":"revoked",
+                        "row_sha256":hashlib.sha256(_host_bytes(event)).hexdigest()})
+            except Exception:
+                errors.add("approval_credential_evidence_invalid")
+        try:
+            tasks, unclear, work_origins = _approval_work(db, tables, core["identity"])
+            work_tasks.update(tasks)
+            unknown.update(unclear)
+            for op in unclear:
+                restrictive_rows.append({"role":role, "table":"fact_operation_work_events",
+                    "task_id":tasks[op], "operation_id":op, "state":"unknown",
+                    "row_sha256":work_origins[op]})
+        except Exception:
+            errors.add("approval_work_evidence_invalid")
+    prepared, decisions, reservations, consumptions = (all_by_table[t] for t in _APPROVAL_TABLES)
+    for op, decision in decisions.items():
+        try:
+            effect = prepared[op]
+            credential = credentials[decision["task_id"]]
+            common = _APPROVAL_COMMON - {"created_at", "expires_at"}
+            if (any(decision[k] != effect[k] for k in common)
+                    or any(credential[k] != effect[k] for k in ("task_id", "run_id", "installation_id", "company_id",
+                        "principal_id", "member_revision", "policy_id", "policy_revision"))
+                    or not effect["created_at"] <= decision["created_at"] < decision["expires_at"] <= effect["expires_at"]):
+                raise ValueError("approval chain")
+            scope = _host_json(credential["scope_json"])
+            if (effect["action"] not in scope["actions"] or effect["target"] != scope["target"]
+                    or not set(effect["objects"]) <= set(scope["objects"])
+                    or effect["expires_at"] > scope["not_after"]
+                    or (op in work_tasks and work_tasks[op] != effect["task_id"])):
+                raise ValueError("approval chain scope")
+            chains.add(op)
+        except Exception:
+            errors.add("approval_consumption_chain_invalid")
+    for op, reservation in reservations.items():
+        try:
+            decision, effect = decisions[op], prepared[op]
+            if (op not in chains or decision["decision"] != "approved"
+                    or any(reservation[k] != decision[k] for k in _APPROVAL_COMMON - {"created_at", "expires_at"})
+                    or reservation["approval_id"] != decision["approval_id"]
+                    or any(reservation[k] != effect[k] for k in ("action", "target"))
+                    or not decision["created_at"] <= reservation["created_at"] < reservation["expires_at"] == decision["expires_at"]):
+                raise ValueError("approval reservation chain")
+        except Exception:
+            errors.add("approval_consumption_chain_invalid")
+            chains.discard(op)
+    for op, consumption in consumptions.items():
+        try:
+            reservation = reservations[op]
+            expected = dict(consumption)
+            expected.pop("consumption_state")
+            expected["reservation_state"] = "reserved"
+            expected["created_at"] = expected.pop("reservation_created_at")
+            if (op not in chains or expected != reservation
+                    or not reservation["created_at"] <= consumption["created_at"] < consumption["expires_at"]):
+                raise ValueError("approval consumed chain")
+            consumed.add(op)
+        except Exception:
+            errors.add("approval_consumption_chain_invalid")
+    sources = tuple((entry["role"], entry["path"], entry["sha256_digest"], entry["size_bytes"])
+        for entry in core.get("payload", {}).get("files", ()) if entry.get("family") == "w")
+    return _approval_freeze({"version":1, "declared":declared, "roles":roles,
+        "core_digest":compute_core_digest(core), "sources":sources,
+        "records":rows, "chain_operations":sorted(chains), "consumption_operations":sorted(consumed),
+        "revoked_tasks":sorted(revoked), "unknown_operations":sorted(unknown),
+        "restrictive_rows":restrictive_rows, "failures":sorted(errors)})
+
+
 def verify_recovery_package(package_dir, *, expected_identity=None) -> RecoveryVerdict:
     """Collect independent read-only checks; malformed/unreadable input fails closed.
 
@@ -664,7 +1061,7 @@ def verify_recovery_package(package_dir, *, expected_identity=None) -> RecoveryV
     """
     checks, blockers, advisories = [], set(), {"closure_replay_deferred"}
     held: dict[str, Any] = {}
-    host_dbs = []
+    host_dbs, approval_dbs, approval_audit = [], [], ()
     root, core, version, self_contained = None, {}, 0, False
     # SQLite's UTC clock avoids importing a module outside the frozen whitelist.
     clock = sqlite3.connect("file::memory:?mode=ro", uri=True)
@@ -756,7 +1153,7 @@ def verify_recovery_package(package_dir, *, expected_identity=None) -> RecoveryV
                     files = _inventory(root, core, held, fail)
                 self_contained = stage("payload", inventory, "payload_malformed")
                 # Continue after physical damage to collect useful W/R/R2 diagnostics.
-                stage("W", lambda fail: _work(core, files, held, fail, host_dbs), "payload_malformed")
+                stage("W", lambda fail: _work(core, files, held, fail, host_dbs, approval_dbs), "payload_malformed")
                 stage("R", lambda fail: _objects(core, files, held, fail), "payload_malformed")
                 closure = core.get("closure")
                 if isinstance(closure, dict) and "canonical_record" in closure:
@@ -770,6 +1167,22 @@ def verify_recovery_package(package_dir, *, expected_identity=None) -> RecoveryV
                 self_contained = self_contained and all(c.passed for c in checks if c.name in {
                     "W", "R", "R2", "R.closure_digest", "R.closure_bytes"})
                 stage("host", lambda fail: _host(host_dbs, core["identity"], fail, advisories.add), "host_malformed")
+                def approvals(fail):
+                    nonlocal approval_audit
+                    approval_audit = _approval_snapshot(core, approval_dbs)
+                    audit = dict(approval_audit)
+                    if audit["declared"]:
+                        for code in audit["failures"]:
+                            fail(code)
+                # The independent row report survives a red legacy host check.
+                # Mandatory E errors enter the same stage/blockers set as R4.
+                if "recovery_capabilities" in core:
+                    stage("E.approvals", approvals, "approval_consumption_unreadable")
+                else:
+                    try:
+                        approvals(lambda _: None)
+                    except Exception:
+                        approval_audit = ()
     finally:
         for db, _tables in host_dbs:
             db.close()
@@ -782,7 +1195,7 @@ def verify_recovery_package(package_dir, *, expected_identity=None) -> RecoveryV
         identity_value = {}
     authority = core.get("authority", {})
     closure = core.get("closure") or {}
-    return RecoveryVerdict(
+    verdict = RecoveryVerdict(
         recoverable=not blockers and self_contained, package_format=version,
         self_contained=self_contained, backup_id=core.get("backup_id", "") if isinstance(core.get("backup_id"), str) else "",
         barrier_id=core.get("barrier_id", "") if isinstance(core.get("barrier_id"), str) else "", identity=identity_value,
@@ -792,3 +1205,6 @@ def verify_recovery_package(package_dir, *, expected_identity=None) -> RecoveryV
         advisories=tuple(sorted(advisories)), verified_at=verified_at,
         closure_r_list_digest=closure.get("r_list_digest") if isinstance(closure, dict)
         and isinstance(closure.get("r_list_digest"), str) else None)
+
+    object.__setattr__(verdict, "_approval_audit", approval_audit)
+    return verdict
