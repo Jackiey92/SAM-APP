@@ -2184,9 +2184,18 @@ def test_no_wiring_and_offline_import_graph():
     project_root = Path(assembly.__file__).resolve().parents[2]
     app_root = project_root / "app"
 
+    # Modules allowed to import backup_assembly are the assembler itself
+    # and the offline disaster-recovery consumers: the R4 verifier and,
+    # from the C slice, the isolated material installer. The installer
+    # only reuses the closure replay and the pinned fixed-coordinate copy
+    # primitive; it is not on any live webapp/harness import path.
+    offline_recovery_consumers = {
+        "backup_assembly.py", "recovery_verifier.py",
+        "recovery_materializer.py",
+    }
     offenders = []
     for path in app_root.rglob("*.py"):
-        if path.name in {"backup_assembly.py", "recovery_verifier.py"}:
+        if path.name in offline_recovery_consumers:
             continue
         text = path.read_text()
         if "backup_assembly" in text:

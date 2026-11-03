@@ -583,6 +583,10 @@ def test_v7_no_live_path_imports_ledger_or_backfiller():
     # may not.
     offline_siblings = {
         "recovery_verifier.py",  # R4: only module-level _row_digest/constants; no instantiation.
+        # C slice read-only consumer: opens the landed ledger through SQLite
+        # mode=ro and re-checks it with the schema/constants/_row_digest only;
+        # it never instantiates the live store and runs no write migration.
+        "recovery_materializer.py",
         "mapping_version_index.py",
         "mapping_version_backfill.py",
         "mapping_version_online.py",

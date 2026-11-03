@@ -829,6 +829,10 @@ def test_v7_no_live_path_module_imports_the_ledger():
     app_root = repo_root / "app"
     allowed_consumers = {
         "recovery_verifier.py",  # R4: only module-level _row_digest/constants; no instantiation.
+        # C slice read-only consumer: opens the landed ledger through SQLite
+        # mode=ro and re-checks it with the schema/constants/_row_digest only;
+        # it never instantiates the live store and runs no write migration.
+        "recovery_materializer.py",
         "mapping_version_backfill.py",
         "mapping_version_online.py",
         "backup_assembly.py",
