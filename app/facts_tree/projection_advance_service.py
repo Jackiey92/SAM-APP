@@ -117,6 +117,9 @@ def _publish_bundle(root, generations_dir, built_gen: gen.BuiltProjectionGenerat
             os.close(lock_fd)
 
 
+publish_projection_bundle = _publish_bundle
+
+
 def advance_projection(repository, root, generations_dir, *, expected_repo_id,
                        expected_company_id, target_commit: str | None = None,
                        now=None) -> AdvanceReport:
