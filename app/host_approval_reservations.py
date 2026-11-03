@@ -1095,67 +1095,78 @@ class HostApprovalReservationService:
         origin = _monotonic_ns()
         operation_id = self._require_id("operation_id", operation_id)
 
-        def fetch():
-            # The first real read is what actually establishes the
-            # snapshot and absorbs any lock wait; the effective time is
-            # derived only after it returns, so the wait counts.
-            row = self.db.execute(
-                "SELECT " + _COLUMNS
-                + " FROM host_approval_reservations "
-                "WHERE operation_id = ?", (operation_id,)).fetchone()
-            tx_now = _effective_now(now, origin)
-            ctx = self._resolve_task(task_secret, tx_now)
-            if row is None:
-                raise ApprovalReservationUnavailable(
-                    _UNAVAILABLE_MESSAGE)
-            reservation = self._reservation_from_row(row)
-            record = reservation.record
-            if record["task_id"] != ctx.task_id \
-                    or record["run_id"] != ctx.run_id:
-                # A foreign operation is indistinguishable from a
-                # missing one.
-                raise ApprovalReservationUnavailable(
-                    _UNAVAILABLE_MESSAGE)
-            if record["installation_id"] != ctx.installation_id \
-                    or record["company_id"] != ctx.company_id \
-                    or record["principal_id"] != ctx.principal_id \
-                    or record["member_revision"] != ctx.member_revision \
-                    or record["policy_id"] != ctx.policy_id \
-                    or record["policy_revision"] != ctx.policy_revision:
-                raise ValueError(
-                    "stored approval reservation binding does not "
-                    "match the resolved task credential; refusing to "
-                    "trust possibly tampered data")
-            effect = self.approval_decisions._load_prepared(
-                operation_id)
-            if effect is None:
-                raise ValueError(
-                    "stored approval reservation references a missing "
-                    "prepared effect; refusing to trust possibly "
-                    "tampered data")
-            decision = self.approval_decisions._fetch_by_operation(
-                operation_id)
-            if decision is None:
-                raise ValueError(
-                    "stored approval reservation references a missing "
-                    "approval decision; refusing to trust possibly "
-                    "tampered data")
-            self.approval_decisions._check_decision_binding(decision,
-                                                            effect)
-            if decision.decision != "approved":
-                # Only an approved decision can ever back a
-                # reservation; a stored row bound to a denial is
-                # forged history and fails exactly like a missing
-                # operation, so the denial is never upgraded into
-                # availability.
-                raise ApprovalReservationUnavailable(
-                    _UNAVAILABLE_MESSAGE)
-            self._check_reservation_binding(reservation, decision,
-                                            effect)
-            self._check_installation_owner(ctx, record["principal_id"])
-            self.prepared_effects._recheck_scope_fit(
-                ctx, effect.envelope)
-            self._check_validity_chain(ctx, effect, decision,
-                                       reservation.created_at, tx_now)
-            return reservation
-        return self._read(fetch)
+        return self._read(lambda: self._get_current_in_transaction(
+            task_secret, now, origin, operation_id))
+
+    def _get_current_in_transaction(self, task_secret, now, origin,
+                                    operation_id):
+        """Read-only composition seam for trusted host storage components.
+
+        The owning component supplies a fresh transaction on this service's
+        connection. This method never writes, commits or rolls back; the
+        verification and error behavior are shared with the public getter.
+        """
+        if not self.db.in_transaction:
+            raise ValueError("current reservation lookup requires a transaction")
+        # The first real read is what actually establishes the
+        # snapshot and absorbs any lock wait; the effective time is
+        # derived only after it returns, so the wait counts.
+        row = self.db.execute(
+            "SELECT " + _COLUMNS
+            + " FROM host_approval_reservations "
+            "WHERE operation_id = ?", (operation_id,)).fetchone()
+        tx_now = _effective_now(now, origin)
+        ctx = self._resolve_task(task_secret, tx_now)
+        if row is None:
+            raise ApprovalReservationUnavailable(
+                _UNAVAILABLE_MESSAGE)
+        reservation = self._reservation_from_row(row)
+        record = reservation.record
+        if record["task_id"] != ctx.task_id \
+                or record["run_id"] != ctx.run_id:
+            # A foreign operation is indistinguishable from a
+            # missing one.
+            raise ApprovalReservationUnavailable(
+                _UNAVAILABLE_MESSAGE)
+        if record["installation_id"] != ctx.installation_id \
+                or record["company_id"] != ctx.company_id \
+                or record["principal_id"] != ctx.principal_id \
+                or record["member_revision"] != ctx.member_revision \
+                or record["policy_id"] != ctx.policy_id \
+                or record["policy_revision"] != ctx.policy_revision:
+            raise ValueError(
+                "stored approval reservation binding does not "
+                "match the resolved task credential; refusing to "
+                "trust possibly tampered data")
+        effect = self.approval_decisions._load_prepared(
+            operation_id)
+        if effect is None:
+            raise ValueError(
+                "stored approval reservation references a missing "
+                "prepared effect; refusing to trust possibly "
+                "tampered data")
+        decision = self.approval_decisions._fetch_by_operation(
+            operation_id)
+        if decision is None:
+            raise ValueError(
+                "stored approval reservation references a missing "
+                "approval decision; refusing to trust possibly "
+                "tampered data")
+        self.approval_decisions._check_decision_binding(decision,
+                                                        effect)
+        if decision.decision != "approved":
+            # Only an approved decision can ever back a
+            # reservation; a stored row bound to a denial is
+            # forged history and fails exactly like a missing
+            # operation, so the denial is never upgraded into
+            # availability.
+            raise ApprovalReservationUnavailable(
+                _UNAVAILABLE_MESSAGE)
+        self._check_reservation_binding(reservation, decision,
+                                        effect)
+        self._check_installation_owner(ctx, record["principal_id"])
+        self.prepared_effects._recheck_scope_fit(
+            ctx, effect.envelope)
+        self._check_validity_chain(ctx, effect, decision,
+                                   reservation.created_at, tx_now)
+        return reservation
