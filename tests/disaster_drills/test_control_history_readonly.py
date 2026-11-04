@@ -2,8 +2,6 @@
 from contextlib import closing
 import sqlite3
 
-import pytest
-
 from app.facts_tree.recovery_verifier import verify_recovery_package
 from tests import test_facts_tree_recovery_verifier as existing
 from tests.test_facts_tree_backup_assembly import _fingerprint
@@ -63,6 +61,62 @@ def test_known_inflight_history_is_only_a_readonly_verdict_not_revival_protectio
     assert _fingerprint(package) == before
 
 
-@pytest.mark.skip(reason='app/host_approval_reservations.py:128 + app/facts_tree/recovery_verifier.py:529; §8-7: consumed approval/execution state and live recovery admission deferred to R5+; no executor call is not proof against revival')
-def test_consumed_approval_history_needs_later_live_recovery_evidence():
-    """No consumed approval fixture can be claimed from reservation-only history."""
+def test_consumed_approval_history_needs_later_live_recovery_evidence(package, tmp_path):
+    """A consumed approval is a permanent restriction; only an independent
+    CURRENT ledger could ever move a candidate, and a consumed key can never
+    appear as unused there -- reservation/history alone never revives it."""
+    from pathlib import Path
+
+    from app.facts_tree.recovery_approval_decision import (
+        NOT_OPENABLE,
+        R_PERMANENT_CONSUMED,
+        decide_recovery_admission,
+    )
+    from app.facts_tree.recovery_epoch import EvidenceKey
+    from app.facts_tree.recovery_state_store import RecoveryStateStore
+    from tests import test_recovery_approval_e3a as e3a
+    from tests.test_recovery_approval_e3b_decision import proof as current_proof
+
+    # Real host stack: paired owner, policy, credential, prepared effect,
+    # approval, reservation and a recorded admission (consumed chain).
+    scene = e3a.make_audit_scene(package, tmp_path)
+    audit = e3a.audit_scene_run(scene)
+    key = EvidenceKey(*scene['key'])
+    marks = e3a.categories(audit, scene['key'])
+    assert 'A' in marks and marks['A'].states == ('consumed', 'reserved')
+
+    roots = [package, tmp_path / 'source-host.sqlite',
+             Path(scene['repository'].path), scene['paths']['state'],
+             scene['handoff']]
+    before = [_fingerprint(root) for root in roots]
+
+    # 1) The read-only verifier records the consumed operation in its frozen
+    #    approval-audit vocabulary (never as something a rebind could reopen);
+    #    the operation-keyed advisory is the terminal decision only.
+    verdict = verify_recovery_package(package)
+    assert verdict.recoverable
+    audit_info = e3a.report(verdict)
+    assert audit_info['declared']
+    assert audit_info['consumption_operations'] == (key.operation_id,)
+    assert audit_info['failures'] == ()
+    flat = repr(tuple(verdict.approval_audit)) + repr(verdict.blockers)
+    assert 'rebind' not in flat and 'revival' not in flat and 'replay' not in flat
+    assert [item for item in verdict.advisories if key.operation_id in item] == [
+        'host_decided_operation:' + key.operation_id + ':approved']
+
+    # 2) Read-only evidence leaves package and host source byte-identical.
+    assert [_fingerprint(root) for root in roots] == before
+
+    # 3) Even with approval and immutable dependencies valid, a CURRENT proof
+    #    that cannot show this key as unused (consumed keys never can) leaves
+    #    the operation permanently shut at the admission decision boundary.
+    with RecoveryStateStore(scene['paths']['state']) as store:
+        view = store.get(e3a.CASE)
+    decision = decide_recovery_admission(
+        view=view, report=audit, approval_required=(key,),
+        current_proof=current_proof(),
+        current_authorization_valid=True, immutable_dependencies_valid=True)
+    op = decision.verdict_for(key.operation_id)
+    assert op.verdict == NOT_OPENABLE
+    assert op.reason_code == R_PERMANENT_CONSUMED
+    assert [_fingerprint(root) for root in roots] == before
